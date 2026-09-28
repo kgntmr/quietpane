@@ -125,6 +125,11 @@ These need eyes, not assertions:
   never says it a second time however long the heat lasts. Minimise Quietpane first and the taskbar
   icon carries a badge; restore the window and the badge clears. With a "came back" badge already
   showing, that one stays - it is about a choice you made.
+- **The session report.** After a few minutes of watching, press "Save it to my Desktop". One
+  `Quietpane-Session-*.html` appears there and opens in your browser: the figures match the card, the
+  alerts carry the times they were raised, and the gaps are named. Turn the wifi off and open it again
+  - it looks exactly the same, because it fetches nothing. Open it in dark mode and it should still be
+  readable.
 - **How it has been holding up.** The score matches Reliability Monitor (run `perfmon /rel`) and the
   date under it matches the last point on its graph. The programs named match what that report lists
   as stopped working - and Windows Update entries, which fill most of that report, are not counted.

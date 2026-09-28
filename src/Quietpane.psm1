@@ -19,7 +19,7 @@
       * No network requests, no telemetry, no data collection. Everything stays on this PC.
 #>
 
-$script:AppVersion  = '1.17.0'
+$script:AppVersion  = '1.18.0'
 $script:Brand       = @{ Name = 'KomodoWorks'; Url = 'https://www.komodoworks.com'; Email = 'info@komodoworks.com'; Repo = 'https://github.com/kgntmr/quietpane' }
 $script:AssetsRoot  = Join-Path (Split-Path $PSScriptRoot -Parent) 'assets'
 $script:LogSink     = $null
@@ -5238,6 +5238,142 @@ function New-QpDonutSvg {
     return $sb.ToString()
 }
 
+function New-QpSessionReportHtml {
+    <#
+        A session written up as one page you can keep, open offline, or send to whoever is asking why
+        the PC is slow. Same rules as the scan report: no scripts, no fonts or pictures from the
+        internet, and nothing in it that Quietpane did not measure on this PC.
+    #>
+    param([Parameter(Mandatory)]$Watch, $Summary = $null, $Steady = $null, $Now = $null)
+    if (-not $Now) { $Now = Get-Date }
+    if (-not $Summary) { $Summary = Get-QpSessionSummary -Watch $Watch -Now $Now }
+    $enc = { param($s) [System.Net.WebUtility]::HtmlEncode([string]$s) }
+    $logoPath = Join-Path $script:AssetsRoot 'komodoworks-logo.png'
+    $logo = if (Test-Path $logoPath) { 'data:image/png;base64,' + [Convert]::ToBase64String([IO.File]::ReadAllBytes($logoPath)) } else { '' }
+    $started = [datetime]$Watch.Started
+    $ended = if ($Watch.Ended) { [datetime]$Watch.Ended } else { $Now }
+    $sb = New-Object System.Text.StringBuilder
+    [void]$sb.Append(@"
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Quietpane session</title>
+<style>
+$($script:ReportCss)
+.sum{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:24px}.pill{background:var(--card);border:1px solid var(--line);padding:10px 16px;min-width:130px}
+.pill b{font:600 24px/1.2 "Fraunces",Georgia,serif;display:block}.pill span{font-size:13px;color:var(--muted)}
+.head{background:var(--card);border:1px solid var(--line);border-left:4px solid var(--teal);padding:12px 16px;margin-bottom:18px;font-size:17px}
+.a{background:var(--card);border:1px solid var(--line);border-left:4px solid var(--med);padding:10px 14px;margin:8px 0}
+.a.high{border-left-color:var(--high)}
+ul.plain{list-style:none;margin:0;padding:0}ul.plain li{padding:4px 0;border-bottom:1px solid var(--line)}
+table{border-collapse:collapse;width:100%;background:var(--card);border:1px solid var(--line)}
+th,td{text-align:left;padding:8px 12px;border-bottom:1px solid var(--line);font-size:14px}
+th{color:var(--muted);font-weight:600;width:52%}
+</style></head><body>
+<header class="brand"><div class="wrap row">
+$(if ($logo) { '<img src="' + $logo + '" alt="">' })
+<div><h1>Your session</h1><p class="by">Quietpane $($script:AppVersion) &middot; Developed by <a href="$($script:Brand.Url)" rel="noopener noreferrer">KomodoWorks.com</a></p></div>
+</div></header><main><div class="wrap">
+<p class="meta">From $(& $enc (Get-QpStamp 'd MMMM yyyy, HH:mm' $started)) to $(& $enc (Get-QpStamp 'HH:mm' $ended)) &middot; $(& $enc (Format-QpSpan $Summary.Seconds)) &middot; $($Watch.Samples) readings</p>
+<div class="head">$(& $enc $Summary.Headline)</div>
+"@)
+    # The pills: only what this PC actually reported.
+    $pills = New-Object System.Collections.ArrayList
+    if ($null -ne $Watch.PeakCpuTempC) { [void]$pills.Add(('{0:N0} C|hottest the processor got' -f $Watch.PeakCpuTempC)) }
+    if ($null -ne $Watch.PeakGpuTempC) { [void]$pills.Add(('{0:N0} C|hottest graphics got' -f $Watch.PeakGpuTempC)) }
+    if ($null -ne $Watch.PeakCpu) { [void]$pills.Add(('{0:N0}%|busiest the processor got' -f $Watch.PeakCpu)) }
+    if ($null -ne $Watch.PeakMemUsed) { [void]$pills.Add(('{0}|most memory in use' -f (Format-QpBytes $Watch.PeakMemUsed))) }
+    if ($null -ne $Watch.PeakCommitPct) { [void]$pills.Add(('{0:N0}%|most memory promised' -f $Watch.PeakCommitPct)) }
+    if ($null -ne $Watch.PeakDiskBusy) { [void]$pills.Add(('{0:N0}%|busiest the drive got' -f $Watch.PeakDiskBusy)) }
+    if ($pills.Count) {
+        [void]$sb.Append('<div class="sum">')
+        foreach ($p in $pills) {
+            $parts = $p -split '\|'
+            [void]$sb.Append('<div class="pill"><b>' + (& $enc $parts[0]) + '</b><span>' + (& $enc $parts[1]) + '</span></div>')
+        }
+        [void]$sb.Append('</div>')
+    }
+
+    $alerts = @($Watch.Alerts | Where-Object { $_ })
+    if ($alerts.Count) {
+        [void]$sb.Append('<h2>What it spoke up about</h2>')
+        foreach ($a in $alerts) {
+            $cls = if ($a.Level -eq 'high') { 'a high' } else { 'a' }
+            [void]$sb.Append('<div class="' + $cls + '"><b>' + (& $enc (Get-QpStamp 'HH:mm' $a.At)) + '</b> &middot; ' + (& $enc $a.Text) + '</div>')
+        }
+    }
+
+    [void]$sb.Append('<h2>The session</h2><ul class="plain">')
+    foreach ($line in @($Summary.Lines)) { [void]$sb.Append('<li>' + (& $enc $line) + '</li>') }
+    [void]$sb.Append('</ul>')
+
+    # How long it spent in each state, and what was at the top while it did.
+    $rows = New-Object System.Collections.ArrayList
+    [void]$rows.Add(('Watched, with readings|{0}' -f (Format-QpSpan $Watch.WatchedSeconds)))
+    if ($Watch.HotSeconds -ge 1) { [void]$rows.Add(('Hot or hotter|{0}' -f (Format-QpSpan $Watch.HotSeconds))) }
+    if ($Watch.VeryHotSeconds -ge 1) { [void]$rows.Add(('Very hot|{0}' -f (Format-QpSpan $Watch.VeryHotSeconds))) }
+    if ($Watch.HeldBackSeconds -ge 1) { [void]$rows.Add(('Held back to cool off|{0}, over {1} spell(s)' -f (Format-QpSpan $Watch.HeldBackSeconds), $Watch.HeldBackSpells)) }
+    if ($null -ne $Watch.SlowestWhenBusyPct) { [void]$rows.Add(('Least speed it was allowed while busy|{0:N0}%' -f $Watch.SlowestWhenBusyPct)) }
+    if ($Watch.Gaps -gt 0) { [void]$rows.Add(('Not watched - asleep, or Quietpane was busy|{0}, over {1} stretch(es)' -f (Format-QpSpan $Watch.GapSeconds), $Watch.Gaps)) }
+    if ($null -ne $Watch.BatteryStart -and $null -ne $Watch.BatteryEnd) { [void]$rows.Add(('Battery|{0}% to {1}%' -f $Watch.BatteryStart, $Watch.BatteryEnd)) }
+    if ($null -ne $Watch.PeakWatts) { [void]$rows.Add(('Most the battery gave out|{0:N1} W' -f $Watch.PeakWatts)) }
+    [void]$sb.Append('<h2>Where the time went</h2><table>')
+    foreach ($r in $rows) {
+        $parts = $r -split '\|'
+        [void]$sb.Append('<tr><th>' + (& $enc $parts[0]) + '</th><td>' + (& $enc $parts[1]) + '</td></tr>')
+    }
+    [void]$sb.Append('</table>')
+
+    $busy = @($Watch.Busy.GetEnumerator() | Sort-Object Value -Descending | Select-Object -First 8)
+    if ($busy.Count) {
+        [void]$sb.Append('<h2>Busiest, and for how long</h2><table>')
+        foreach ($b in $busy) { [void]$sb.Append('<tr><th>' + (& $enc $b.Key) + '</th><td>' + (& $enc (Format-QpSpan ([double]$b.Value))) + ' at the top</td></tr>') }
+        [void]$sb.Append('</table><p class="meta2">Whoever was using the processor most at each reading. It says who was at the top, not how much work each one did.</p>')
+    }
+
+    if ($Steady -and $Steady.Available) {
+        [void]$sb.Append('<h2>How this PC has been holding up</h2><table>')
+        if ($null -ne $Steady.Score) { [void]$sb.Append('<tr><th>Windows'' own score</th><td>' + ('{0:N1} out of 10, {1}' -f $Steady.Score, (& $enc $Steady.Word)) + '</td></tr>') }
+        [void]$sb.Append('<tr><th>Stopped working in the last ' + $Steady.Days + ' days</th><td>' + ([int]$Steady.Crashes + [int]$Steady.Hangs) + '</td></tr>')
+        [void]$sb.Append('<tr><th>Stopped without warning</th><td>' + [int]$Steady.SuddenStops + '</td></tr>')
+        [void]$sb.Append('</table>')
+    }
+
+    [void]$sb.Append(('<footer>Peaks, never averages: an average hides the moment a PC chokes. Where the readings stop, the report says so rather than drawing a line through the gap. Heat is Windows'' own reading and what the graphics driver shares.<br>This report was made on this PC and was not sent anywhere. It describes your PC, so have a look before sharing it.<br>Quietpane {0} &middot; free and open source (MIT) &middot; Developed by <a href="{1}" rel="noopener noreferrer">KomodoWorks.com</a> &middot; <a href="mailto:{2}">{2}</a></footer></div></main></body></html>' -f $script:AppVersion, $script:Brand.Url, $script:Brand.Email))
+    return $sb.ToString()
+}
+
+function Save-QpSessionReport {
+    <# Writes the session report where you can find it: your Desktop, dated. Returns the path. #>
+    param([Parameter(Mandatory)]$Watch, $Summary = $null, $Steady = $null, [string]$OutFile = '')
+    if (-not $OutFile) {
+        $OutFile = Join-Path ([Environment]::GetFolderPath('Desktop')) ('Quietpane-Session-{0}.html' -f (Get-QpStamp 'yyyyMMdd-HHmm'))
+    }
+    $html = New-QpSessionReportHtml -Watch $Watch -Summary $Summary -Steady $Steady
+    $dir = Split-Path -Path $OutFile -Parent
+    if ($dir -and -not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    [IO.File]::WriteAllText($OutFile, $html, (New-Object Text.UTF8Encoding($false)))
+    Write-QpLog "Session report saved to $OutFile" 'OK'
+    return $OutFile
+}
+
+# The look every report shares, kept in one place so the scan report and the session report cannot
+# drift apart. No web fonts and no stylesheets from the internet: a report opens the same offline.
+$script:ReportCss = @'
+:root{--bg:#faf6ec;--card:#fffdf8;--text:#0f1b1c;--muted:#4b5b5c;--line:#e6dfcc;--anchor:#0f1b1c;--accent:#ffb627;--teal:#117a68;--crit:#7b1d1d;--high:#a83232;--med:#9a6700;--low:#4b5b5c;--info:#117a68}
+@media (prefers-color-scheme:dark){:root{--bg:#0f1b1c;--card:#162627;--text:#faf6ec;--muted:#a9b5b3;--line:#22393a;--teal:#1fa187;--crit:#ff7b7b;--high:#e06666;--med:#ffb627;--low:#a9b5b3;--info:#1fa187}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px/1.55 "Sora","Segoe UI",system-ui,sans-serif}
+header.brand{background:var(--anchor);color:#faf6ec;padding:18px 16px}
+.wrap{max-width:980px;margin:0 auto}.row{display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+.row img{width:48px;height:48px;display:block}
+h1{font:600 26px/1.2 "Fraunces",Georgia,"Times New Roman",serif;margin:0}
+.by{margin:2px 0 0;font-size:13px;color:#d9d3c4}.by a{color:var(--accent);text-decoration:none;font-weight:600}.by a:hover{text-decoration:underline}
+main{padding:24px 16px}p.meta{color:var(--muted);margin:0 0 20px}
+h2{font:600 19px/1.3 "Fraunces",Georgia,serif;margin:28px 0 8px;color:var(--teal)}
+.meta2{color:var(--muted);font-size:13px;margin:4px 0 0}.meta2 b{color:var(--text)}
+pre{white-space:pre-wrap;word-break:break-all;margin:6px 0 0;color:var(--muted);font:13px/1.45 Consolas,monospace}
+footer{border-top:1px solid var(--line);margin-top:32px;padding:16px 0;color:var(--muted);font-size:13px}footer a{color:var(--teal)}
+'@
+
 function New-QpReportHtml {
     param($Findings, [System.Collections.IDictionary]$Counts, [bool]$IsAdmin, [int]$Scanned = 0)
     $enc = { param($s) [System.Net.WebUtility]::HtmlEncode([string]$s) }
@@ -5252,18 +5388,9 @@ function New-QpReportHtml {
 <meta name="referrer" content="no-referrer">
 <title>Quietpane report</title>
 <style>
-:root{--bg:#faf6ec;--card:#fffdf8;--text:#0f1b1c;--muted:#4b5b5c;--line:#e6dfcc;--anchor:#0f1b1c;--accent:#ffb627;--teal:#117a68;--crit:#7b1d1d;--high:#a83232;--med:#9a6700;--low:#4b5b5c;--info:#117a68}
-@media (prefers-color-scheme:dark){:root{--bg:#0f1b1c;--card:#162627;--text:#faf6ec;--muted:#a9b5b3;--line:#22393a;--teal:#1fa187;--crit:#ff7b7b;--high:#e06666;--med:#ffb627;--low:#a9b5b3;--info:#1fa187}}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px/1.55 "Sora","Segoe UI",system-ui,sans-serif}
-header.brand{background:var(--anchor);color:#faf6ec;padding:18px 16px}
-.wrap{max-width:980px;margin:0 auto}.row{display:flex;align-items:center;gap:14px;flex-wrap:wrap}
-.row img{width:48px;height:48px;display:block}
-h1{font:600 26px/1.2 "Fraunces",Georgia,"Times New Roman",serif;margin:0}
-.by{margin:2px 0 0;font-size:13px;color:#d9d3c4}.by a{color:var(--accent);text-decoration:none;font-weight:600}.by a:hover{text-decoration:underline}
-main{padding:24px 16px}p.meta{color:var(--muted);margin:0 0 20px}
+$($script:ReportCss)
 .sum{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:24px}.pill{background:var(--card);border:1px solid var(--line);padding:10px 16px;min-width:110px}
 .pill b{font:600 24px/1.2 "Fraunces",Georgia,serif;display:block}
-h2{font:600 19px/1.3 "Fraunces",Georgia,serif;margin:28px 0 8px;color:var(--teal)}
 .f{background:var(--card);border:1px solid var(--line);border-left:4px solid var(--info);padding:10px 14px;margin:8px 0}
 .f.Critical{border-left-color:var(--crit)}.f.High{border-left-color:var(--high)}.f.Medium{border-left-color:var(--med)}.f.Low{border-left-color:var(--low)}
 .sev{font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;margin-right:8px}
@@ -5273,9 +5400,6 @@ h2{font:600 19px/1.3 "Fraunces",Georgia,serif;margin:28px 0 8px;color:var(--teal
 .legend li{display:flex;align-items:center;gap:10px;padding:3px 0;font-size:14px}
 .legend .k{width:14px;height:14px;flex:0 0 14px;display:inline-block;border:1px solid rgba(0,0,0,.15)}
 .legend .n{margin-left:auto;font-weight:700}.legend li.zero{opacity:.45}
-.meta2{color:var(--muted);font-size:13px;margin:4px 0 0}.meta2 b{color:var(--text)}
-pre{white-space:pre-wrap;word-break:break-all;margin:6px 0 0;color:var(--muted);font:13px/1.45 Consolas,monospace}
-footer{border-top:1px solid var(--line);margin-top:32px;padding:16px 0;color:var(--muted);font-size:13px}footer a{color:var(--teal)}
 </style></head><body>
 <header class="brand"><div class="wrap row">
 "@)
@@ -5326,7 +5450,7 @@ Export-ModuleMember -Function Get-QpInfo, Set-QpLogSink, Write-QpLog, Test-QpAdm
     Get-QpState, Get-QpSystemUsage, Get-QpTotals, New-QpLiveMonitor, Get-QpLiveReading, Get-QpHeatWord, Get-QpProgramName,
     New-QpCounter, New-QpCounterGroup,
     New-QpSessionWatch, Add-QpSessionSample, Stop-QpSessionWatch, Get-QpSessionSummary, Format-QpSpan,
-    Update-QpSessionAlerts, Get-QpReliability,
+    Update-QpSessionAlerts, Get-QpReliability, New-QpSessionReportHtml, Save-QpSessionReport,
     Get-QpBatteryHealth, Get-QpDriveHealth, Get-QpWindowsVersion, Get-QpQuietSnapshot, Update-QpQuietNote, Invoke-QpPutBack,
     Get-QpRestorePoints, Invoke-QpUndo,
     Get-QpPrivacyStatus, Invoke-QpPrivacy,

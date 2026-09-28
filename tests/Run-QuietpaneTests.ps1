@@ -936,6 +936,35 @@ Test-Case 'a battery running out is worth saying, once it really is running out'
     $low = @(Update-QpSessionAlerts -Watch $w -Reading $nearly -Now $sessionStart.AddMinutes(1))
     $none.Count -eq 0 -and $low.Count -eq 1 -and $low[0].Id -eq 'battery' -and $low[0].Text -match '12 minutes left'
 }
+Test-Case 'a session can be written up as a page, with nothing in it that was not measured' {
+    $w = New-TestSession
+    $null = Update-QpSessionAlerts -Watch $w -Reading (New-TestReading -Minutes 6 -CommitPct 95) -Now $sessionStart.AddMinutes(6)
+    $html = New-QpSessionReportHtml -Watch (Stop-QpSessionWatch $w -Now $sessionStart.AddMinutes(31)) -Now $sessionStart.AddMinutes(31)
+    # The same promise the scan report makes: no scripts, and nothing fetched from the internet.
+    [regex]::Matches($html, '<script').Count -eq 0 -and [regex]::Matches($html, 'src="http').Count -eq 0 -and
+    $html -match '97 C' -and $html -match 'hottest the processor got' -and
+    $html -match 'What it spoke up about' -and $html -match 'Windows has promised 95%' -and
+    $html -match 'Where the time went' -and $html -match 'asleep, or Quietpane was busy' -and
+    $html -match '<title>Quietpane session</title>'
+}
+Test-Case 'a report leaves out what the PC never reported' {
+    # A desktop: no temperature, no battery, no promised-memory figure.
+    $w = New-QpSessionWatch -IntervalSeconds 10 -Now $sessionStart
+    foreach ($i in 0..3) { $w = Add-QpSessionSample $w (New-TestReading -Minutes (0.1667 * $i) -Cpu 30 -TempC $null -CommitPct $null) }
+    $html = New-QpSessionReportHtml -Watch $w -Now $sessionStart.AddMinutes(1)
+    $html -notmatch 'hottest the processor got' -and $html -notmatch 'most memory promised' -and
+    $html -notmatch 'Battery' -and $html -match 'busiest the processor got' -and $html.Length -gt 1500
+}
+Test-Case 'saving a report writes one file and nothing else' {
+    $dir = Join-Path $env:TEMP ('qp-report-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    [void][IO.Directory]::CreateDirectory($dir)
+    try {
+        $out = Join-Path $dir 'session.html'
+        $path = Save-QpSessionReport -Watch (New-TestSession) -OutFile $out
+        $files = @(Get-ChildItem $dir -Recurse -File)
+        $path -eq $out -and $files.Count -eq 1 -and (Get-Item $out).Length -gt 1500
+    } finally { [IO.Directory]::Delete($dir, $true) }
+}
 Test-Case 'Windows'' own steadiness record is read, and an update that installed is not a problem' {
     $r = Get-QpReliability -Days 30
     # Whatever this PC says, the shape has to hold and the counts have to be countable.
@@ -1713,7 +1742,7 @@ Test-Case 'every privacy setting has a plain title and a short line, with the fu
     $longTitles.Count -eq 0 -and $longShorts.Count -eq 0 -and $jargon.Count -eq 0
 }
 Test-Case 'the session card names the worst of it, counts the minutes and owns up to the gap' {
-    $cardsOut -match 'session: Stop watching; very hot: True; held back: True; gap owned up to: True; busiest: True; extras: True; stops: True; alerts: memory,drive; said once: True'
+    $cardsOut -match 'session: Stop watching; very hot: True; held back: True; gap owned up to: True; busiest: True; extras: True; stops: True; alerts: memory,drive; said once: True; report: Visible offered, \d{4,} characters, 0 scripts'
 }
 Test-Case 'the steadiness card shows Windows'' score, or says plainly that there isn''t one' {
     $cardsOut -match 'holding up: score: True; crashes named: True; sudden stops: True; awake: True; unscored says so: True'

@@ -723,6 +723,12 @@ $sessionButtons.Margin = Get-Thick '0,10,0,0'
 $script:BtnSession = New-Button 'Watch this session'
 $script:BtnSession.Add_Click({ Switch-SessionWatch })
 [void]$sessionButtons.Children.Add($script:BtnSession)
+# A session lives in this window and goes when it closes - unless you ask for it on paper.
+$script:BtnSessionSave = New-Button 'Save it to my Desktop' '6,0,0,0'
+$script:BtnSessionSave.Visibility = 'Collapsed'
+Set-MoreInfo $script:BtnSessionSave 'Writes one page to your Desktop that you can keep, open without Quietpane, or send to whoever is asking why the PC is slow. It opens no connections and holds nothing but what was measured here.'
+$script:BtnSessionSave.Add_Click({ Save-SessionReport })
+[void]$sessionButtons.Children.Add($script:BtnSessionSave)
 [void]$sessionStack.Children.Add($sessionButtons)
 $sessionNote = New-Text 'It watches only while Quietpane is open, and forgets everything when you close it.' 11.5 'Normal' '#66706F' '0,8,0,0'
 Set-MoreInfo $sessionNote 'Nothing is installed, nothing is scheduled and nothing is written down: the record lives in this window and goes when the window goes. It keeps reading while Quietpane is minimised, which is the whole point, and checks about every 10 seconds while you are not looking at this tab.'
@@ -1256,6 +1262,7 @@ $script:Live = [hashtable]::Synchronized(@{ Reading = $null; Seq = 0; Active = $
     Wake = New-Object System.Threading.AutoResetEvent $false })   # rings the reader awake the moment it is needed
 $script:SessionWatch = $null
 $script:SessionLast = $null
+$script:SessionLastWatch = $null
 $script:SessionShownAt = [datetime]::MinValue
 $script:AlertBadge = $false
 $script:LiveWasActive = $false
@@ -2468,6 +2475,9 @@ function Update-SessionCard {
     <# The session card: what has been watched so far, in the same words as the summary at the end. #>
     $script:SessionShownAt = Get-Date
     $script:SessionLines.Children.Clear()
+    # There is something worth writing up once there are two readings to compare.
+    $enough = ($script:SessionWatch -and $script:SessionWatch.Samples -ge 2) -or ($script:SessionLastWatch -and $script:SessionLastWatch.Samples -ge 2)
+    $script:BtnSessionSave.Visibility = if ($enough) { 'Visible' } else { 'Collapsed' }
     if (-not $script:SessionWatch) {
         $script:BtnSession.Content = 'Watch this session'
         $script:SessionHead.Text = 'Quietpane can keep an eye on how your PC holds up while you work.'
@@ -2494,17 +2504,41 @@ function Update-SessionCard {
 function Switch-SessionWatch {
     <# Starts or stops the session record. Nothing is written down either way. #>
     if ($script:SessionWatch) {
-        $script:SessionLast = Get-QpSessionSummary -Watch (Stop-QpSessionWatch -Watch $script:SessionWatch)
+        $script:SessionLastWatch = Stop-QpSessionWatch -Watch $script:SessionWatch
+        $script:SessionLast = Get-QpSessionSummary -Watch $script:SessionLastWatch
         $script:SessionWatch = $null
         Clear-AlertBadge
         $ui.Status.Text = 'Stopped watching. ' + $script:SessionLast.Headline
     } else {
         $script:SessionWatch = New-QpSessionWatch -IntervalSeconds 10
         $script:SessionLast = $null
+        $script:SessionLastWatch = $null
         [void]$script:Live.Wake.Set()   # start reading now rather than at the next turn of the loop
         $ui.Status.Text = 'Watching how this PC holds up. It stops when you close Quietpane.'
     }
     Update-SessionCard
+}
+
+function Save-SessionReport {
+    <# One page on the Desktop, and then opened, so a session can outlive the window. #>
+    if (Test-Busy) { return }
+    $watch = if ($script:SessionWatch) { $script:SessionWatch } else { $script:SessionLastWatch }
+    if (-not $watch -or $watch.Samples -lt 2) {
+        [void][System.Windows.MessageBox]::Show('There is nothing to write up yet. Give it a minute of watching first.', 'Quietpane')
+        return
+    }
+    $steady = if ($script:Live.Health) { $script:Live.Health.Steady } else { $null }
+    $ui.LogBox.AppendText([Environment]::NewLine)
+    Start-Work -StatusText 'Writing up this session...' -Params @{ Watch = $watch; Steady = $steady } -Work {
+        param($Watch, $Steady)
+        Save-QpSessionReport -Watch $Watch -Steady $Steady
+    } -OnDone {
+        param($r)
+        $path = @($r | Where-Object { $_ -is [string] -and $_ -like '*.html' })[-1]
+        if (-not $path) { return }
+        $ui.Status.Text = 'Saved to your Desktop: ' + (Split-Path $path -Leaf)
+        Open-AsUser $path
+    }
 }
 
 function Update-LiveTiles($r) {
@@ -3562,14 +3596,18 @@ function Test-SessionCard {
     $button = [string]$script:BtnSession.Content
     Switch-SessionWatch   # stop it again: the self-test must leave nothing running
     $after = [string]$script:BtnSession.Content
-    $script:SessionWatch = $null; $script:SessionLast = $null
+    $canSave = [string]$script:BtnSessionSave.Visibility
+    # The report itself, built but never written to disk: the self-test changes nothing.
+    $html = New-QpSessionReportHtml -Watch $script:SessionLastWatch
+    $script:SessionWatch = $null; $script:SessionLast = $null; $script:SessionLastWatch = $null
     Update-SessionCard
-    '{0}; very hot: {1}; held back: {2}; gap owned up to: {3}; busiest: {4}; extras: {5}; stops: {6}; alerts: {7}; said once: {8}' -f
+    '{0}; very hot: {1}; held back: {2}; gap owned up to: {3}; busiest: {4}; extras: {5}; stops: {6}; alerts: {7}; said once: {8}; report: {9}' -f
         $button, [bool]($head -match 'It ran very hot for'), [bool]($lines -match 'Held back to cool off for \d+ seconds, once'),
         [bool]($lines -match 'One stretch went unwatched'), [bool]($lines -match 'Busiest: A game'),
         [bool]($script:LiveExtra.Text -match 'Memory promised to programs: 45%.*Processor speed: 100%.*Disk busy: 26%'),
         [bool]($after -eq 'Watch this session'),
-        (@($raised | ForEach-Object { $_.Id }) -join ','), ($again.Count -eq 0)
+        (@($raised | ForEach-Object { $_.Id }) -join ','), ($again.Count -eq 0),
+        ('{0} offered, {1} characters, {2} scripts' -f $canSave, $html.Length, [regex]::Matches($html, '<script').Count)
 }
 function Test-SteadyCard {
     <#
