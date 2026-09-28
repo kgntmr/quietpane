@@ -557,7 +557,10 @@ function New-Meter([string]$Title, [string]$FillColour) {
 }
 # Live tiles: how hard the PC is working right now, and how warm it is. Same shape as a meter, so the
 # same fill and gain helpers work on them.
-function New-LiveTile([string]$Title, [string]$FillColour) {
+function New-LiveTile([string]$Title, [string]$FillColour, [string]$SparkColour = '') {
+    # The bar can be a light amber because it is a big block; an 8px dot in that same amber would be
+    # too faint on this cream, so the trend's dot uses a darker step of the same hue.
+    if (-not $SparkColour) { $SparkColour = $FillColour }
     $sp = New-Object System.Windows.Controls.StackPanel
     $sp.Width = 150
     $sp.Margin = Get-Thick '0,0,18,4'
@@ -578,6 +581,14 @@ function New-LiveTile([string]$Title, [string]$FillColour) {
     $fill.CornerRadius = New-Object System.Windows.CornerRadius(5)
     $track.Child = $fill
     [void]$sp.Children.Add($track)
+    # The last two minutes under the number, so a spike that has passed is still visible. Each tile is
+    # its own small chart of one thing, which its own heading already names.
+    $spark = New-Object System.Windows.Controls.Canvas
+    $spark.Width = 140; $spark.Height = 26
+    $spark.Margin = Get-Thick '0,6,0,0'
+    $spark.HorizontalAlignment = 'Left'
+    $spark.Visibility = 'Collapsed'
+    [void]$sp.Children.Add($spark)
     $heat = New-Text '' 12.5 'SemiBold' '#117A68' '0,7,0,0'
     $caption = New-Text '' 12 'Normal' '#4B5B5C' '0,2,0,0'
     # "What's using it": the busiest programs right now, one per line.
@@ -588,7 +599,8 @@ function New-LiveTile([string]$Title, [string]$FillColour) {
     $delta = New-Text '' 12.5 'SemiBold' '#117A68' '0,4,0,0'
     $delta.Visibility = 'Collapsed'
     foreach ($x in $heat, $caption, $top, $extra, $delta) { [void]$sp.Children.Add($x) }
-    return [pscustomobject]@{ Border = $sp; Value = $value; Fill = $fill; Heat = $heat; Caption = $caption; Top = $top; Extra = $extra; Delta = $delta; TrackWidth = 140 }
+    return [pscustomobject]@{ Border = $sp; Value = $value; Fill = $fill; Heat = $heat; Caption = $caption; Top = $top; Extra = $extra; Delta = $delta; TrackWidth = 140
+        Spark = $spark; SparkColour = $SparkColour }
 }
 
 $meters = New-Object System.Windows.Controls.WrapPanel
@@ -607,8 +619,8 @@ $liveStack = New-Object System.Windows.Controls.StackPanel
 $liveTiles = New-Object System.Windows.Controls.WrapPanel
 $script:TileCpu    = New-LiveTile 'PROCESSOR' '#117A68'
 $script:TileGpu    = New-LiveTile 'GRAPHICS' '#117A68'
-$script:TileMemory = New-LiveTile 'MEMORY' '#FFB627'
-$script:TileVram   = New-LiveTile 'VIDEO MEMORY' '#FFB627'
+$script:TileMemory = New-LiveTile 'MEMORY' '#FFB627' '#9A6700'
+$script:TileVram   = New-LiveTile 'VIDEO MEMORY' '#FFB627' '#9A6700'
 foreach ($t in $script:TileCpu, $script:TileGpu, $script:TileMemory, $script:TileVram) { [void]$liveTiles.Children.Add($t.Border) }
 [void]$liveStack.Children.Add($liveTiles)
 # Three more things Windows keeps that the tiles have no room for, on one line, and left out when a PC
@@ -714,8 +726,10 @@ $sessionStack = New-Object System.Windows.Controls.StackPanel
 [void]$sessionStack.Children.Add((New-Text 'THIS SESSION' 11.5 'SemiBold' '#4B5B5C' '0,0,0,6'))
 $script:SessionHead = New-Text 'Quietpane can keep an eye on how your PC holds up while you work.' 13.5 'Normal' '#0F1B1C' '0,0,0,2'
 [void]$sessionStack.Children.Add($script:SessionHead)
+$script:SessionChart = New-Object System.Windows.Controls.StackPanel
+[void]$sessionStack.Children.Add($script:SessionChart)
 $script:SessionLines = New-Object System.Windows.Controls.StackPanel
-$script:SessionLines.Margin = Get-Thick '0,4,0,0'
+$script:SessionLines.Margin = Get-Thick '0,10,0,0'
 [void]$sessionStack.Children.Add($script:SessionLines)
 $sessionButtons = New-Object System.Windows.Controls.StackPanel
 $sessionButtons.Orientation = 'Horizontal'
@@ -2374,6 +2388,178 @@ function Update-DriveCard($d) {
     $c.Border.ToolTip = $tip
 }
 
+# The last two minutes of each tile, kept in the window and nowhere else.
+$script:LiveHistory = New-Object System.Collections.ArrayList
+$script:LiveHistoryMax = 60
+
+function Draw-Sparkline($Canvas, $Values, [string]$Colour, [double]$Max = 100) {
+    <#
+        A plain trend line under a number: no axes, no grid, no labels. The line is quiet grey so the
+        number stays the loud thing, and the newest reading carries a dot in the tile's own colour, with
+        a ring in the surface colour so it stays visible where it meets the line.
+    #>
+    $Canvas.Children.Clear()
+    $vals = @($Values | Where-Object { $null -ne $_ } | ForEach-Object { [double]$_ })
+    if ($vals.Count -lt 2) { $Canvas.Visibility = 'Collapsed'; return }
+    $Canvas.Visibility = 'Visible'
+    $w = [double]$Canvas.Width; $h = [double]$Canvas.Height
+    $top = 3.0; $bottom = $h - 3.0        # room for the dot at either extreme
+    $ceiling = [math]::Max(1.0, [double]$Max)
+    $points = New-Object System.Windows.Media.PointCollection
+    for ($i = 0; $i -lt $vals.Count; $i++) {
+        $x = if ($vals.Count -eq 1) { $w } else { $w * $i / ($vals.Count - 1) }
+        $y = $bottom - (($bottom - $top) * [math]::Min(1.0, [math]::Max(0.0, $vals[$i] / $ceiling)))
+        $points.Add((New-Object System.Windows.Point($x, $y)))
+    }
+    # A wash under the line, so a low flat reading reads as a low band rather than a stray underline.
+    $area = New-Object System.Windows.Shapes.Polygon
+    $fillPoints = New-Object System.Windows.Media.PointCollection
+    foreach ($pt in $points) { $fillPoints.Add($pt) }
+    $fillPoints.Add((New-Object System.Windows.Point($points[$points.Count - 1].X, $bottom)))
+    $fillPoints.Add((New-Object System.Windows.Point($points[0].X, $bottom)))
+    $area.Points = $fillPoints
+    $wash = (Get-Brush $Colour).Clone()
+    $wash.Opacity = 0.14
+    $area.Fill = $wash
+    [void]$Canvas.Children.Add($area)
+    $line = New-Object System.Windows.Shapes.Polyline
+    $line.Points = $points
+    $line.Stroke = Get-Brush '#8C9694'     # de-emphasised: the trend, not the headline
+    $line.StrokeThickness = 2
+    $line.StrokeLineJoin = 'Round'
+    $line.StrokeStartLineCap = 'Round'
+    $line.StrokeEndLineCap = 'Round'
+    [void]$Canvas.Children.Add($line)
+    $last = $points[$points.Count - 1]
+    $dot = New-Object System.Windows.Shapes.Ellipse
+    $dot.Width = 8; $dot.Height = 8
+    $dot.Fill = Get-Brush $Colour
+    $dot.Stroke = Get-Brush '#FFFDF8'      # a ring in the surface colour, so it never merges with the line
+    $dot.StrokeThickness = 2
+    [System.Windows.Controls.Canvas]::SetLeft($dot, $last.X - 4)
+    [System.Windows.Controls.Canvas]::SetTop($dot, $last.Y - 4)
+    [void]$Canvas.Children.Add($dot)
+}
+
+function Update-Sparklines($r) {
+    <# One reading onto the end of each tile's trend. Kept in memory only, and only the last two minutes. #>
+    if (-not $r) { return }
+    $gpu = @($r.Gpus) | Select-Object -First 1
+    [void]$script:LiveHistory.Add([pscustomobject]@{
+        Cpu = $r.CpuUsage
+        Gpu = $(if ($gpu) { $gpu.Usage } else { $null })
+        Mem = $(if ($r.MemTotal -gt 0 -and $null -ne $r.MemUsed) { 100 * $r.MemUsed / $r.MemTotal } else { $null })
+        Vram = $(if ($gpu -and $gpu.DedicatedTotal -gt 0) { 100 * $gpu.DedicatedUsed / $gpu.DedicatedTotal } else { $null })
+    })
+    while ($script:LiveHistory.Count -gt $script:LiveHistoryMax) { $script:LiveHistory.RemoveAt(0) }
+    $h = @($script:LiveHistory)
+    Draw-Sparkline $script:TileCpu.Spark    @($h | ForEach-Object { $_.Cpu })  $script:TileCpu.SparkColour
+    Draw-Sparkline $script:TileGpu.Spark    @($h | ForEach-Object { $_.Gpu })  $script:TileGpu.SparkColour
+    Draw-Sparkline $script:TileMemory.Spark @($h | ForEach-Object { $_.Mem })  $script:TileMemory.SparkColour
+    Draw-Sparkline $script:TileVram.Spark   @($h | ForEach-Object { $_.Vram }) $script:TileVram.SparkColour
+    foreach ($t in $script:TileCpu, $script:TileGpu, $script:TileMemory, $script:TileVram) {
+        Set-MoreInfo $t.Spark ('The last {0} readings, about two minutes. The line is quiet on purpose - the number above it is the thing to read.' -f $h.Count)
+    }
+}
+
+# How hot it was, as one colour getting darker and one bar getting taller. Two encodings of the same
+# thing, so it still reads without colour vision, and a legend names each step in words as well.
+# Checked with the palette validator: one hue (14 degrees of spread), lightness steps of 0.06 or more,
+# and the palest step still clears the card it sits on.
+$script:SessionBandColours = @{
+    quiet   = '#CFAB60'
+    hot     = '#AB7409'
+    veryhot = '#5E3A03'
+    gap     = '#E6DFCC'
+}
+$script:SessionBandHeights = @{ quiet = 8; hot = 15; veryhot = 22; gap = 0 }
+# Being held back to cool off is a different measurement, so it gets its own thin row underneath
+# rather than pretending to be a fourth level of heat.
+$script:SessionHeldColour = '#7B1D1D'
+
+function Draw-SessionTimeline($Panel, $Watch) {
+    <#
+        The session end to end: one column per slice of time, coloured by the worst the PC got in it.
+        Worst, not average, because an average hides the very spell this exists to show. A slice nobody
+        watched stays the colour of the track, so a gap looks like a gap.
+    #>
+    $Panel.Children.Clear()
+    if (-not $Watch) { return }
+    $bands = @(Get-QpSessionBands -Watch $Watch -Columns 96)
+    if (-not $bands.Count) { return }
+    # The heat row: a column per slice, growing taller and darker as it got hotter, on a quiet track.
+    $strip = New-Object System.Windows.Controls.StackPanel
+    $strip.Orientation = 'Horizontal'
+    $strip.Margin = Get-Thick '0,8,0,0'
+    # No track behind it: a stretch nobody watched is simply empty, which is what it means, and it
+    # cannot then be mistaken for the palest step of the heat scale.
+    $strip.Height = 22
+    foreach ($b in $bands) {
+        $cell = New-Object System.Windows.Controls.Border
+        $cell.Width = 5
+        $cell.Height = $script:SessionBandHeights[[string]$b.Heat]
+        $cell.VerticalAlignment = 'Bottom'
+        if ($cell.Height -gt 0) { $cell.Background = Get-Brush $script:SessionBandColours[[string]$b.Heat] }
+        [void]$strip.Children.Add($cell)
+    }
+    [System.Windows.Automation.AutomationProperties]::SetName($strip, 'How hot the PC was, from the start of the session to the end')
+    [void]$Panel.Children.Add($strip)
+    # The second row: when the processor was being held back to cool off.
+    if (@($bands | Where-Object { $_.Held }).Count) {
+        $held = New-Object System.Windows.Controls.StackPanel
+        $held.Orientation = 'Horizontal'
+        $held.Margin = Get-Thick '0,2,0,0'
+        foreach ($b in $bands) {
+            $cell = New-Object System.Windows.Controls.Border
+            $cell.Width = 5; $cell.Height = 6
+            if ($b.Held) { $cell.Background = Get-Brush $script:SessionHeldColour }
+            [void]$held.Children.Add($cell)
+        }
+        [System.Windows.Automation.AutomationProperties]::SetName($held, 'When the processor was held back to cool off')
+        [void]$Panel.Children.Add($held)
+    }
+    $from = Get-QpStamp 'HH:mm' ([datetime]$Watch.Started)
+    $to = if ($Watch.Ended) { Get-QpStamp 'HH:mm' ([datetime]$Watch.Ended) } else { 'now' }
+    $axis = New-Object System.Windows.Controls.Grid
+    foreach ($width in '*', 'Auto') { $c = New-Object System.Windows.Controls.ColumnDefinition; $c.Width = $script:GridLength.ConvertFromString($width); [void]$axis.ColumnDefinitions.Add($c) }
+    $left = New-Text $from 11 'Normal' '#66706F' '0,3,0,0'
+    $right = New-Text $to 11 'Normal' '#66706F' '0,3,0,0'
+    [System.Windows.Controls.Grid]::SetColumn($right, 1)
+    [void]$axis.Children.Add($left); [void]$axis.Children.Add($right)
+    $axis.Width = $bands.Count * 5
+    $axis.HorizontalAlignment = 'Left'
+    [void]$Panel.Children.Add($axis)
+
+    # The legend: only what this session actually had, each with its word beside its colour.
+    $seen = @($bands | ForEach-Object { $_.Heat } | Select-Object -Unique)
+    $legend = New-Object System.Windows.Controls.WrapPanel
+    $legend.Margin = Get-Thick '0,6,0,0'
+    function Add-Key([string]$Colour, [string]$Word, [int]$Height) {
+        $item = New-Object System.Windows.Controls.StackPanel
+        $item.Orientation = 'Horizontal'
+        $item.Margin = Get-Thick '0,0,14,0'
+        $key = New-Object System.Windows.Controls.Border
+        $key.Width = 11; $key.Height = $Height
+        # "Not watched" is drawn as nothing, so its key is an empty outline rather than a colour.
+        if ($Colour) { $key.Background = Get-Brush $Colour }
+        else { $key.BorderBrush = Get-Brush '#B9C0BE'; $key.BorderThickness = Get-Thick '1' }
+        $key.VerticalAlignment = 'Center'
+        $key.Margin = Get-Thick '0,0,5,0'
+        [void]$item.Children.Add($key)
+        [void]$item.Children.Add((New-Text $Word 11.5 'Normal' '#4B5B5C' '0'))
+        [void]$legend.Children.Add($item)
+    }
+    foreach ($state in 'veryhot', 'hot', 'quiet', 'gap') {
+        if ($seen -notcontains $state) { continue }
+        $word = @($bands | Where-Object { $_.Heat -eq $state })[0].Word
+        $colour = if ($state -eq 'gap') { '' } else { $script:SessionBandColours[$state] }
+        # The key is the height of its own column, so the legend shows the shape as well as the colour.
+        Add-Key $colour $word ([math]::Max(9, $script:SessionBandHeights[$state]))
+    }
+    if (@($bands | Where-Object { $_.Held }).Count) { Add-Key $script:SessionHeldColour 'held back to cool off' 6 }
+    [void]$Panel.Children.Add($legend)
+}
+
 function Update-LiveExtra($r) {
     <#
         The three numbers that explain a slow PC when the tiles all look fine: what Windows has promised
@@ -2475,6 +2661,7 @@ function Update-SessionCard {
     <# The session card: what has been watched so far, in the same words as the summary at the end. #>
     $script:SessionShownAt = Get-Date
     $script:SessionLines.Children.Clear()
+    Draw-SessionTimeline $script:SessionChart $(if ($script:SessionWatch) { $script:SessionWatch } else { $script:SessionLastWatch })
     # There is something worth writing up once there are two readings to compare.
     $enough = ($script:SessionWatch -and $script:SessionWatch.Samples -ge 2) -or ($script:SessionLastWatch -and $script:SessionLastWatch.Samples -ge 2)
     $script:BtnSessionSave.Visibility = if ($enough) { 'Visible' } else { 'Collapsed' }
@@ -2545,6 +2732,7 @@ function Update-LiveTiles($r) {
     <# Paints one reading onto the four tiles. Anything the PC doesn't share says so plainly. #>
     if (-not $r) { return }
     Update-LiveExtra $r
+    Update-Sparklines $r
     $deg = [char]0x00B0
 
     $t = $script:TileCpu
@@ -3597,17 +3785,25 @@ function Test-SessionCard {
     Switch-SessionWatch   # stop it again: the self-test must leave nothing running
     $after = [string]$script:BtnSession.Content
     $canSave = [string]$script:BtnSessionSave.Visibility
+    # The timeline, as drawn: how many columns, and how many of them the gap swallowed.
+    $bands = @(Get-QpSessionBands -Watch $script:SessionLastWatch -Columns 96)
+    $legend = @($script:SessionChart.Children | Where-Object { $_ -is [System.Windows.Controls.WrapPanel] })
+    $drawn = '{0} columns, {1} a gap, {2} held back, {3} legend words' -f $bands.Count,
+        @($bands | Where-Object { $_.Heat -eq 'gap' }).Count,
+        @($bands | Where-Object { $_.Held }).Count,
+        $(if ($legend.Count) { $legend[0].Children.Count } else { 0 })
     # The report itself, built but never written to disk: the self-test changes nothing.
     $html = New-QpSessionReportHtml -Watch $script:SessionLastWatch
     $script:SessionWatch = $null; $script:SessionLast = $null; $script:SessionLastWatch = $null
     Update-SessionCard
-    '{0}; very hot: {1}; held back: {2}; gap owned up to: {3}; busiest: {4}; extras: {5}; stops: {6}; alerts: {7}; said once: {8}; report: {9}' -f
+    '{0}; very hot: {1}; held back: {2}; gap owned up to: {3}; busiest: {4}; extras: {5}; stops: {6}; alerts: {7}; said once: {8}; report: {9}; timeline: {10}' -f
         $button, [bool]($head -match 'It ran very hot for'), [bool]($lines -match 'Held back to cool off for \d+ seconds, once'),
         [bool]($lines -match 'One stretch went unwatched'), [bool]($lines -match 'Busiest: A game'),
         [bool]($script:LiveExtra.Text -match 'Memory promised to programs: 45%.*Processor speed: 100%.*Disk busy: 26%'),
         [bool]($after -eq 'Watch this session'),
         (@($raised | ForEach-Object { $_.Id }) -join ','), ($again.Count -eq 0),
-        ('{0} offered, {1} characters, {2} scripts' -f $canSave, $html.Length, [regex]::Matches($html, '<script').Count)
+        ('{0} offered, {1} characters, {2} scripts' -f $canSave, $html.Length, [regex]::Matches($html, '<script').Count),
+        $drawn
 }
 function Test-SteadyCard {
     <#

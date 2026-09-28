@@ -19,7 +19,7 @@
       * No network requests, no telemetry, no data collection. Everything stays on this PC.
 #>
 
-$script:AppVersion  = '1.18.0'
+$script:AppVersion  = '1.19.0'
 $script:Brand       = @{ Name = 'KomodoWorks'; Url = 'https://www.komodoworks.com'; Email = 'info@komodoworks.com'; Repo = 'https://github.com/kgntmr/quietpane' }
 $script:AssetsRoot  = Join-Path (Split-Path $PSScriptRoot -Parent) 'assets'
 $script:LogSink     = $null
@@ -892,7 +892,61 @@ function New-QpSessionWatch {
         BatteryStart = $null; BatteryEnd = $null; PeakWatts = $null
         Busy = @{}
         Alerts = (New-Object System.Collections.ArrayList)
+        # One mark per reading, so the session can be drawn as well as described. Each holds how the PC
+        # was at that moment and for how long, which is all a timeline needs.
+        Marks = (New-Object System.Collections.ArrayList)
     }
+}
+
+# How hot the PC was at one moment, worst first. A timeline is stepped by these - darker and taller as
+# it gets worse - and a legend names each one, so the picture never rests on colour alone. Being held
+# back to cool off is a different measurement, not a fourth level of heat, so it rides its own row.
+$script:SessionStates = [ordered]@{
+    veryhot = @{ Rank = 3; Word = 'very hot' }
+    hot     = @{ Rank = 2; Word = 'hot' }
+    quiet   = @{ Rank = 1; Word = 'comfortable' }
+    gap     = @{ Rank = 0; Word = 'not watched' }
+}
+
+function Get-QpSessionBands {
+    <#
+        The session squeezed into a fixed number of columns, for drawing. Each column says the worst the
+        PC got during the slice of time it covers - worst, never average, because an average would hide
+        the very spell a timeline exists to show. A slice with no readings in it stays a gap.
+    #>
+    param([Parameter(Mandatory)]$Watch, [int]$Columns = 120, $Now = $null)
+    $marks = @($Watch.Marks | Where-Object { $_ })
+    if (-not $marks.Count) { return @() }
+    if (-not $Now) { $Now = Get-Date }
+    $from = [datetime]$Watch.Started
+    $to = if ($Watch.Ended) { [datetime]$Watch.Ended } else { $Now }
+    $span = ($to - $from).TotalSeconds
+    if ($span -le 0) { $span = 1 }
+    $Columns = [math]::Max(1, $Columns)
+    $bins = New-Object 'string[]' $Columns
+    $held = New-Object 'bool[]' $Columns
+    foreach ($m in $marks) {
+        # A mark covers the stretch that ended at its own moment, so it fills every column it touches.
+        $endAt = (([datetime]$m.At) - $from).TotalSeconds
+        $startAt = $endAt - [double]$m.Seconds
+        $first = [int][math]::Floor(($startAt / $span) * $Columns)
+        $last = [int][math]::Floor((($endAt - 0.0001) / $span) * $Columns)
+        if ($last -lt $first) { $last = $first }
+        for ($i = [math]::Max(0, $first); $i -le [math]::Min($Columns - 1, $last); $i++) {
+            $have = $bins[$i]
+            if (-not $have -or $script:SessionStates[[string]$m.Heat].Rank -gt $script:SessionStates[$have].Rank) { $bins[$i] = [string]$m.Heat }
+            if ($m.Held) { $held[$i] = $true }
+        }
+    }
+    $out = New-Object System.Collections.ArrayList
+    for ($i = 0; $i -lt $Columns; $i++) {
+        $state = if ($bins[$i]) { $bins[$i] } else { 'gap' }
+        [void]$out.Add([pscustomobject]@{
+            Index = $i; Heat = $state; Word = $script:SessionStates[$state].Word; Held = $held[$i]
+            At = $from.AddSeconds($span * $i / $Columns)
+        })
+    }
+    return @($out)
 }
 
 function Add-QpSessionSample {
@@ -910,9 +964,14 @@ function Add-QpSessionSample {
         $span = ($at - [datetime]$Watch.LastAt).TotalSeconds
         if ($span -lt 0) { $span = 0 }
         if ($span -gt ($Watch.IntervalSeconds * 3)) {
+            # All of it is unwatched except the usual step this reading itself stands for - that much is
+            # known, and it is what lets the timeline show the PC coming back rather than ending in
+            # a hole. The gap goes on at its true length, so the hole is never stretched over.
+            $missed = $span - $Watch.IntervalSeconds
             $Watch.Gaps++
-            $Watch.GapSeconds += $span
-            $span = 0   # nothing is known about that time, so nothing is claimed about it
+            $Watch.GapSeconds += $missed
+            [void]$Watch.Marks.Add([pscustomobject]@{ At = $at.AddSeconds(-$Watch.IntervalSeconds); Seconds = $missed; Heat = 'gap'; Held = $false })
+            $span = $Watch.IntervalSeconds
         }
     }
     $Watch.LastAt = $at
@@ -964,6 +1023,26 @@ function Add-QpSessionSample {
         if ($null -eq $Watch.BatteryStart) { $Watch.BatteryStart = [int]$Reading.Battery.Percent }
         $Watch.BatteryEnd = [int]$Reading.Battery.Percent
         if ($Reading.Battery.Direction -eq 'draining') { Set-Peak 'PeakWatts' $Reading.Battery.Watts }
+    }
+
+    # One mark for the stretch this reading stands for: how hot it was, and whether the brake was on.
+    # Both are kept, because they are two different things and a drawing of the session shows both.
+    if ($span -gt 0) {
+        $heat = if ($level -eq 'high') { 'veryhot' } elseif ($level -eq 'warn') { 'hot' } else { 'quiet' }
+        [void]$Watch.Marks.Add([pscustomobject]@{ At = $at; Seconds = $span; Heat = $heat; Held = [bool]$Reading.CpuThrottled })
+        # A very long session is thinned rather than left to grow: neighbours merge, keeping the worse
+        # of the two, so the shape of the session survives and nothing is quietly dropped.
+        if ($Watch.Marks.Count -gt 4320) {
+            $merged = New-Object System.Collections.ArrayList
+            for ($i = 0; $i -lt $Watch.Marks.Count; $i += 2) {
+                $a = $Watch.Marks[$i]
+                $b = if ($i + 1 -lt $Watch.Marks.Count) { $Watch.Marks[$i + 1] } else { $null }
+                if (-not $b) { [void]$merged.Add($a); continue }
+                $worst = if ($script:SessionStates[[string]$b.Heat].Rank -gt $script:SessionStates[[string]$a.Heat].Rank) { $b.Heat } else { $a.Heat }
+                [void]$merged.Add([pscustomobject]@{ At = $b.At; Seconds = ([double]$a.Seconds + [double]$b.Seconds); Heat = $worst; Held = ($a.Held -or $b.Held) })
+            }
+            $Watch.Marks = $merged
+        }
     }
 
     # Who was at the top of the list, and for how long. One name per reading keeps it honest: it is
@@ -5268,6 +5347,19 @@ ul.plain{list-style:none;margin:0;padding:0}ul.plain li{padding:4px 0;border-bot
 table{border-collapse:collapse;width:100%;background:var(--card);border:1px solid var(--line)}
 th,td{text-align:left;padding:8px 12px;border-bottom:1px solid var(--line);font-size:14px}
 th{color:var(--muted);font-weight:600;width:52%}
+svg.tl{display:block;margin-top:4px;shape-rendering:crispEdges}
+.tlax{display:flex;justify-content:space-between;color:var(--muted);font-size:12px;margin-top:3px}
+ul.key{list-style:none;display:flex;flex-wrap:wrap;gap:16px;margin:10px 0 0;padding:0;font-size:13px;color:var(--muted)}
+ul.key li{display:flex;align-items:center;gap:6px}
+ul.key i{width:12px;height:12px;display:inline-block}
+/* One hue in steps, checked against the card it sits on. Dark mode has its own steps, not a flip. */
+.b-quiet{fill:#CFAB60}.b-hot{fill:#AB7409}.b-veryhot{fill:#5E3A03}.b-held{fill:#7B1D1D}
+.k-quiet{background:#CFAB60}.k-hot{background:#AB7409}.k-veryhot{background:#5E3A03}.k-held{background:#7B1D1D}
+.k-none{border:1px solid var(--line)}
+@media (prefers-color-scheme:dark){
+.b-quiet{fill:#6E5726}.b-hot{fill:#C58A1A}.b-veryhot{fill:#EFC05A}.b-held{fill:#FF7B7B}
+.k-quiet{background:#6E5726}.k-hot{background:#C58A1A}.k-veryhot{background:#EFC05A}.k-held{background:#FF7B7B}
+}
 </style></head><body>
 <header class="brand"><div class="wrap row">
 $(if ($logo) { '<img src="' + $logo + '" alt="">' })
@@ -5276,6 +5368,38 @@ $(if ($logo) { '<img src="' + $logo + '" alt="">' })
 <p class="meta">From $(& $enc (Get-QpStamp 'd MMMM yyyy, HH:mm' $started)) to $(& $enc (Get-QpStamp 'HH:mm' $ended)) &middot; $(& $enc (Format-QpSpan $Summary.Seconds)) &middot; $($Watch.Samples) readings</p>
 <div class="head">$(& $enc $Summary.Headline)</div>
 "@)
+    # The session drawn end to end, as one strip of colour with the words beside it. Inline SVG, so it
+    # needs nothing from the internet and nothing runs.
+    $bands = @(Get-QpSessionBands -Watch $Watch -Columns 188 -Now $Now)
+    if ($bands.Count) {
+        # Colour by CSS class, never a fixed fill: dark mode gets its own steps, chosen for the dark
+        # card rather than flipped, and a light cream "nothing here" would shout on a dark page.
+        $heights = @{ quiet = 10; hot = 19; veryhot = 28; gap = 0 }
+        $cell = 5; $band = 28; $heldRow = 6; $height = $band + 3 + $heldRow
+        $width = $bands.Count * $cell
+        $anyHeld = @($bands | Where-Object { $_.Held }).Count -gt 0
+        [void]$sb.Append('<h2>The session, start to finish</h2>')
+        [void]$sb.Append('<svg class="tl" viewBox="0 0 ' + $width + ' ' + $height + '" width="100%" height="' + $height + '" role="img" aria-label="' + (& $enc ('How hot the PC was from {0} to {1}, and when it was held back to cool off' -f (Get-QpStamp 'HH:mm' $started), (Get-QpStamp 'HH:mm' $ended))) + '">')
+        foreach ($b in $bands) {
+            $h = $heights[[string]$b.Heat]
+            if ($h -gt 0) { [void]$sb.Append('<rect class="b-' + $b.Heat + '" x="' + ($b.Index * $cell) + '" y="' + ($band - $h) + '" width="' + $cell + '" height="' + $h + '"/>') }
+            if ($b.Held) { [void]$sb.Append('<rect class="b-held" x="' + ($b.Index * $cell) + '" y="' + ($band + 3) + '" width="' + $cell + '" height="' + $heldRow + '"/>') }
+        }
+        [void]$sb.Append('</svg>')
+        [void]$sb.Append('<div class="tlax"><span>' + (& $enc (Get-QpStamp 'HH:mm' $started)) + '</span><span>' + (& $enc (Get-QpStamp 'HH:mm' $ended)) + '</span></div>')
+        $seen = @($bands | ForEach-Object { $_.Heat } | Select-Object -Unique)
+        [void]$sb.Append('<ul class="key">')
+        foreach ($state in 'veryhot', 'hot', 'quiet', 'gap') {
+            if ($seen -notcontains $state) { continue }
+            $word = @($bands | Where-Object { $_.Heat -eq $state })[0].Word
+            # "Not watched" is drawn as nothing at all, so its key is an outline, not a colour.
+            $cls = if ($state -eq 'gap') { 'k-none' } else { 'k-' + $state }
+            [void]$sb.Append('<li><i class="' + $cls + '"></i>' + (& $enc $word) + '</li>')
+        }
+        if ($anyHeld) { [void]$sb.Append('<li><i class="k-held"></i>held back to cool off</li>') }
+        [void]$sb.Append('</ul>')
+    }
+
     # The pills: only what this PC actually reported.
     $pills = New-Object System.Collections.ArrayList
     if ($null -ne $Watch.PeakCpuTempC) { [void]$pills.Add(('{0:N0} C|hottest the processor got' -f $Watch.PeakCpuTempC)) }
@@ -5450,7 +5574,7 @@ Export-ModuleMember -Function Get-QpInfo, Set-QpLogSink, Write-QpLog, Test-QpAdm
     Get-QpState, Get-QpSystemUsage, Get-QpTotals, New-QpLiveMonitor, Get-QpLiveReading, Get-QpHeatWord, Get-QpProgramName,
     New-QpCounter, New-QpCounterGroup,
     New-QpSessionWatch, Add-QpSessionSample, Stop-QpSessionWatch, Get-QpSessionSummary, Format-QpSpan,
-    Update-QpSessionAlerts, Get-QpReliability, New-QpSessionReportHtml, Save-QpSessionReport,
+    Update-QpSessionAlerts, Get-QpReliability, New-QpSessionReportHtml, Save-QpSessionReport, Get-QpSessionBands,
     Get-QpBatteryHealth, Get-QpDriveHealth, Get-QpWindowsVersion, Get-QpQuietSnapshot, Update-QpQuietNote, Invoke-QpPutBack,
     Get-QpRestorePoints, Invoke-QpUndo,
     Get-QpPrivacyStatus, Invoke-QpPrivacy,

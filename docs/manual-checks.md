@@ -125,6 +125,15 @@ These need eyes, not assertions:
   never says it a second time however long the heat lasts. Minimise Quietpane first and the taskbar
   icon carries a badge; restore the window and the badge clears. With a "came back" badge already
   showing, that one stays - it is about a choice you made.
+- **The trend under each tile.** Open Health and leave it a minute: a line grows under each number with
+  a dot on the newest reading. Start something heavy and the line climbs where Task Manager's graph
+  climbs, at the same moment. Switch tabs for five minutes and come back - the line starts again rather
+  than drawing a straight line across the time nobody was reading.
+- **The session timeline.** While watching, the strip under the headline grows from the left. Run
+  something heavy: the columns get taller and darker, and the thin row underneath fills in while the
+  processor is held back. Put the PC to sleep and wake it: that stretch is blank, not stretched over.
+  Squint, or turn the screen to greyscale - the heights alone should still tell you where the bad spell
+  was, and every colour in it is named in the legend.
 - **The session report.** After a few minutes of watching, press "Save it to my Desktop". One
   `Quietpane-Session-*.html` appears there and opens in your browser: the figures match the card, the
   alerts carry the times they were raised, and the gaps are named. Turn the wifi off and open it again

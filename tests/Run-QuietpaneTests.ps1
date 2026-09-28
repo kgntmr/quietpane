@@ -880,7 +880,7 @@ Test-Case 'a stretch with no readings is a gap, never drawn through' {
     $w = New-TestSession
     $s = Get-QpSessionSummary -Watch (Stop-QpSessionWatch $w -Now $sessionStart.AddMinutes(31)) -Now $sessionStart.AddMinutes(31)
     # The half-hour asleep is not counted as time spent hot, and the summary owns up to it.
-    $w.Gaps -eq 1 -and [math]::Round($w.GapSeconds) -eq 1800 -and [math]::Round($w.WatchedSeconds) -eq 60 -and
+    $w.Gaps -eq 1 -and [math]::Round($w.GapSeconds) -eq 1790 -and [math]::Round($w.WatchedSeconds) -eq 70 -and
     @($s.Lines | Where-Object { $_ -match 'One stretch went unwatched, 30 minutes in all' }).Count -eq 1
 }
 Test-Case 'a processor idling at a low clock is never called throttling' {
@@ -935,6 +935,26 @@ Test-Case 'a battery running out is worth saying, once it really is running out'
     $none = @(Update-QpSessionAlerts -Watch $w -Reading $plenty -Now $sessionStart)
     $low = @(Update-QpSessionAlerts -Watch $w -Reading $nearly -Now $sessionStart.AddMinutes(1))
     $none.Count -eq 0 -and $low.Count -eq 1 -and $low[0].Id -eq 'battery' -and $low[0].Text -match '12 minutes left'
+}
+Test-Case 'the session draws as a timeline: worst wins a column, and a gap stays a gap' {
+    $w = New-TestSession
+    $bands = @(Get-QpSessionBands -Watch (Stop-QpSessionWatch $w -Now $sessionStart.AddMinutes(31)) -Columns 60 -Now $sessionStart.AddMinutes(31))
+    $shape = ($bands | ForEach-Object { switch ($_.Heat) { 'quiet' { '.' } 'hot' { 'h' } 'veryhot' { 'V' } 'gap' { ' ' } } }) -join ''
+    # A minute quiet, a minute very hot and held back, then half an hour asleep, then a moment back.
+    $bands.Count -eq 60 -and $shape -match '^V+ +\.$' -and
+    @($bands | Where-Object { $_.Heat -eq 'gap' }).Count -gt 50 -and
+    # Held back rides its own row, so it never hides how hot it was.
+    @($bands | Where-Object { $_.Held }).Count -ge 1 -and
+    @($bands | Where-Object { $_.Held -and $_.Heat -eq 'veryhot' }).Count -ge 1
+}
+Test-Case 'a column takes the worst of what it covers, never the average' {
+    # One very hot moment inside a run of comfortable ones must still show as very hot.
+    $w = New-QpSessionWatch -IntervalSeconds 10 -Now $sessionStart
+    foreach ($i in 0..9) { $w = Add-QpSessionSample $w (New-TestReading -Minutes (0.1667 * $i) -TempC 50) }
+    $w = Add-QpSessionSample $w (New-TestReading -Minutes (0.1667 * 10) -TempC 98)
+    foreach ($i in 11..20) { $w = Add-QpSessionSample $w (New-TestReading -Minutes (0.1667 * $i) -TempC 50) }
+    $bands = @(Get-QpSessionBands -Watch $w -Columns 4 -Now $sessionStart.AddMinutes(3.5))
+    @($bands | Where-Object { $_.Heat -eq 'veryhot' }).Count -ge 1
 }
 Test-Case 'a session can be written up as a page, with nothing in it that was not measured' {
     $w = New-TestSession
@@ -1742,7 +1762,7 @@ Test-Case 'every privacy setting has a plain title and a short line, with the fu
     $longTitles.Count -eq 0 -and $longShorts.Count -eq 0 -and $jargon.Count -eq 0
 }
 Test-Case 'the session card names the worst of it, counts the minutes and owns up to the gap' {
-    $cardsOut -match 'session: Stop watching; very hot: True; held back: True; gap owned up to: True; busiest: True; extras: True; stops: True; alerts: memory,drive; said once: True; report: Visible offered, \d{4,} characters, 0 scripts'
+    $cardsOut -match 'session: Stop watching; very hot: True; held back: True; gap owned up to: True; busiest: True; extras: True; stops: True; alerts: memory,drive; said once: True; report: Visible offered, \d{4,} characters, 0 scripts; timeline: 96 columns, 92 a gap, 3 held back, 4 legend words'
 }
 Test-Case 'the steadiness card shows Windows'' score, or says plainly that there isn''t one' {
     $cardsOut -match 'holding up: score: True; crashes named: True; sudden stops: True; awake: True; unscored says so: True'

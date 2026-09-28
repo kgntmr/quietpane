@@ -24,6 +24,7 @@ Developed by KomodoWorks.com  |  free  |  open source  |  collects nothing
 ALSO IN THE APP
    Health     How hard your PC is working, how warm it is, which programs
               are busiest, and how the battery and drive are holding up.
+              Each figure carries the last two minutes under it.
               "Watch this session" keeps an eye on it while you work and
               tells you afterwards how hot it got, when it was held back
               to cool off, and how far memory went. It speaks up once if
