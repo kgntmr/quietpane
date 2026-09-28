@@ -694,7 +694,13 @@ $script:DriveCard = New-Meter 'THE DRIVE WINDOWS IS ON' '#117A68'
 $script:DriveHeatText = New-Text '' 12.5 'SemiBold' '#117A68' '0,6,0,0'
 [void]$script:DriveCard.Border.Child.Children.Add($script:DriveHeatText)
 $script:DriveCard.Value.Text = 'Having a look...'
-foreach ($c in $script:BatteryCard, $script:DriveCard) { [void]$healthCards.Children.Add($c.Border) }
+# Windows keeps its own record of how steady this PC has been. Almost nobody ever opens it.
+$script:SteadyCard = New-Meter 'HOW IT HAS BEEN HOLDING UP' '#117A68'
+$script:SteadyLines = New-Object System.Windows.Controls.StackPanel
+$script:SteadyLines.Margin = Get-Thick '0,6,0,0'
+[void]$script:SteadyCard.Border.Child.Children.Add($script:SteadyLines)
+$script:SteadyCard.Value.Text = 'Having a look...'
+foreach ($c in $script:BatteryCard, $script:DriveCard, $script:SteadyCard) { [void]$healthCards.Children.Add($c.Border) }
 [void]$healthPanel.Children.Add($healthCards)
 
 # What a whole session cost, for anyone who wants to know how their PC held up while they worked.
@@ -1251,6 +1257,7 @@ $script:Live = [hashtable]::Synchronized(@{ Reading = $null; Seq = 0; Active = $
 $script:SessionWatch = $null
 $script:SessionLast = $null
 $script:SessionShownAt = [datetime]::MinValue
+$script:AlertBadge = $false
 $script:LiveWasActive = $false
 $script:NetSeqShown = 0
 $script:LiveSeqShown = 0
@@ -1287,7 +1294,14 @@ function Start-LiveSampler {
                 # Battery and drive health change slowly: read on opening, then every five minutes.
                 if (((Get-Date) - $healthAt).TotalMinutes -ge 5) {
                     try {
-                        $Live.Health = @{ Battery = Get-QpBatteryHealth; Drive = Get-QpDriveHealth }
+                        # Free space is here too: it is what the "drive is filling up" warning needs, and
+                        # it changes far too slowly to be worth asking about every two seconds.
+                        $free = $null
+                        try {
+                            $d = New-Object IO.DriveInfo ($env:SystemDrive + '\')
+                            if ($d.TotalSize -gt 0) { $free = 100 * $d.AvailableFreeSpace / $d.TotalSize }
+                        } catch { }
+                        $Live.Health = @{ Battery = Get-QpBatteryHealth; Drive = Get-QpDriveHealth; Steady = Get-QpReliability; FreePct = $free }
                         $Live.HealthSeq = $Live.HealthSeq + 1
                     } catch { }
                     $healthAt = Get-Date
@@ -1329,6 +1343,7 @@ $timer.Add_Tick({
     # Readings are taken while the Health tab is showing - and, if you asked it to watch the session,
     # while you are somewhere else as well, but then only every ten seconds.
     $onHealth = ([string]$ui.Tabs.SelectedItem.Tag -eq 'health') -and ($window.WindowState -ne 'Minimized')
+    if ($script:AlertBadge -and $window.WindowState -ne 'Minimized') { Clear-AlertBadge }
     $script:Live.Active = $onHealth -or ($null -ne $script:SessionWatch)
     $script:Live.Slow = (-not $onHealth) -and ($null -ne $script:SessionWatch)
     $script:Live.NetActive = ([string]$ui.Tabs.SelectedItem.Tag -eq 'privacy') -and $script:NetSection.Expander.IsExpanded -and ($window.WindowState -ne 'Minimized')
@@ -1342,11 +1357,18 @@ $timer.Add_Tick({
     if ($script:Live.HealthSeq -ne $script:HealthSeqShown) {
         $script:HealthSeqShown = $script:Live.HealthSeq
         try { $script:BatteryHealth = $script:Live.Health.Battery; Update-DriveCard $script:Live.Health.Drive } catch { }
+        try { Update-SteadyCard $script:Live.Health.Steady } catch { }
     }
     if ($script:Live.Seq -ne $script:LiveSeqShown) {
         $script:LiveSeqShown = $script:Live.Seq
         # The record is kept whether or not the tab is in front: that is what makes it a session.
-        if ($script:SessionWatch) { try { [void](Add-QpSessionSample -Watch $script:SessionWatch -Reading $script:Live.Reading) } catch { } }
+        if ($script:SessionWatch) {
+            try {
+                [void](Add-QpSessionSample -Watch $script:SessionWatch -Reading $script:Live.Reading)
+                $free = if ($script:Live.Health) { $script:Live.Health.FreePct } else { $null }
+                Show-SessionAlerts (Update-QpSessionAlerts -Watch $script:SessionWatch -Reading $script:Live.Reading -FreePct $free)
+            } catch { }
+        }
         try { Update-LiveTiles $script:Live.Reading } catch { }   # a reading must never be able to break the window
     }
     if ($script:SessionWatch -and ((Get-Date) - $script:SessionShownAt).TotalSeconds -ge 2) { try { Update-SessionCard } catch { } }
@@ -2364,6 +2386,84 @@ function Update-LiveExtra($r) {
     $script:LiveExtra.Visibility = if ($bits.Count) { 'Visible' } else { 'Collapsed' }
 }
 
+function Update-SteadyCard($r) {
+    <#
+        Windows' own record of how steady this PC has been: its score out of ten, what has crashed, and
+        how long the PC has been awake. Where Windows has kept no score, the card says so.
+    #>
+    $c = $script:SteadyCard
+    $script:SteadyLines.Children.Clear()
+    if (-not $r -or -not $r.Available) {
+        $c.Value.Text = 'Not scored'
+        $c.Caption.Text = "Windows hasn't kept a record on this PC"
+        Set-MeterFill $c 0
+        return
+    }
+    if ($null -ne $r.Score) {
+        $c.Value.Text = '{0:N1} / 10' -f $r.Score
+        $c.Caption.Text = $r.Word + $(if ($r.ScoreWhen) { ', as of ' + (Format-QpWhen $r.ScoreWhen) } else { '' })
+        Set-MeterFill $c ([double]$r.Score / 10)
+        $c.Value.Foreground = Get-Brush $(if ($r.Score -lt 7) { $script:HeatColours.warn } else { '#0F1B1C' })
+    } else {
+        $c.Value.Text = 'Not scored'
+        $c.Caption.Text = "Windows hasn't worked out a score yet"
+        Set-MeterFill $c 0
+    }
+    Set-MoreInfo $c.Border ("Windows' own score, out of ten, from the record behind Reliability Monitor. It drops on a day something crashed and climbs back as quiet days pass, so it is a shape over weeks rather than a verdict on today. What crashed is read from the event log for the last {0} days; Windows Update and installer entries are left out, because an update that installed is not a problem." -f $r.Days)
+
+    $lines = @()
+    $broke = [int]$r.Crashes + [int]$r.Hangs
+    if ($broke -eq 0) {
+        $lines += "Nothing has crashed in $($r.Days) days."
+    } else {
+        $what = if ($broke -eq 1) { '1 program stopped working' } else { "$broke programs stopped working" }
+        $worst = @($r.Programs | Select-Object -First 1)
+        $line = "$what in $($r.Days) days"
+        if ($worst -and $worst[0].Count -gt 1) { $line += ', most often ' + $worst[0].Name } elseif ($worst) { $line += ', including ' + $worst[0].Name }
+        $lines += $line + '.'
+    }
+    if ($r.SuddenStops -gt 0) {
+        $lines += $(if ($r.SuddenStops -eq 1) { 'The PC stopped without warning once.' } else { "The PC stopped without warning $($r.SuddenStops) times." })
+    }
+    if ($r.BlueScreens -gt 0) { $lines += "$($r.BlueScreens) blue screen(s)." }
+    if ($r.Uptime) { $lines += 'Awake for {0}.' -f (Format-QpSpan ([double]$r.Uptime.TotalSeconds)) }
+    foreach ($line in $lines) {
+        $t = New-Text $line 12 'Normal' '#4B5B5C' '0,2,0,0'
+        if ($line -match 'without warning|blue screen') { $t.Foreground = Get-Brush $script:HeatColours.warn }
+        [void]$script:SteadyLines.Children.Add($t)
+    }
+}
+
+function Show-SessionAlerts($alerts) {
+    <#
+        Something worth interrupting for, said once. It goes on the status line, and onto the taskbar
+        icon while the window is out of sight - unless a "came back" badge is already there, which is
+        about a choice you made and outranks a passing warm spell.
+    #>
+    $alerts = @($alerts | Where-Object { $_ })
+    if (-not $alerts.Count) { return }
+    $ui.Status.Text = $alerts[0].Text
+    [System.Windows.Automation.AutomationProperties]::SetName($ui.Status, $ui.Status.Text)
+    $ui.LogBox.AppendText(('[{0}] WARN    {1}' -f (Get-Date -Format 'HH:mm:ss'), $alerts[0].Text) + [Environment]::NewLine)
+    if ($window.WindowState -eq 'Minimized' -and -not ($script:CameBack -and $script:CameBack.Count)) {
+        try {
+            if (-not $window.TaskbarItemInfo) { $window.TaskbarItemInfo = New-Object System.Windows.Shell.TaskbarItemInfo }
+            $n = @($script:SessionWatch.Alerts).Count
+            $window.TaskbarItemInfo.Overlay = New-BadgeImage ([int]$n)
+            $window.TaskbarItemInfo.Description = 'Quietpane: ' + $alerts[0].Text
+            $window.Title = 'Quietpane - ' + $alerts[0].Text
+            $script:AlertBadge = $true
+        } catch { }
+    }
+}
+
+function Clear-AlertBadge {
+    <# You have seen it, so the badge goes - putting back the "came back" one if that is waiting. #>
+    if (-not $script:AlertBadge) { return }
+    $script:AlertBadge = $false
+    Update-TaskbarBadge $script:CameBack
+}
+
 function Update-SessionCard {
     <# The session card: what has been watched so far, in the same words as the summary at the end. #>
     $script:SessionShownAt = Get-Date
@@ -2383,6 +2483,11 @@ function Update-SessionCard {
     $script:BtnSession.Content = 'Stop watching'
     $script:SessionHead.Text = $s.Headline
     $script:SessionHead.FontWeight = 'SemiBold'
+    # Anything worth interrupting for, at the top, in the colour that matches how much it matters.
+    foreach ($a in @($script:SessionWatch.Alerts)) {
+        $t = New-Text ('{0}   ({1})' -f $a.Text, (Get-QpStamp 'HH:mm' $a.At)) 12.5 'SemiBold' $script:HeatColours[$a.Level] '0,2,0,0'
+        [void]$script:SessionLines.Children.Add($t)
+    }
     foreach ($line in @($s.Lines)) { [void]$script:SessionLines.Children.Add((New-Text $line 12.5 'Normal' '#4B5B5C' '0,2,0,0')) }
 }
 
@@ -2391,6 +2496,7 @@ function Switch-SessionWatch {
     if ($script:SessionWatch) {
         $script:SessionLast = Get-QpSessionSummary -Watch (Stop-QpSessionWatch -Watch $script:SessionWatch)
         $script:SessionWatch = $null
+        Clear-AlertBadge
         $ui.Status.Text = 'Stopped watching. ' + $script:SessionLast.Headline
     } else {
         $script:SessionWatch = New-QpSessionWatch -IntervalSeconds 10
@@ -3444,6 +3550,11 @@ function Test-SessionCard {
     # Seven readings ten seconds apart: over a minute very hot and held back, so both are worth saying.
     foreach ($i in 1..7) { [void](Add-QpSessionSample -Watch $script:SessionWatch -Reading (New-Sample (0.166 * $i) 96 96 $true 61 91 14GB 'A game')) }
     [void](Add-QpSessionSample -Watch $script:SessionWatch -Reading (New-Sample 40 20 60 $false 100 45 4GB 'A game'))
+    # An alert that has to fire (memory at 91%) and the same one again, which must not fire twice.
+    $hot = New-Sample 40 20 60 $false 100 91 4GB 'A game'
+    $raised = @(Update-QpSessionAlerts -Watch $script:SessionWatch -Reading $hot -FreePct 4)
+    $again = @(Update-QpSessionAlerts -Watch $script:SessionWatch -Reading $hot -FreePct 4)
+    Show-SessionAlerts $raised
     Update-LiveExtra (New-Sample 40 20 60 $false 100 45 4GB 'A game')
     Update-SessionCard
     $head = [string]$script:SessionHead.Text
@@ -3453,11 +3564,32 @@ function Test-SessionCard {
     $after = [string]$script:BtnSession.Content
     $script:SessionWatch = $null; $script:SessionLast = $null
     Update-SessionCard
-    '{0}; very hot: {1}; held back: {2}; gap owned up to: {3}; busiest: {4}; extras: {5}; stops: {6}' -f
+    '{0}; very hot: {1}; held back: {2}; gap owned up to: {3}; busiest: {4}; extras: {5}; stops: {6}; alerts: {7}; said once: {8}' -f
         $button, [bool]($head -match 'It ran very hot for'), [bool]($lines -match 'Held back to cool off for \d+ seconds, once'),
         [bool]($lines -match 'One stretch went unwatched'), [bool]($lines -match 'Busiest: A game'),
         [bool]($script:LiveExtra.Text -match 'Memory promised to programs: 45%.*Processor speed: 100%.*Disk busy: 26%'),
-        [bool]($after -eq 'Watch this session')
+        [bool]($after -eq 'Watch this session'),
+        (@($raised | ForEach-Object { $_.Id }) -join ','), ($again.Count -eq 0)
+}
+function Test-SteadyCard {
+    <#
+        Windows' own steadiness record, drawn into the real card: a scored PC, then one where Windows has
+        kept nothing, which must say so rather than show a zero.
+    #>
+    Update-SteadyCard ([pscustomobject]@{
+        Score = 8.5; ScoreWhen = (Get-Date).AddHours(-1); Word = 'mostly steady'; Days = 30
+        Crashes = 7; Hangs = 1; BlueScreens = 0; SuddenStops = 2; Available = $true
+        Programs = @([pscustomobject]@{ Name = 'DCv2'; Count = 3 }); Uptime = [timespan]::FromHours(3)
+    })
+    $scored = '{0} | {1} | {2}' -f $script:SteadyCard.Value.Text, $script:SteadyCard.Caption.Text,
+        ((@(foreach ($c in $script:SteadyLines.Children) { $c.Text }) -join ' / '))
+    Update-SteadyCard ([pscustomobject]@{ Score = $null; Word = 'not scored'; Days = 30; Crashes = 0; Hangs = 0
+        BlueScreens = 0; SuddenStops = 0; Available = $false; Programs = @(); Uptime = $null })
+    $blank = '{0} | {1}' -f $script:SteadyCard.Value.Text, $script:SteadyCard.Caption.Text
+    'score: {0}; crashes named: {1}; sudden stops: {2}; awake: {3}; unscored says so: {4}' -f
+        [bool]($scored -match '8\.5 / 10'), [bool]($scored -match '8 programs stopped working in 30 days, most often DCv2'),
+        [bool]($scored -match 'stopped without warning 2 times'), [bool]($scored -match 'Awake for 3 hours'),
+        [bool]($blank -match "Not scored .* hasn't kept a record")
 }
 function Test-Badge {
     # The taskbar badge draws and clears again.
@@ -3502,6 +3634,7 @@ if ($SelfTest) {
             $script:BatteryHealth = Get-QpBatteryHealth
             Update-LiveTiles (Get-QpLiveReading -Monitor $monitor)
             Update-DriveCard (Get-QpDriveHealth)
+            Update-SteadyCard (Get-QpReliability)
         }
         Update-Buttons
         $root = $window.Content
@@ -3526,6 +3659,7 @@ if ($SelfTest) {
     'add-ons: ' + (Test-AddonList)
     'easy wins: ' + (Test-SpaceWins)
     'session: ' + (Test-SessionCard)
+    'holding up: ' + (Test-SteadyCard)
     return
 }
 

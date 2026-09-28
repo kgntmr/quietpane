@@ -26,8 +26,11 @@ ALSO IN THE APP
               are busiest, and how the battery and drive are holding up.
               "Watch this session" keeps an eye on it while you work and
               tells you afterwards how hot it got, when it was held back
-              to cool off, and how far memory went. It only watches while
+              to cool off, and how far memory went. It speaks up once if
+              something is worth interrupting for. It only watches while
               Quietpane is open, and writes nothing down.
+              "How it has been holding up" is Windows' own score out of
+              ten, with what has crashed in the last month.
    Privacy    Every browser add-on you have, and what each one is allowed
               to read - "reads and changes everything on every site you
               visit" - with a tick box to switch off the ones you don't

@@ -19,7 +19,7 @@
       * No network requests, no telemetry, no data collection. Everything stays on this PC.
 #>
 
-$script:AppVersion  = '1.16.0'
+$script:AppVersion  = '1.17.0'
 $script:Brand       = @{ Name = 'KomodoWorks'; Url = 'https://www.komodoworks.com'; Email = 'info@komodoworks.com'; Repo = 'https://github.com/kgntmr/quietpane' }
 $script:AssetsRoot  = Join-Path (Split-Path $PSScriptRoot -Parent) 'assets'
 $script:LogSink     = $null
@@ -891,6 +891,7 @@ function New-QpSessionWatch {
         SlowestWhenBusyPct = $null
         BatteryStart = $null; BatteryEnd = $null; PeakWatts = $null
         Busy = @{}
+        Alerts = (New-Object System.Collections.ArrayList)
     }
 }
 
@@ -974,6 +975,56 @@ function Add-QpSessionSample {
         $Watch.Busy[$name] += $span
     }
     return $Watch
+}
+
+$script:SessionAlerts = @(
+    # Worth interrupting someone for, and nothing else. Each one is said once per session: an alert that
+    # repeats is an alert people learn to ignore. The wording says what is happening, never what to do
+    # about it, because Quietpane cannot know whether the game you are playing is worth the heat.
+    @{ Id = 'veryhot';  Level = 'high' }, @{ Id = 'heldback'; Level = 'warn' }
+    @{ Id = 'memory';   Level = 'warn' }, @{ Id = 'drive';    Level = 'warn' }
+    @{ Id = 'battery';  Level = 'warn' }
+)
+
+function Update-QpSessionAlerts {
+    <#
+        Looks at the session so far and says what is worth mentioning. Each kind is raised once and then
+        stays on the record, so nothing nags. Returns only what is new this time.
+    #>
+    param(
+        [Parameter(Mandatory)]$Watch, $Reading, $FreePct = $null, $Now = $null,
+        [double]$VeryHotMinutes = 5, [double]$HeldBackMinutes = 5,
+        [int]$MemoryPct = 90, [int]$DriveFreePct = 10, [int]$BatteryMinutes = 20
+    )
+    if (-not $Now) { $Now = Get-Date }
+    if ($null -eq $Watch.Alerts) { $Watch | Add-Member -NotePropertyName Alerts -NotePropertyValue (New-Object System.Collections.ArrayList) -Force }
+    $already = @($Watch.Alerts | ForEach-Object { $_.Id })
+    $new = New-Object System.Collections.ArrayList
+    function Raise([string]$Id, [string]$Text, [string]$Level) {
+        if ($already -contains $Id) { return }
+        $alert = [pscustomobject]@{ Id = $Id; Text = $Text; Level = $Level; At = $Now }
+        [void]$Watch.Alerts.Add($alert)
+        [void]$new.Add($alert)
+    }
+    if ($Watch.VeryHotSeconds -ge ($VeryHotMinutes * 60)) {
+        Raise 'veryhot' ('It has been very hot for {0} now.' -f (Format-QpSpan $Watch.VeryHotSeconds)) 'high'
+    }
+    if ($Watch.HeldBackSeconds -ge ($HeldBackMinutes * 60)) {
+        Raise 'heldback' ('It has spent {0} held back to cool off.' -f (Format-QpSpan $Watch.HeldBackSeconds)) 'warn'
+    }
+    if ($Reading) {
+        if ($null -ne $Reading.CommitPct -and [int]$Reading.CommitPct -ge $MemoryPct) {
+            Raise 'memory' ('Windows has promised {0}% of the memory it can. Things often start to crawl around here.' -f [int]$Reading.CommitPct) 'warn'
+        }
+        $b = $Reading.Battery
+        if ($b -and $b.Direction -eq 'draining' -and $null -ne $b.MinutesLeft -and [int]$b.MinutesLeft -le $BatteryMinutes) {
+            Raise 'battery' ('The battery has about {0} left at this rate.' -f (Format-QpSpan ([int]$b.MinutesLeft * 60))) 'warn'
+        }
+    }
+    if ($null -ne $FreePct -and [double]$FreePct -le $DriveFreePct) {
+        Raise 'drive' ('The drive Windows is on is down to {0:N0}% free.' -f $FreePct) 'warn'
+    }
+    return @($new)
 }
 
 function Stop-QpSessionWatch {
@@ -1112,6 +1163,57 @@ function Get-QpDriveHealth {
             PowerOnHours = $(if ($rel -and [int]$rel.PowerOnHours -gt 0) { [int]$rel.PowerOnHours } else { $null })
         }
     } catch { return $null }
+}
+
+function Get-QpReliability {
+    <#
+        Windows keeps its own record of how steady this PC has been - the one behind Reliability Monitor,
+        which almost nobody opens. Read-only.
+
+        The score is Windows', out of ten, and it is shown with the date it was worked out. Where Windows
+        has kept none, this says so rather than inventing one. What went wrong comes from the event log
+        rather than from Win32_ReliabilityRecords: the same crashes and hangs, with the program's name,
+        in about a tenth of a second instead of nearly six seconds. Windows Update and installer entries
+        are deliberately not counted - an update that installed is not a problem.
+    #>
+    param([int]$Days = 30, $Now = $null)
+    if (-not $Now) { $Now = Get-Date }
+    $since = $Now.AddDays(-$Days)
+    $score = $null; $scoreWhen = $null
+    try {
+        $m = @(Get-CimInstance Win32_ReliabilityStabilityMetrics -ErrorAction Stop |
+            Where-Object { $_.SystemStabilityIndex -gt 0 } | Sort-Object TimeGenerated -Descending | Select-Object -First 1)[0]
+        if ($m) { $score = [math]::Round([double]$m.SystemStabilityIndex, 1); $scoreWhen = $m.TimeGenerated }
+    } catch { }
+
+    function Read-Log([hashtable]$Filter) {
+        try { return @(Get-WinEvent -FilterHashtable $Filter -ErrorAction Stop) } catch { return @() }
+    }
+    $crashes = Read-Log @{ LogName = 'Application'; ProviderName = 'Application Error'; Id = 1000; StartTime = $since }
+    $hangs = Read-Log @{ LogName = 'Application'; ProviderName = 'Application Hang'; Id = 1002; StartTime = $since }
+    $blue = Read-Log @{ LogName = 'System'; ProviderName = 'Microsoft-Windows-WER-SystemErrorReporting'; Id = 1001; StartTime = $since }
+    $sudden = Read-Log @{ LogName = 'System'; Id = 41; StartTime = $since }
+
+    # Which programs, worst first. The name is the first thing Windows records about the failure.
+    $byProgram = @()
+    try {
+        $byProgram = @(@($crashes + $hangs) | ForEach-Object {
+                $n = [string]$_.Properties[0].Value
+                if ($n) { $n -replace '\.exe$', '' }
+            } | Where-Object { $_ } | Group-Object | Sort-Object Count -Descending |
+            ForEach-Object { [pscustomobject]@{ Name = $_.Name; Count = $_.Count } })
+    } catch { }
+
+    $up = $null
+    try { $up = $Now - (Get-CimInstance Win32_OperatingSystem -ErrorAction Stop).LastBootUpTime } catch { }
+    # Windows' own scale: ten is perfect, and it drops for days with a crash on them.
+    $word = if ($null -eq $score) { 'not scored' } elseif ($score -ge 9) { 'steady' } elseif ($score -ge 7) { 'mostly steady' } else { 'bumpy' }
+    [pscustomobject]@{
+        Score = $score; ScoreWhen = $scoreWhen; Word = $word; Days = $Days
+        Crashes = $crashes.Count; Hangs = $hangs.Count; BlueScreens = $blue.Count; SuddenStops = $sudden.Count
+        Programs = $byProgram; Uptime = $up
+        Available = ($null -ne $score -or $crashes.Count -or $hangs.Count -or $sudden.Count)
+    }
 }
 
 #endregion
@@ -5224,6 +5326,7 @@ Export-ModuleMember -Function Get-QpInfo, Set-QpLogSink, Write-QpLog, Test-QpAdm
     Get-QpState, Get-QpSystemUsage, Get-QpTotals, New-QpLiveMonitor, Get-QpLiveReading, Get-QpHeatWord, Get-QpProgramName,
     New-QpCounter, New-QpCounterGroup,
     New-QpSessionWatch, Add-QpSessionSample, Stop-QpSessionWatch, Get-QpSessionSummary, Format-QpSpan,
+    Update-QpSessionAlerts, Get-QpReliability,
     Get-QpBatteryHealth, Get-QpDriveHealth, Get-QpWindowsVersion, Get-QpQuietSnapshot, Update-QpQuietNote, Invoke-QpPutBack,
     Get-QpRestorePoints, Invoke-QpUndo,
     Get-QpPrivacyStatus, Invoke-QpPrivacy,

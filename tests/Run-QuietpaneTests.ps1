@@ -910,6 +910,44 @@ Test-Case 'a length of time is put in plain words' {
     (Format-QpSpan 0.5) -eq 'no time at all' -and (Format-QpSpan 45) -eq '45 seconds' -and (Format-QpSpan 60) -eq '60 seconds' -and
     (Format-QpSpan 120) -eq '2 minutes' -and (Format-QpSpan 3600) -eq '1 hour' -and (Format-QpSpan 12000) -eq '3 h 20 min'
 }
+Test-Case 'an alert is raised when it is worth interrupting for, and never twice' {
+    $w = New-QpSessionWatch -IntervalSeconds 10 -Now $sessionStart
+    # Six minutes very hot and held back, which is past both marks.
+    foreach ($i in 0..36) { $w = Add-QpSessionSample $w (New-TestReading -Minutes (0.1667 * $i) -Cpu 96 -TempC 97 -Throttled $true -SpeedPct 61 -CommitPct 91 -Top 'A game') }
+    $first = @(Update-QpSessionAlerts -Watch $w -Reading (New-TestReading -Minutes 6 -CommitPct 91) -FreePct 4 -Now $sessionStart.AddMinutes(6))
+    $again = @(Update-QpSessionAlerts -Watch $w -Reading (New-TestReading -Minutes 6 -CommitPct 91) -FreePct 4 -Now $sessionStart.AddMinutes(7))
+    (@($first | ForEach-Object { $_.Id }) -join ',') -eq 'veryhot,heldback,memory,drive' -and $again.Count -eq 0 -and
+    @($w.Alerts).Count -eq 4 -and @($first | Where-Object { $_.Id -eq 'veryhot' })[0].Level -eq 'high'
+}
+Test-Case 'nothing is raised below the mark, or about a number this PC does not report' {
+    $w = New-QpSessionWatch -IntervalSeconds 10 -Now $sessionStart
+    # A minute hot - real, but not worth interrupting for - and a PC that reports no commit and no battery.
+    foreach ($i in 0..6) { $w = Add-QpSessionSample $w (New-TestReading -Minutes (0.1667 * $i) -Cpu 96 -TempC 97 -Throttled $true -CommitPct $null) }
+    $raised = @(Update-QpSessionAlerts -Watch $w -Reading (New-TestReading -Minutes 1 -CommitPct $null) -Now $sessionStart.AddMinutes(1))
+    $raised.Count -eq 0
+}
+Test-Case 'a battery running out is worth saying, once it really is running out' {
+    $w = New-QpSessionWatch -IntervalSeconds 10 -Now $sessionStart
+    $plenty = New-TestReading -Minutes 1 -BatteryPct 60 -Watts 20
+    $plenty.Battery.MinutesLeft = 90
+    $nearly = New-TestReading -Minutes 2 -BatteryPct 8 -Watts 20
+    $nearly.Battery.MinutesLeft = 12
+    $none = @(Update-QpSessionAlerts -Watch $w -Reading $plenty -Now $sessionStart)
+    $low = @(Update-QpSessionAlerts -Watch $w -Reading $nearly -Now $sessionStart.AddMinutes(1))
+    $none.Count -eq 0 -and $low.Count -eq 1 -and $low[0].Id -eq 'battery' -and $low[0].Text -match '12 minutes left'
+}
+Test-Case 'Windows'' own steadiness record is read, and an update that installed is not a problem' {
+    $r = Get-QpReliability -Days 30
+    # Whatever this PC says, the shape has to hold and the counts have to be countable.
+    $shape = @('Score', 'Word', 'Days', 'Crashes', 'Hangs', 'BlueScreens', 'SuddenStops', 'Programs', 'Uptime', 'Available' |
+        Where-Object { -not $r.PSObject.Properties.Name.Contains($_) }).Count -eq 0
+    $sane = $r.Crashes -ge 0 -and $r.Hangs -ge 0 -and $r.SuddenStops -ge 0 -and $r.Days -eq 30 -and
+        ($null -eq $r.Score -or ($r.Score -ge 0 -and $r.Score -le 10)) -and
+        $r.Word -in 'steady', 'mostly steady', 'bumpy', 'not scored'
+    # Every program named has to have failed at least once, and nothing here counts Windows Update.
+    $named = @($r.Programs | Where-Object { $_.Count -lt 1 -or $_.Name -match 'WindowsUpdateClient|MsiInstaller' }).Count -eq 0
+    $shape -and $sane -and $named
+}
 Test-Case 'the four new vitals are read, and a PC that reports none of them still gives a whole reading' {
     $m = New-QpLiveMonitor
     Start-Sleep -Milliseconds 1100
@@ -1675,7 +1713,10 @@ Test-Case 'every privacy setting has a plain title and a short line, with the fu
     $longTitles.Count -eq 0 -and $longShorts.Count -eq 0 -and $jargon.Count -eq 0
 }
 Test-Case 'the session card names the worst of it, counts the minutes and owns up to the gap' {
-    $cardsOut -match 'session: Stop watching; very hot: True; held back: True; gap owned up to: True; busiest: True; extras: True; stops: True'
+    $cardsOut -match 'session: Stop watching; very hot: True; held back: True; gap owned up to: True; busiest: True; extras: True; stops: True; alerts: memory,drive; said once: True'
+}
+Test-Case 'the steadiness card shows Windows'' score, or says plainly that there isn''t one' {
+    $cardsOut -match 'holding up: score: True; crashes named: True; sudden stops: True; awake: True; unscored says so: True'
 }
 Test-Case 'the easy wins show what they mean, and what only Windows can clear says where to go' {
     $cardsOut -match 'easy wins: rows: 2; move button: True; size: True; windows only: True; stopped looking: True; files hidden: True'

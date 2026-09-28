@@ -120,6 +120,15 @@ These need eyes, not assertions:
   reported as a stretch that went unwatched, not drawn through. Press Stop and the summary stays on
   screen; close Quietpane and reopen it, and the record is gone, as it says it will be. While it is
   watching and you are on another tab, Quietpane's own processor use in Task Manager stays near zero.
+- **Alerts, once each.** While watching, run something heavy until the processor is very hot for five
+  minutes: the status line says so, the line appears in amber at the top of the session card, and it
+  never says it a second time however long the heat lasts. Minimise Quietpane first and the taskbar
+  icon carries a badge; restore the window and the badge clears. With a "came back" badge already
+  showing, that one stays - it is about a choice you made.
+- **How it has been holding up.** The score matches Reliability Monitor (run `perfmon /rel`) and the
+  date under it matches the last point on its graph. The programs named match what that report lists
+  as stopped working - and Windows Update entries, which fill most of that report, are not counted.
+  On a PC where Windows has kept no score, the card says "Not scored" rather than showing 0.
 - **The three extra vitals.** Under the tiles, compare "memory promised to programs" with Task Manager
   > Performance > Memory > Committed, the processor speed with its Speed figure, and disk busy with
   Task Manager's disk % - they come from the same place and should agree. On battery, the battery card
