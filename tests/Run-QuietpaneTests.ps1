@@ -839,6 +839,98 @@ Test-Case 'live readings write nothing to disk' {
     $before -eq $after
 }
 
+Section 'Watching a whole session'
+# Made-up readings, so a hot, throttled, sleeping PC can be checked without owning one.
+$sessionStart = [datetime]'2026-09-28 09:00:00'
+function New-TestReading {
+    param([double]$Minutes, [double]$Cpu = 10, $TempC = 50, $GpuTempC = $null, [bool]$Throttled = $false,
+          $SpeedPct = 100, $CommitPct = 40, [double]$MemUsed = 3GB, [string]$Top = 'Windows Explorer', $BatteryPct = $null, $Watts = $null)
+    [pscustomobject]@{
+        At = $sessionStart.AddMinutes($Minutes); CpuUsage = $Cpu; CpuTempC = $TempC; CpuThrottled = $Throttled
+        SpeedPct = $SpeedPct; SpeedMhz = 2400; CommitPct = $CommitPct; CommitUsed = [double]24GB; CommitLimit = [double]27GB
+        MemUsed = $MemUsed; MemTotal = [double]16GB; DiskBusyPct = 26; DiskQueue = 0.8
+        CpuTop = @([pscustomobject]@{ Name = $Top; Percent = $Cpu })
+        Gpus = @(if ($null -ne $GpuTempC) { [pscustomobject]@{ Name = 'Test card'; Usage = 55; TempC = $GpuTempC } })
+        Battery = $(if ($null -ne $BatteryPct) { [pscustomobject]@{ Percent = $BatteryPct; PluggedIn = $false; Charging = $false; Watts = $Watts; Direction = 'draining'; MinutesLeft = 70 } })
+    }
+}
+function New-TestSession {
+    # A minute of quiet, a minute very hot and held back, then the PC sleeps for half an hour.
+    $w = New-QpSessionWatch -IntervalSeconds 10 -Now $sessionStart
+    $w = Add-QpSessionSample $w (New-TestReading -Minutes 0 -Cpu 12 -TempC 55 -GpuTempC 45 -BatteryPct 100 -Watts 12.0)
+    foreach ($i in 1..6) {
+        $w = Add-QpSessionSample $w (New-TestReading -Minutes (0.1667 * $i) -Cpu 96 -TempC 97 -GpuTempC 80 -Throttled $true -SpeedPct 61 -CommitPct 91 -MemUsed 14GB -Top 'A game' -BatteryPct (100 - $i) -Watts 42.5)
+    }
+    $w = Add-QpSessionSample $w (New-TestReading -Minutes 31 -Cpu 20 -TempC 60 -GpuTempC 50 -Top 'A game' -BatteryPct 80 -Watts 11.0)
+    return $w
+}
+
+Test-Case 'a session keeps the peaks, because an average hides the moment it choked' {
+    $w = New-TestSession
+    $w.PeakCpu -eq 96 -and $w.PeakCpuTempC -eq 97 -and $w.PeakGpuTempC -eq 80 -and $w.PeakCommitPct -eq 91 -and
+    $w.PeakMemUsed -eq 14GB -and $w.PeakWatts -eq 42.5 -and $w.Samples -eq 8
+}
+Test-Case 'minutes hot and minutes held back are counted, and spells are counted separately' {
+    $w = New-TestSession
+    # Six stretches of ten seconds at 97C, which is past "very hot", and all of them held back at once.
+    [math]::Round($w.VeryHotSeconds) -eq 60 -and [math]::Round($w.HotSeconds) -eq 60 -and
+    [math]::Round($w.HeldBackSeconds) -eq 60 -and $w.HeldBackSpells -eq 1 -and $w.SlowestWhenBusyPct -eq 61
+}
+Test-Case 'a stretch with no readings is a gap, never drawn through' {
+    $w = New-TestSession
+    $s = Get-QpSessionSummary -Watch (Stop-QpSessionWatch $w -Now $sessionStart.AddMinutes(31)) -Now $sessionStart.AddMinutes(31)
+    # The half-hour asleep is not counted as time spent hot, and the summary owns up to it.
+    $w.Gaps -eq 1 -and [math]::Round($w.GapSeconds) -eq 1800 -and [math]::Round($w.WatchedSeconds) -eq 60 -and
+    @($s.Lines | Where-Object { $_ -match 'One stretch went unwatched, 30 minutes in all' }).Count -eq 1
+}
+Test-Case 'a processor idling at a low clock is never called throttling' {
+    # Quiet PC, clock down to a third to save power, no cooling brake on: that is being sensible.
+    $w = New-QpSessionWatch -IntervalSeconds 10 -Now $sessionStart
+    foreach ($i in 0..3) { $w = Add-QpSessionSample $w (New-TestReading -Minutes (0.1667 * $i) -Cpu 4 -SpeedPct 32) }
+    $s = Get-QpSessionSummary -Watch $w -Now $sessionStart.AddMinutes(1)
+    $w.HeldBackSeconds -eq 0 -and $w.HeldBackSpells -eq 0 -and $null -eq $w.SlowestWhenBusyPct -and
+    @($s.Lines | Where-Object { $_ -match 'held back|of its speed' }).Count -eq 0
+}
+Test-Case 'the summary says nothing this PC did not report' {
+    # A desktop with no temperature sensor and no battery: no heat line, no battery line, no zeroes.
+    $w = New-QpSessionWatch -IntervalSeconds 10 -Now $sessionStart
+    foreach ($i in 0..3) { $w = Add-QpSessionSample $w (New-TestReading -Minutes (0.1667 * $i) -Cpu 30 -TempC $null -CommitPct $null) }
+    $s = Get-QpSessionSummary -Watch $w -Now $sessionStart.AddMinutes(1)
+    $all = $s.Lines -join ' | '
+    $null -eq $w.PeakCpuTempC -and $all -notmatch 'hottest|C\.|battery|promised' -and $all -match 'The processor peaked at 30%'
+}
+Test-Case 'the headline is the worst thing that happened, or plainly nothing' {
+    $hot = Get-QpSessionSummary -Watch (New-TestSession) -Now $sessionStart.AddMinutes(31)
+    $w = New-QpSessionWatch -IntervalSeconds 10 -Now $sessionStart
+    foreach ($i in 0..3) { $w = Add-QpSessionSample $w (New-TestReading -Minutes (0.1667 * $i)) }
+    $calm = Get-QpSessionSummary -Watch $w -Now $sessionStart.AddMinutes(1)
+    $hot.Headline -match 'very hot' -and $calm.Headline -match 'stayed comfortable'
+}
+Test-Case 'a length of time is put in plain words' {
+    (Format-QpSpan 0.5) -eq 'no time at all' -and (Format-QpSpan 45) -eq '45 seconds' -and (Format-QpSpan 60) -eq '60 seconds' -and
+    (Format-QpSpan 120) -eq '2 minutes' -and (Format-QpSpan 3600) -eq '1 hour' -and (Format-QpSpan 12000) -eq '3 h 20 min'
+}
+Test-Case 'the four new vitals are read, and a PC that reports none of them still gives a whole reading' {
+    $m = New-QpLiveMonitor
+    Start-Sleep -Milliseconds 1100
+    $full = Get-QpLiveReading -Monitor $m
+    # Then the same monitor with every new reader taken away, as on a PC that has no such counters.
+    foreach ($f in 'Commit', 'CommitLimit', 'Speed', 'SpeedMhz', 'DiskIdle', 'DiskQueue', 'BatteryRate') { $m.$f = $null }
+    $bare = Get-QpLiveReading -Monitor $m
+    $gotSome = @($full.CommitPct, $full.SpeedPct, $full.DiskBusyPct | Where-Object { $null -ne $_ }).Count -ge 1
+    $gotSome -and $null -eq $bare.CommitPct -and $null -eq $bare.SpeedPct -and $null -eq $bare.DiskBusyPct -and
+    $null -ne $bare.CpuUsage -and $bare.PSObject.Properties.Name -contains 'CommitUsed'
+}
+Test-Case 'counters are asked for in English, whatever language the PC is set to' {
+    # .NET looks a counter's name up in the table for the language it is running under, and only the
+    # English table is on every Windows - so the lookup has to be made under the invariant culture.
+    $src = Get-Content (Join-Path $root 'src\Quietpane.psm1') -Raw
+    $wired = ([regex]::Matches($src, 'New-QpCounter(Group)?\s')).Count
+    # Exactly two counters are made the raw way: the two lines inside the helpers that do the forcing.
+    $raw = ([regex]::Matches($src, 'New-Object Diagnostics\.PerformanceCounter')).Count
+    $src -match 'InvariantCulture' -and $wired -ge 10 -and $raw -eq 2
+}
+
 Section 'What''s using it'
 $liveM = New-QpLiveMonitor
 Start-Sleep -Milliseconds 1200
@@ -1581,6 +1673,9 @@ Test-Case 'every privacy setting has a plain title and a short line, with the fu
     $items.Count -eq 32 -and @($items | Where-Object { -not $_.Short }).Count -eq 0 -and
     @($items | Where-Object { -not $_.Description }).Count -eq 0 -and
     $longTitles.Count -eq 0 -and $longShorts.Count -eq 0 -and $jargon.Count -eq 0
+}
+Test-Case 'the session card names the worst of it, counts the minutes and owns up to the gap' {
+    $cardsOut -match 'session: Stop watching; very hot: True; held back: True; gap owned up to: True; busiest: True; extras: True; stops: True'
 }
 Test-Case 'the easy wins show what they mean, and what only Windows can clear says where to go' {
     $cardsOut -match 'easy wins: rows: 2; move button: True; size: True; windows only: True; stopped looking: True; files hidden: True'

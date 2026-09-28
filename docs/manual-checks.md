@@ -114,6 +114,16 @@ These need eyes, not assertions:
   that isn't running says so rather than guessing. With a recent full restart, the "Windows timed your
   last restart at N seconds" line appears with its date; point at it for the breakdown. Compare a
   couple of the figures with Task Manager > Startup apps and Details - they should agree.
+- **Watch this session.** Health > Watch this session, then go and use the PC for a few minutes with
+  something heavy running, and minimise Quietpane. Come back: the card names the worst of it and the
+  peaks match what Task Manager showed at the time. Put the PC to sleep and wake it: the gap is
+  reported as a stretch that went unwatched, not drawn through. Press Stop and the summary stays on
+  screen; close Quietpane and reopen it, and the record is gone, as it says it will be. While it is
+  watching and you are on another tab, Quietpane's own processor use in Task Manager stays near zero.
+- **The three extra vitals.** Under the tiles, compare "memory promised to programs" with Task Manager
+  > Performance > Memory > Committed, the processor speed with its Speed figure, and disk busy with
+  Task Manager's disk % - they come from the same place and should agree. On battery, the battery card
+  shows watts and a time left; plugged in and full, it says neither rather than showing 0 W.
 - **Worth clearing first.** Free up space > Look. The suggestions appear above the folder list, the ones
   you can act on first. Check a couple by hand: an installer it names really is in Downloads, and its
   date matches File Explorer's "Date modified". "Show me which" lists them; "Move N to the Recycle Bin"

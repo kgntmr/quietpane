@@ -24,6 +24,10 @@ Developed by KomodoWorks.com  |  free  |  open source  |  collects nothing
 ALSO IN THE APP
    Health     How hard your PC is working, how warm it is, which programs
               are busiest, and how the battery and drive are holding up.
+              "Watch this session" keeps an eye on it while you work and
+              tells you afterwards how hot it got, when it was held back
+              to cool off, and how far memory went. It only watches while
+              Quietpane is open, and writes nothing down.
    Privacy    Every browser add-on you have, and what each one is allowed
               to read - "reads and changes everything on every site you
               visit" - with a tick box to switch off the ones you don't

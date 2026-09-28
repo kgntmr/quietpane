@@ -611,6 +611,11 @@ $script:TileMemory = New-LiveTile 'MEMORY' '#FFB627'
 $script:TileVram   = New-LiveTile 'VIDEO MEMORY' '#FFB627'
 foreach ($t in $script:TileCpu, $script:TileGpu, $script:TileMemory, $script:TileVram) { [void]$liveTiles.Children.Add($t.Border) }
 [void]$liveStack.Children.Add($liveTiles)
+# Three more things Windows keeps that the tiles have no room for, on one line, and left out when a PC
+# doesn't report them.
+$script:LiveExtra = New-Text '' 12 'Normal' '#4B5B5C' '0,6,0,0'
+Set-MoreInfo $script:LiveExtra 'Promised memory fills up before the memory chips do, and is usually the real reason a PC starts crawling. Speed under 100% at a busy moment means something is holding the processor back. A disk that stays busy while the processor is idle is what "slow" usually turns out to be.'
+[void]$liveStack.Children.Add($script:LiveExtra)
 $script:LiveNote = New-Text 'Live, every 2 seconds. Nothing is recorded.' 11.5 'Normal' '#66706F' '0,4,0,0'
 [void]$liveStack.Children.Add($script:LiveNote)
 $script:LivePanel.Child = $liveStack
@@ -691,6 +696,34 @@ $script:DriveHeatText = New-Text '' 12.5 'SemiBold' '#117A68' '0,6,0,0'
 $script:DriveCard.Value.Text = 'Having a look...'
 foreach ($c in $script:BatteryCard, $script:DriveCard) { [void]$healthCards.Children.Add($c.Border) }
 [void]$healthPanel.Children.Add($healthCards)
+
+# What a whole session cost, for anyone who wants to know how their PC held up while they worked.
+$script:SessionBox = New-Object System.Windows.Controls.Border
+$script:SessionBox.Background = Get-Brush '#FFFDF8'
+$script:SessionBox.BorderBrush = Get-Brush '#E6DFCC'
+$script:SessionBox.BorderThickness = Get-Thick '1'
+$script:SessionBox.Padding = Get-Thick '14,12'
+$script:SessionBox.Margin = Get-Thick '0,0,12,12'
+$sessionStack = New-Object System.Windows.Controls.StackPanel
+[void]$sessionStack.Children.Add((New-Text 'THIS SESSION' 11.5 'SemiBold' '#4B5B5C' '0,0,0,6'))
+$script:SessionHead = New-Text 'Quietpane can keep an eye on how your PC holds up while you work.' 13.5 'Normal' '#0F1B1C' '0,0,0,2'
+[void]$sessionStack.Children.Add($script:SessionHead)
+$script:SessionLines = New-Object System.Windows.Controls.StackPanel
+$script:SessionLines.Margin = Get-Thick '0,4,0,0'
+[void]$sessionStack.Children.Add($script:SessionLines)
+$sessionButtons = New-Object System.Windows.Controls.StackPanel
+$sessionButtons.Orientation = 'Horizontal'
+$sessionButtons.Margin = Get-Thick '0,10,0,0'
+$script:BtnSession = New-Button 'Watch this session'
+$script:BtnSession.Add_Click({ Switch-SessionWatch })
+[void]$sessionButtons.Children.Add($script:BtnSession)
+[void]$sessionStack.Children.Add($sessionButtons)
+$sessionNote = New-Text 'It watches only while Quietpane is open, and forgets everything when you close it.' 11.5 'Normal' '#66706F' '0,8,0,0'
+Set-MoreInfo $sessionNote 'Nothing is installed, nothing is scheduled and nothing is written down: the record lives in this window and goes when the window goes. It keeps reading while Quietpane is minimised, which is the whole point, and checks about every 10 seconds while you are not looking at this tab.'
+[void]$sessionStack.Children.Add($sessionNote)
+$script:SessionBox.Child = $sessionStack
+# Above the battery and drive: those change over months, this is about the afternoon you are having.
+[void]$healthPanel.Children.Insert(2, $script:SessionBox)
 
 # 1. Safety scan - Microsoft Defender's detections plus Quietpane's own checks
 $scanPanel = New-TabPage 'Safety scan' 'scan' ('Asks Microsoft Defender what it has found, and looks for the tricks adware uses. Looking changes nothing.')
@@ -1213,8 +1246,11 @@ function Start-Work {
 # A small reader of its own, separate from Start-Work, so the Home tiles never block a button. It only
 # reads while Home is on screen and the window isn't minimised; the rest of the time it sleeps. That
 # also matters on gaming laptops: asking the graphics card how it is doing shouldn't keep it awake.
-$script:Live = [hashtable]::Synchronized(@{ Reading = $null; Seq = 0; Active = $false; Stop = $false; Health = $null; HealthSeq = 0; Net = $null; NetSeq = 0; NetActive = $false
+$script:Live = [hashtable]::Synchronized(@{ Reading = $null; Seq = 0; Active = $false; Slow = $false; Stop = $false; Health = $null; HealthSeq = 0; Net = $null; NetSeq = 0; NetActive = $false
     Wake = New-Object System.Threading.AutoResetEvent $false })   # rings the reader awake the moment it is needed
+$script:SessionWatch = $null
+$script:SessionLast = $null
+$script:SessionShownAt = [datetime]::MinValue
 $script:LiveWasActive = $false
 $script:NetSeqShown = 0
 $script:LiveSeqShown = 0
@@ -1256,7 +1292,9 @@ function Start-LiveSampler {
                     } catch { }
                     $healthAt = Get-Date
                 }
-                for ($i = 0; $i -lt 10 -and -not $Live.Stop; $i++) { Start-Sleep -Milliseconds 200 }
+                # Two seconds while you are watching the tiles; ten while it is only keeping the record.
+                $ticks = if ($Live.Slow) { 50 } else { 10 }
+                for ($i = 0; $i -lt $ticks -and -not $Live.Stop; $i++) { Start-Sleep -Milliseconds 200 }
             } else {
                 # Nothing to read: sleep until the window rings, rather than checking in every moment.
                 [void]$Live.Wake.WaitOne(5000)
@@ -1288,7 +1326,11 @@ $timer.Add_Tick({
     if ($got) { $ui.LogBox.ScrollToEnd() }
     if ($script:Job -and $script:ScanRunning) { Update-ScanProgress }
     if ($script:Job -and $script:SpaceRunning) { Update-SpaceProgress }
-    $script:Live.Active = ([string]$ui.Tabs.SelectedItem.Tag -eq 'health') -and ($window.WindowState -ne 'Minimized')
+    # Readings are taken while the Health tab is showing - and, if you asked it to watch the session,
+    # while you are somewhere else as well, but then only every ten seconds.
+    $onHealth = ([string]$ui.Tabs.SelectedItem.Tag -eq 'health') -and ($window.WindowState -ne 'Minimized')
+    $script:Live.Active = $onHealth -or ($null -ne $script:SessionWatch)
+    $script:Live.Slow = (-not $onHealth) -and ($null -ne $script:SessionWatch)
     $script:Live.NetActive = ([string]$ui.Tabs.SelectedItem.Tag -eq 'privacy') -and $script:NetSection.Expander.IsExpanded -and ($window.WindowState -ne 'Minimized')
     $liveNow = $script:Live.Active -or $script:Live.NetActive
     if ($liveNow -and -not $script:LiveWasActive) { [void]$script:Live.Wake.Set() }
@@ -1303,8 +1345,11 @@ $timer.Add_Tick({
     }
     if ($script:Live.Seq -ne $script:LiveSeqShown) {
         $script:LiveSeqShown = $script:Live.Seq
+        # The record is kept whether or not the tab is in front: that is what makes it a session.
+        if ($script:SessionWatch) { try { [void](Add-QpSessionSample -Watch $script:SessionWatch -Reading $script:Live.Reading) } catch { } }
         try { Update-LiveTiles $script:Live.Reading } catch { }   # a reading must never be able to break the window
     }
+    if ($script:SessionWatch -and ((Get-Date) - $script:SessionShownAt).TotalSeconds -ge 2) { try { Update-SessionCard } catch { } }
     if ($script:Job -and $script:Job.Handle.IsCompleted) {
         $job = $script:Job
         $script:Job = $null
@@ -2241,6 +2286,14 @@ function Update-BatteryCard($Live) {
     $c.Value.Text = '{0}%' -f $Live.Percent
     Set-MeterFill $c ($Live.Percent / 100)
     $c.Caption.Text = if ($Live.Charging) { 'Charging' } elseif ($Live.PluggedIn) { 'Plugged in' } else { 'On battery' }
+    # What the cell itself says it is giving or taking, and how long that leaves. Worked out from the
+    # charge in the battery and the draw just measured - Windows' own guess is not used, because on
+    # mains it is a made-up number.
+    if ($null -ne $Live.Watts) {
+        $power = '{0:N1} W {1}' -f $Live.Watts, $(if ($Live.Direction -eq 'charging') { 'going in' } else { 'right now' })
+        if ($Live.MinutesLeft) { $power += ', about {0} left at this rate' -f (Format-QpSpan ($Live.MinutesLeft * 60)) }
+        $c.Caption.Text = $c.Caption.Text + ' - ' + $power
+    }
     $h = $script:BatteryHealth
     if ($h) {
         $t = $script:BatteryHealthText
@@ -2292,9 +2345,66 @@ function Update-DriveCard($d) {
     $c.Border.ToolTip = $tip
 }
 
+function Update-LiveExtra($r) {
+    <#
+        The three numbers that explain a slow PC when the tiles all look fine: what Windows has promised
+        out of memory, how much of its speed the processor is being allowed, and how busy the disk is.
+        Whatever this PC doesn't report is simply left out.
+    #>
+    if (-not $r) { return }
+    $bits = @()
+    if ($null -ne $r.CommitPct) { $bits += 'Memory promised to programs: {0}%' -f $r.CommitPct }
+    if ($null -ne $r.SpeedPct) {
+        $speed = 'Processor speed: {0}%' -f $r.SpeedPct
+        if ($r.SpeedMhz) { $speed += ' ({0:N1} GHz)' -f ($r.SpeedMhz / 1000) }
+        $bits += $speed
+    }
+    if ($null -ne $r.DiskBusyPct) { $bits += 'Disk busy: {0}%' -f $r.DiskBusyPct }
+    $script:LiveExtra.Text = $bits -join '     '
+    $script:LiveExtra.Visibility = if ($bits.Count) { 'Visible' } else { 'Collapsed' }
+}
+
+function Update-SessionCard {
+    <# The session card: what has been watched so far, in the same words as the summary at the end. #>
+    $script:SessionShownAt = Get-Date
+    $script:SessionLines.Children.Clear()
+    if (-not $script:SessionWatch) {
+        $script:BtnSession.Content = 'Watch this session'
+        $script:SessionHead.Text = 'Quietpane can keep an eye on how your PC holds up while you work.'
+        $script:SessionHead.FontWeight = 'Normal'
+        if ($script:SessionLast) {
+            foreach ($line in @($script:SessionLast.Lines)) { [void]$script:SessionLines.Children.Add((New-Text $line 12.5 'Normal' '#4B5B5C' '0,2,0,0')) }
+            $script:SessionHead.Text = $script:SessionLast.Headline
+            $script:SessionHead.FontWeight = 'SemiBold'
+        }
+        return
+    }
+    $s = Get-QpSessionSummary -Watch $script:SessionWatch
+    $script:BtnSession.Content = 'Stop watching'
+    $script:SessionHead.Text = $s.Headline
+    $script:SessionHead.FontWeight = 'SemiBold'
+    foreach ($line in @($s.Lines)) { [void]$script:SessionLines.Children.Add((New-Text $line 12.5 'Normal' '#4B5B5C' '0,2,0,0')) }
+}
+
+function Switch-SessionWatch {
+    <# Starts or stops the session record. Nothing is written down either way. #>
+    if ($script:SessionWatch) {
+        $script:SessionLast = Get-QpSessionSummary -Watch (Stop-QpSessionWatch -Watch $script:SessionWatch)
+        $script:SessionWatch = $null
+        $ui.Status.Text = 'Stopped watching. ' + $script:SessionLast.Headline
+    } else {
+        $script:SessionWatch = New-QpSessionWatch -IntervalSeconds 10
+        $script:SessionLast = $null
+        [void]$script:Live.Wake.Set()   # start reading now rather than at the next turn of the loop
+        $ui.Status.Text = 'Watching how this PC holds up. It stops when you close Quietpane.'
+    }
+    Update-SessionCard
+}
+
 function Update-LiveTiles($r) {
     <# Paints one reading onto the four tiles. Anything the PC doesn't share says so plainly. #>
     if (-not $r) { return }
+    Update-LiveExtra $r
     $deg = [char]0x00B0
 
     $t = $script:TileCpu
@@ -3313,6 +3423,42 @@ function Test-SpaceWins {
     $script:SpaceResult = $before
     return $result
 }
+function Test-SessionCard {
+    <#
+        A made-up session drawn into the real card: a quiet start, a hot spell that was held back, and a
+        stretch where the PC slept. The card must name the worst of it, count the minutes, and own up to
+        the gap - and the extra vitals line must show the three numbers the tiles have no room for.
+    #>
+    $t0 = (Get-Date).AddMinutes(-41)
+    function New-Sample($mins, $cpu, $temp, $throttled, $speed, $commit, $mem, $top) {
+        [pscustomobject]@{
+            At = $t0.AddMinutes($mins); CpuUsage = $cpu; CpuTempC = $temp; CpuThrottled = $throttled; SpeedPct = $speed
+            CpuTempSource = 'TZ'; CpuTempStuck = $false; CpuLimitPct = $(if ($throttled) { 61 } else { 100 }); CpuName = 'Test processor'
+            CommitPct = $commit; CommitUsed = [double]24GB; CommitLimit = [double]27GB; MemUsed = [double]$mem; MemTotal = [double]16GB
+            DiskBusyPct = 26; DiskQueue = 0.8; SpeedMhz = 2400
+            CpuTop = @([pscustomobject]@{ Name = $top; Percent = $cpu }); Gpus = @(); Battery = $null
+        }
+    }
+    $script:SessionWatch = New-QpSessionWatch -IntervalSeconds 10 -Now $t0
+    [void](Add-QpSessionSample -Watch $script:SessionWatch -Reading (New-Sample 0 12 55 $false 100 40 3GB 'Windows Explorer'))
+    # Seven readings ten seconds apart: over a minute very hot and held back, so both are worth saying.
+    foreach ($i in 1..7) { [void](Add-QpSessionSample -Watch $script:SessionWatch -Reading (New-Sample (0.166 * $i) 96 96 $true 61 91 14GB 'A game')) }
+    [void](Add-QpSessionSample -Watch $script:SessionWatch -Reading (New-Sample 40 20 60 $false 100 45 4GB 'A game'))
+    Update-LiveExtra (New-Sample 40 20 60 $false 100 45 4GB 'A game')
+    Update-SessionCard
+    $head = [string]$script:SessionHead.Text
+    $lines = @(foreach ($child in $script:SessionLines.Children) { if ($child -is [System.Windows.Controls.TextBlock]) { $child.Text } }) -join ' | '
+    $button = [string]$script:BtnSession.Content
+    Switch-SessionWatch   # stop it again: the self-test must leave nothing running
+    $after = [string]$script:BtnSession.Content
+    $script:SessionWatch = $null; $script:SessionLast = $null
+    Update-SessionCard
+    '{0}; very hot: {1}; held back: {2}; gap owned up to: {3}; busiest: {4}; extras: {5}; stops: {6}' -f
+        $button, [bool]($head -match 'It ran very hot for'), [bool]($lines -match 'Held back to cool off for \d+ seconds, once'),
+        [bool]($lines -match 'One stretch went unwatched'), [bool]($lines -match 'Busiest: A game'),
+        [bool]($script:LiveExtra.Text -match 'Memory promised to programs: 45%.*Processor speed: 100%.*Disk busy: 26%'),
+        [bool]($after -eq 'Watch this session')
+}
 function Test-Badge {
     # The taskbar badge draws and clears again.
     Update-TaskbarBadge ([pscustomobject]@{ Count = 3 })
@@ -3379,6 +3525,7 @@ if ($SelfTest) {
     'sign-in costs: ' + (Test-SignInCosts)
     'add-ons: ' + (Test-AddonList)
     'easy wins: ' + (Test-SpaceWins)
+    'session: ' + (Test-SessionCard)
     return
 }
 

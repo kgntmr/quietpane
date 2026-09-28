@@ -19,7 +19,7 @@
       * No network requests, no telemetry, no data collection. Everything stays on this PC.
 #>
 
-$script:AppVersion  = '1.15.0'
+$script:AppVersion  = '1.16.0'
 $script:Brand       = @{ Name = 'KomodoWorks'; Url = 'https://www.komodoworks.com'; Email = 'info@komodoworks.com'; Repo = 'https://github.com/kgntmr/quietpane' }
 $script:AssetsRoot  = Join-Path (Split-Path $PSScriptRoot -Parent) 'assets'
 $script:LogSink     = $null
@@ -486,46 +486,96 @@ function Initialize-QpGpuSensors {
     catch { return $false }   # e.g. a locked-down PC that doesn't allow it: usage still works, heat just isn't shown
 }
 
+function New-QpCounter {
+    <#
+        One of Windows' own performance counters, asked for by its English name.
+
+        .NET looks a counter's name up in the table for the language it is running under, and only the
+        English table is on every Windows, so the lookup is made under the invariant culture. Without
+        that, these same names would not resolve on a PC set to another language and the Health tab
+        would quietly show nothing at all. Returns $null where a PC has no such counter.
+    #>
+    param([string]$Category, [string]$Counter, [string]$Instance = '')
+    $was = [Threading.Thread]::CurrentThread.CurrentCulture
+    try {
+        [Threading.Thread]::CurrentThread.CurrentCulture = [Globalization.CultureInfo]::InvariantCulture
+        $c = New-Object Diagnostics.PerformanceCounter($Category, $Counter, $Instance, $true)
+        [void]$c.NextValue()
+        return $c
+    } catch { return $null } finally { [Threading.Thread]::CurrentThread.CurrentCulture = $was }
+}
+
+function New-QpCounterGroup {
+    <# A whole category of counters, read in one go. English names, same reason as above. #>
+    param([string]$Category)
+    $was = [Threading.Thread]::CurrentThread.CurrentCulture
+    try {
+        [Threading.Thread]::CurrentThread.CurrentCulture = [Globalization.CultureInfo]::InvariantCulture
+        return (New-Object Diagnostics.PerformanceCounterCategory($Category))
+    } catch { return $null } finally { [Threading.Thread]::CurrentThread.CurrentCulture = $was }
+}
+
 function New-QpLiveMonitor {
     <# Sets the readers up once, so every reading after that is cheap. Never throws. #>
     $m = [pscustomobject]@{
         Cpu = $null; CpuName = ''; Zone = $null; ZoneName = ''; Limits = @()
         Available = $null; MemTotal = [double]0
+        Commit = $null; CommitLimit = $null; Speed = $null; SpeedMhz = $null; DiskIdle = $null; DiskQueue = $null
         Engines = $null; EnginePrev = $null; GpuMemory = $null; GpuSensors = $false
         ZoneSeen = New-Object System.Collections.Generic.List[double]
         Procs = $null; ProcPrev = $null; Names = @{}; Cores = [math]::Max(1, [Environment]::ProcessorCount)
-        Power = $false
+        Power = $false; BatteryRate = $null
     }
     # Task Manager's own processor figure first, the older one if this Windows doesn't have it.
-    try { $m.Cpu = New-Object Diagnostics.PerformanceCounter('Processor Information', '% Processor Utility', '_Total', $true); [void]$m.Cpu.NextValue() }
-    catch {
-        try { $m.Cpu = New-Object Diagnostics.PerformanceCounter('Processor', '% Processor Time', '_Total', $true); [void]$m.Cpu.NextValue() } catch { $m.Cpu = $null }
-    }
+    $m.Cpu = New-QpCounter 'Processor Information' '% Processor Utility' '_Total'
+    if (-not $m.Cpu) { $m.Cpu = New-QpCounter 'Processor' '% Processor Time' '_Total' }
     try { $m.CpuName = ([string](Get-ItemProperty 'HKLM:\HARDWARE\DESCRIPTION\System\CentralProcessor\0' -ErrorAction Stop).ProcessorNameString).Trim() } catch { }
     # Windows' thermal zones: prefer one named after the processor, otherwise the warmest one.
     try {
-        $zones = @((New-Object Diagnostics.PerformanceCounterCategory('Thermal Zone Information')).GetInstanceNames())
+        $group = New-QpCounterGroup 'Thermal Zone Information'
+        $zones = @(if ($group) { $group.GetInstanceNames() })
         $best = $null; $bestValue = -1
         foreach ($z in $zones) {
             # Every zone's cooling brake is watched, whichever one gives the temperature.
-            try { $m.Limits += New-Object Diagnostics.PerformanceCounter('Thermal Zone Information', '% Passive Limit', $z, $true) } catch { }
+            $lc = New-QpCounter 'Thermal Zone Information' '% Passive Limit' $z
+            if ($lc) { $m.Limits += $lc }
         }
         foreach ($z in $zones) {
-            $pc = New-Object Diagnostics.PerformanceCounter('Thermal Zone Information', 'High Precision Temperature', $z, $true)
+            $pc = New-QpCounter 'Thermal Zone Information' 'High Precision Temperature' $z
+            if (-not $pc) { continue }
             $v = [double]$pc.NextValue()
             if ($z -match '(?i)cpu|pkg|core') { $best = $pc; $m.ZoneName = $z; break }
             if ($v -gt $bestValue) { $best = $pc; $bestValue = $v; $m.ZoneName = $z }
         }
         $m.Zone = $best
     } catch { $m.Zone = $null }
-    try { $m.Available = New-Object Diagnostics.PerformanceCounter('Memory', 'Available Bytes', '', $true) } catch { }
+    $m.Available = New-QpCounter 'Memory' 'Available Bytes'
     try { Add-Type -AssemblyName Microsoft.VisualBasic; $m.MemTotal = [double](New-Object Microsoft.VisualBasic.Devices.ComputerInfo).TotalPhysicalMemory } catch { }
-    try { $m.Engines = New-Object Diagnostics.PerformanceCounterCategory('GPU Engine'); $m.EnginePrev = $m.Engines.ReadCategory() } catch { $m.Engines = $null }
-    try { $m.GpuMemory = New-Object Diagnostics.PerformanceCounterCategory('GPU Adapter Memory') } catch { }
+    # What Windows has promised to programs, which fills up long before the memory chips do, and is
+    # usually the real reason a PC starts crawling.
+    $m.Commit = New-QpCounter 'Memory' 'Committed Bytes'
+    $m.CommitLimit = New-QpCounter 'Memory' 'Commit Limit'
+    # How much of its speed the processor is actually being allowed, and how busy the disk is.
+    $m.Speed = New-QpCounter 'Processor Information' '% of Maximum Frequency' '_Total'
+    $m.SpeedMhz = New-QpCounter 'Processor Information' 'Processor Frequency' '_Total'
+    $m.DiskIdle = New-QpCounter 'PhysicalDisk' '% Idle Time' '_Total'
+    $m.DiskQueue = New-QpCounter 'PhysicalDisk' 'Avg. Disk Queue Length' '_Total'
+    $m.Engines = New-QpCounterGroup 'GPU Engine'
+    if ($m.Engines) { try { $m.EnginePrev = $m.Engines.ReadCategory() } catch { $m.Engines = $null } }
+    $m.GpuMemory = New-QpCounterGroup 'GPU Adapter Memory'
     # Per-program load, for "what's using it". One read of Windows' own counters covers every program.
-    try { $m.Procs = New-Object Diagnostics.PerformanceCounterCategory('Process'); $m.ProcPrev = $m.Procs.ReadCategory() } catch { $m.Procs = $null }
+    $m.Procs = New-QpCounterGroup 'Process'
+    if ($m.Procs) { try { $m.ProcPrev = $m.Procs.ReadCategory() } catch { $m.Procs = $null } }
     # Battery charge and whether it's plugged in: the same figures as the battery icon by the clock.
     try { Add-Type -AssemblyName System.Windows.Forms; $m.Power = $true } catch { }
+    # What the battery itself says it is giving or taking, in milliwatts. Asked through a searcher made
+    # once, which is about 3 ms a reading instead of 14.
+    try {
+        $s = [wmisearcher]::new('SELECT DischargeRate,ChargeRate,Voltage,RemainingCapacity,Charging,Discharging FROM BatteryStatus')
+        $s.Scope = [Management.ManagementScope]::new('root\wmi')
+        [void]$s.Get()
+        $m.BatteryRate = $s
+    } catch { $m.BatteryRate = $null }
     $m.GpuSensors = Initialize-QpGpuSensors
     return $m
 }
@@ -606,6 +656,33 @@ function Get-QpLiveReading {
     # [double] on both sides: Max(0, big) picks the Int32 overload and overflows on gigabytes.
     $memUsed = $null
     if ($m.Available -and $m.MemTotal -gt 0) { try { $memUsed = [math]::Max([double]0, [double]$m.MemTotal - [double]$m.Available.NextValue()) } catch { } }
+
+    # What Windows has promised to programs, against what it is willing to promise. This fills up before
+    # the memory chips do, and it is what "everything went sluggish" usually means.
+    $commitUsed = $null; $commitLimit = $null; $commitPct = $null
+    if ($m.Commit -and $m.CommitLimit) {
+        try {
+            $commitUsed = [double]$m.Commit.NextValue()
+            $commitLimit = [double]$m.CommitLimit.NextValue()
+            if ($commitLimit -gt 0) { $commitPct = [int][math]::Round(100 * $commitUsed / $commitLimit) } else { $commitUsed = $null; $commitLimit = $null }
+        } catch { $commitUsed = $null; $commitLimit = $null; $commitPct = $null }
+    }
+
+    # How much of its speed the processor is being allowed. Below 100 it is being held back - by heat, by
+    # the power plan, or by running on battery. Turbo can read over 100, which is simply "all of it".
+    $speedPct = $null; $speedMhz = $null
+    if ($m.Speed) { try { $v = [double]$m.Speed.NextValue(); if ($v -gt 0) { $speedPct = [int][math]::Round([math]::Min(100, $v)) } } catch { } }
+    if ($m.SpeedMhz) { try { $v = [double]$m.SpeedMhz.NextValue(); if ($v -gt 0) { $speedMhz = [int]$v } } catch { } }
+
+    # How busy the disk is. Windows counts idle time, so busy is what is left of it.
+    $diskBusy = $null; $diskQueue = $null
+    if ($m.DiskIdle) {
+        try {
+            $idle = [double]$m.DiskIdle.NextValue()
+            if ($idle -ge 0) { $diskBusy = [int][math]::Round([math]::Max(0, 100 - [math]::Min(100, $idle))) }
+        } catch { }
+    }
+    if ($m.DiskQueue) { try { $diskQueue = [math]::Round([double]$m.DiskQueue.NextValue(), 1) } catch { } }
 
     # Which programs are using the processor. Windows counts per core, so divide by cores to match
     # Task Manager. Programs are keyed by process id, then added up under their friendly name.
@@ -725,6 +802,32 @@ function Get-QpLiveReading {
                     Percent = [math]::Round([double]$ps.BatteryLifePercent * 100)
                     PluggedIn = ([string]$ps.PowerLineStatus -eq 'Online')
                     Charging = (([int]$ps.BatteryChargeStatus -band 8) -ne 0)
+                    Watts = $null; Direction = 'steady'; MinutesLeft = $null
+                }
+                # What the cell itself says it is giving or taking. Windows' own "time remaining" is not
+                # used: on mains it comes back as a made-up number (71582788 minutes on this laptop), so
+                # the time left is worked out from the charge in the battery and the draw just measured.
+                if ($m.BatteryRate) {
+                    try {
+                        $b = @($m.BatteryRate.Get())[0]
+                        if ($b) {
+                            $rate = [double]$b.DischargeRate
+                            $charge = [double]$b.ChargeRate
+                            $volts = [double]$b.Voltage / 1000
+                            $left = [double]$b.RemainingCapacity
+                            # Most batteries report milliwatts. Some report milliamps, which only makes
+                            # sense once multiplied by the voltage; that is what the volts are for.
+                            $toWatts = { param($mw) if ($volts -gt 0 -and $mw -gt 0 -and $mw -lt 1000) { ($mw * $volts) / 1000 } else { $mw / 1000 } }
+                            if ($rate -gt 0) {
+                                $battery.Watts = [math]::Round((& $toWatts $rate), 1)
+                                $battery.Direction = 'draining'
+                                if ($battery.Watts -gt 0 -and $left -gt 0) { $battery.MinutesLeft = [int][math]::Round(60 * ($left / 1000) / $battery.Watts) }
+                            } elseif ($charge -gt 0) {
+                                $battery.Watts = [math]::Round((& $toWatts $charge), 1)
+                                $battery.Direction = 'charging'
+                            }
+                        }
+                    } catch { }
                 }
             }
         } catch { }
@@ -736,6 +839,9 @@ function Get-QpLiveReading {
         CpuTempC = $cpuTemp; CpuTempSource = $m.ZoneName; CpuTempStuck = $stuck
         CpuLimitPct = $limit; CpuThrottled = ($null -ne $limit -and $limit -lt 100)
         MemTotal = $m.MemTotal; MemUsed = $memUsed
+        CommitUsed = $commitUsed; CommitLimit = $commitLimit; CommitPct = $commitPct
+        SpeedPct = $speedPct; SpeedMhz = $speedMhz
+        DiskBusyPct = $diskBusy; DiskQueue = $diskQueue
         Battery = $battery
         # The card with its own memory first: on a gaming laptop that's the one that matters.
         Gpus = @($gpus | Sort-Object @{ Expression = { $_.Discrete }; Descending = $true }, @{ Expression = { $_.DedicatedTotal }; Descending = $true })
@@ -759,6 +865,196 @@ function Get-QpHeatWord {
         elseif ($c -ge $t.Comfortable) { 'comfortable', 'ok' }
         else { 'cool', 'ok' }
     [pscustomobject]@{ Word = $word; Level = $level }
+}
+
+# ---------------------------------------------------------------- what a session cost
+#
+# The tiles say what is happening this second. A session record is the same readings remembered: the
+# peaks, the minutes spent hot or held back, and what was busiest while it happened. It is kept in
+# memory only, it starts when you press the button, and it ends when Quietpane closes - there is no
+# service and no scheduled task behind it.
+#
+# Two rules keep it honest. Peaks are peaks, never averages, because an average hides the moment the
+# PC choked. And a gap is a gap: if the readings stop for a while because the PC slept or the app was
+# busy elsewhere, that time is recorded as missing rather than drawn through.
+
+function New-QpSessionWatch {
+    <# Starts a session record. Pure bookkeeping - it reads nothing by itself. #>
+    param([int]$IntervalSeconds = 10, $Now = $null)
+    if (-not $Now) { $Now = Get-Date }
+    [pscustomobject]@{
+        Started = $Now; Ended = $null; IntervalSeconds = [math]::Max(1, $IntervalSeconds)
+        Samples = 0; LastAt = $null; WatchedSeconds = 0.0; Gaps = 0; GapSeconds = 0.0
+        PeakCpu = $null; PeakCpuTempC = $null; PeakGpuTempC = $null; PeakGpuUsage = $null
+        PeakCommitPct = $null; PeakMemUsed = $null; PeakDiskBusy = $null
+        HotSeconds = 0.0; VeryHotSeconds = 0.0; HeldBackSeconds = 0.0; HeldBackSpells = 0; WasHeldBack = $false
+        SlowestWhenBusyPct = $null
+        BatteryStart = $null; BatteryEnd = $null; PeakWatts = $null
+        Busy = @{}
+    }
+}
+
+function Add-QpSessionSample {
+    <#
+        Folds one reading into the record. Each reading stands for the stretch of time since the one
+        before it, so that stretch is what the minutes below are counted in. A stretch longer than three
+        times the interval means the readings stopped - the PC slept, or the app was busy - and it is
+        counted as a gap instead of as time spent hot.
+    #>
+    param([Parameter(Mandatory)]$Watch, [Parameter(Mandatory)]$Reading)
+    if (-not $Reading) { return $Watch }
+    $at = if ($Reading.At) { [datetime]$Reading.At } else { Get-Date }
+    $span = 0.0
+    if ($Watch.LastAt) {
+        $span = ($at - [datetime]$Watch.LastAt).TotalSeconds
+        if ($span -lt 0) { $span = 0 }
+        if ($span -gt ($Watch.IntervalSeconds * 3)) {
+            $Watch.Gaps++
+            $Watch.GapSeconds += $span
+            $span = 0   # nothing is known about that time, so nothing is claimed about it
+        }
+    }
+    $Watch.LastAt = $at
+    $Watch.Samples++
+    $Watch.WatchedSeconds += $span
+
+    function Set-Peak([string]$Name, $Value) {
+        if ($null -eq $Value) { return }
+        $v = [double]$Value
+        if ($null -eq $Watch.$Name -or $v -gt [double]$Watch.$Name) { $Watch.$Name = $v }
+    }
+    Set-Peak 'PeakCpu' $Reading.CpuUsage
+    Set-Peak 'PeakCpuTempC' $Reading.CpuTempC
+    Set-Peak 'PeakCommitPct' $Reading.CommitPct
+    Set-Peak 'PeakMemUsed' $Reading.MemUsed
+    Set-Peak 'PeakDiskBusy' $Reading.DiskBusyPct
+    $hottestGpu = $null
+    foreach ($g in @($Reading.Gpus)) {
+        Set-Peak 'PeakGpuUsage' $g.Usage
+        Set-Peak 'PeakGpuTempC' $g.TempC
+        if ($null -ne $g.TempC -and ($null -eq $hottestGpu -or [double]$g.TempC -gt $hottestGpu)) { $hottestGpu = [double]$g.TempC }
+    }
+
+    # Heat, in the same words the tiles use, so the record and the screen never disagree.
+    $level = 'ok'
+    foreach ($t in $Reading.CpuTempC, $hottestGpu) {
+        if ($null -eq $t) { continue }
+        $w = Get-QpHeatWord $t
+        if ($w.Level -eq 'high') { $level = 'high' } elseif ($w.Level -eq 'warn' -and $level -ne 'high') { $level = 'warn' }
+    }
+    if ($level -eq 'high') { $Watch.VeryHotSeconds += $span; $Watch.HotSeconds += $span }
+    elseif ($level -eq 'warn') { $Watch.HotSeconds += $span }
+
+    # Held back means Windows' own cooling brake is on. A processor idling at a low clock is not being
+    # held back, it is being sensible, so the clock alone is never called throttling.
+    if ($Reading.CpuThrottled) {
+        $Watch.HeldBackSeconds += $span
+        if (-not $Watch.WasHeldBack) { $Watch.HeldBackSpells++ }
+        $Watch.WasHeldBack = $true
+    } else { $Watch.WasHeldBack = $false }
+    # How much of its speed it had while it was actually working: the figure that means something.
+    if ($null -ne $Reading.SpeedPct -and $null -ne $Reading.CpuUsage -and [double]$Reading.CpuUsage -ge 50) {
+        if ($null -eq $Watch.SlowestWhenBusyPct -or [double]$Reading.SpeedPct -lt [double]$Watch.SlowestWhenBusyPct) {
+            $Watch.SlowestWhenBusyPct = [double]$Reading.SpeedPct
+        }
+    }
+
+    if ($Reading.Battery) {
+        if ($null -eq $Watch.BatteryStart) { $Watch.BatteryStart = [int]$Reading.Battery.Percent }
+        $Watch.BatteryEnd = [int]$Reading.Battery.Percent
+        if ($Reading.Battery.Direction -eq 'draining') { Set-Peak 'PeakWatts' $Reading.Battery.Watts }
+    }
+
+    # Who was at the top of the list, and for how long. One name per reading keeps it honest: it is
+    # "busiest at the time", not a measure of how much work each program did.
+    $top = @($Reading.CpuTop | Where-Object { $_ -and $_.Name })
+    if ($top.Count -and $span -gt 0) {
+        $name = [string]$top[0].Name
+        if (-not $Watch.Busy.ContainsKey($name)) { $Watch.Busy[$name] = 0.0 }
+        $Watch.Busy[$name] += $span
+    }
+    return $Watch
+}
+
+function Stop-QpSessionWatch {
+    param([Parameter(Mandatory)]$Watch, $Now = $null)
+    if (-not $Watch.Ended) { $Watch.Ended = $(if ($Now) { $Now } else { Get-Date }) }
+    return $Watch
+}
+
+function Format-QpSpan {
+    <# A length of time in plain words: "40 seconds", "12 minutes", "3 h 20 min". #>
+    param([double]$Seconds)
+    if ($Seconds -lt 1) { return 'no time at all' }
+    if ($Seconds -lt 90) { return ('{0} seconds' -f [int][math]::Round($Seconds)) }
+    if ($Seconds -lt 3600) {
+        $mins = [int][math]::Round($Seconds / 60)
+        return $(if ($mins -eq 1) { '1 minute' } else { "$mins minutes" })
+    }
+    $h = [int][math]::Floor($Seconds / 3600)
+    $m = [int][math]::Round(($Seconds - ($h * 3600)) / 60)
+    if ($m -ge 60) { $h++; $m = 0 }
+    return $(if ($m -gt 0) { '{0} h {1} min' -f $h, $m } else { $(if ($h -eq 1) { '1 hour' } else { "$h hours" }) })
+}
+
+function Get-QpSessionSummary {
+    <#
+        The session in plain sentences. Anything this PC does not report is left out rather than shown
+        as a zero, and the headline is the one thing worth knowing.
+    #>
+    param([Parameter(Mandatory)]$Watch, $Now = $null)
+    if (-not $Now) { $Now = Get-Date }
+    $end = if ($Watch.Ended) { [datetime]$Watch.Ended } else { $Now }
+    $total = ($end - [datetime]$Watch.Started).TotalSeconds
+    $lines = New-Object System.Collections.ArrayList
+    [void]$lines.Add('Watched for {0}.' -f (Format-QpSpan $total))
+    if ($Watch.Samples -lt 2) {
+        return [pscustomobject]@{ Headline = 'Just started - nothing to tell you yet.'; Lines = @($lines); Seconds = $total }
+    }
+
+    $heat = @()
+    if ($null -ne $Watch.PeakCpuTempC) { $heat += 'the processor reached {0:N0} C' -f $Watch.PeakCpuTempC }
+    if ($null -ne $Watch.PeakGpuTempC) { $heat += 'graphics reached {0:N0} C' -f $Watch.PeakGpuTempC }
+    if ($heat.Count) { [void]$lines.Add('At its hottest ' + ($heat -join ', ') + '.') }
+    if ($Watch.VeryHotSeconds -ge 1) { [void]$lines.Add('Very hot for {0}.' -f (Format-QpSpan $Watch.VeryHotSeconds)) }
+    elseif ($Watch.HotSeconds -ge 1) { [void]$lines.Add('Hot for {0}.' -f (Format-QpSpan $Watch.HotSeconds)) }
+
+    if ($Watch.HeldBackSeconds -ge 1) {
+        $spells = if ($Watch.HeldBackSpells -eq 1) { 'once' } else { '{0} times' -f $Watch.HeldBackSpells }
+        # The outer brackets matter: inside a method call, a comma separates arguments, so a format
+        # string with more than one value has to be wrapped or it is handed its values one at a time.
+        [void]$lines.Add(('Held back to cool off for {0}, {1}.' -f (Format-QpSpan $Watch.HeldBackSeconds), $spells))
+    }
+    if ($null -ne $Watch.SlowestWhenBusyPct -and $Watch.SlowestWhenBusyPct -lt 90) {
+        [void]$lines.Add('While it was working hardest it had {0:N0}% of its speed.' -f $Watch.SlowestWhenBusyPct)
+    }
+
+    if ($null -ne $Watch.PeakMemUsed) {
+        $mem = 'Memory peaked at {0}' -f (Format-QpBytes $Watch.PeakMemUsed)
+        if ($null -ne $Watch.PeakCommitPct) { $mem += ', and Windows had promised {0:N0}% of what it can' -f $Watch.PeakCommitPct }
+        [void]$lines.Add($mem + '.')
+    }
+    if ($null -ne $Watch.PeakCpu) { [void]$lines.Add('The processor peaked at {0:N0}%.' -f $Watch.PeakCpu) }
+
+    if ($null -ne $Watch.BatteryStart -and $null -ne $Watch.BatteryEnd -and $Watch.BatteryStart -ne $Watch.BatteryEnd) {
+        $word = if ($Watch.BatteryEnd -lt $Watch.BatteryStart) { 'dropped' } else { 'went up' }
+        $line = 'The battery {0} from {1}% to {2}%' -f $word, $Watch.BatteryStart, $Watch.BatteryEnd
+        if ($null -ne $Watch.PeakWatts) { $line += ', taking as much as {0:N1} W' -f $Watch.PeakWatts }
+        [void]$lines.Add($line + '.')
+    }
+
+    $busy = @($Watch.Busy.GetEnumerator() | Sort-Object Value -Descending | Select-Object -First 3 | ForEach-Object { $_.Key })
+    if ($busy.Count) { [void]$lines.Add('Busiest: ' + ($busy -join ', ') + '.') }
+    if ($Watch.Gaps -gt 0) {
+        $stretch = if ($Watch.Gaps -eq 1) { 'One stretch went' } else { '{0} stretches went' -f $Watch.Gaps }
+        [void]$lines.Add(('{0} unwatched, {1} in all - the PC was asleep, or Quietpane was busy.' -f $stretch, (Format-QpSpan $Watch.GapSeconds)))
+    }
+
+    $headline = if ($Watch.VeryHotSeconds -ge 60) { 'It ran very hot for {0}.' -f (Format-QpSpan $Watch.VeryHotSeconds) }
+        elseif ($Watch.HeldBackSeconds -ge 60) { 'It was held back to cool off for {0}.' -f (Format-QpSpan $Watch.HeldBackSeconds) }
+        elseif ($null -ne $Watch.PeakCommitPct -and $Watch.PeakCommitPct -ge 90) { 'Memory got tight: Windows had promised {0:N0}% of what it can.' -f $Watch.PeakCommitPct }
+        else { 'Nothing to worry about - it stayed comfortable.' }
+    [pscustomobject]@{ Headline = $headline; Lines = @($lines); Seconds = $total }
 }
 
 function Get-QpBatteryHealth {
@@ -4926,6 +5222,8 @@ footer{border-top:1px solid var(--line);margin-top:32px;padding:16px 0;color:var
 Export-ModuleMember -Function Get-QpInfo, Set-QpLogSink, Write-QpLog, Test-QpAdmin, Get-QpCatalog, Format-QpBytes,
     Set-QpProgressSink, Write-QpProgress, Set-QpCancelCheck, Test-QpCancelled, New-QpScanSummary,
     Get-QpState, Get-QpSystemUsage, Get-QpTotals, New-QpLiveMonitor, Get-QpLiveReading, Get-QpHeatWord, Get-QpProgramName,
+    New-QpCounter, New-QpCounterGroup,
+    New-QpSessionWatch, Add-QpSessionSample, Stop-QpSessionWatch, Get-QpSessionSummary, Format-QpSpan,
     Get-QpBatteryHealth, Get-QpDriveHealth, Get-QpWindowsVersion, Get-QpQuietSnapshot, Update-QpQuietNote, Invoke-QpPutBack,
     Get-QpRestorePoints, Invoke-QpUndo,
     Get-QpPrivacyStatus, Invoke-QpPrivacy,
