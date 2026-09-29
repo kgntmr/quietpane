@@ -2842,7 +2842,7 @@ function Get-QpFirefoxAddons {
 
 function Get-QpBrowserExtensions {
     <#
-        Every add-on in every browser on this PC, with what it may do and where it came from. Read-only.
+        Every add-on in Edge, Chrome, Brave, Vivaldi, Opera, Opera GX and Firefox, with what it may do and where it came from. Read-only.
         The roots can be pointed somewhere else for testing.
     #>
     param($Families = $script:BrowserFamily, [string]$LocalRoot = $env:LOCALAPPDATA, [string]$RoamingRoot = $env:APPDATA, [switch]$NoFirefox)
@@ -4376,7 +4376,8 @@ function Get-QpRecommendedPlanCore {
 function Invoke-QpRecommended {
     <#
         "Quiet my PC now": applies every recommended item that is not done yet, all inside ONE restore point,
-        so "Undo everything" really undoes everything. Returns a plain summary for the Home screen.
+        so "Undo everything" restores every setting in one go (cleared files stay in the Recycle Bin; removed
+        Store apps must be reinstalled from the Store). Returns a plain summary for the Home screen.
     #>
     $plan = Get-QpRecommendedPlan
     if ($plan.IsEmpty) {

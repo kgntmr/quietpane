@@ -66,7 +66,7 @@ Quietpane isn't [digitally signed](#code-signing-policy) yet, so Windows asks a 
     <td width="33%" align="center">
       <a href="docs/screenshot-privacy.png"><img src="docs/screenshot-privacy.png" alt="The Privacy tab: browser add-ons listed with what each one is allowed to read, then camera and microphone use, then the settings you can switch off"></a><br>
       <b>Privacy</b><br>
-      Every browser add-on and what it may read, then 32 settings to switch off.
+      Your browser add-ons and what each may read, then 32 settings to switch off.
     </td>
     <td width="33%" align="center">
       <a href="docs/screenshot-space.png"><img src="docs/screenshot-space.png" alt="The Free up space tab: Worth clearing first, with old installers, forgotten downloads and the Recycle Bin, each with its size"></a><br>
