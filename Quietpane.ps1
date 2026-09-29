@@ -58,6 +58,21 @@ if (-not $SelfTest -and -not (Test-IsAdmin)) {
 Import-Module $modulePath -Force
 $info = Get-QpInfo
 
+# An old unzipped folder opened after an update: open the newer copy in Program Files instead, so the
+# update sticks whichever Quietpane someone happens to double-click. That copy can only have been written
+# by an administrator, so starting it from here, with the rights already granted, is safe. The copy
+# itself is never redirected, so this cannot go round in a circle.
+if (-not $SelfTest -and -not $Scan) {
+    $newer = $null
+    try { $newer = Get-QpNewerInstalledCopy -Running $PSScriptRoot } catch { }
+    if ($newer) {
+        $argList = @('-WindowStyle', 'Hidden', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-STA', '-File', "`"$($newer.Script)`"")
+        if ($Minimized) { $argList += '-Minimized' }
+        if ($Watch) { $argList += '-Watch' }
+        try { Start-Process -FilePath 'powershell.exe' -ArgumentList $argList | Out-Null; exit } catch { }
+    }
+}
+
 # One Quietpane at a time. Two copies could make changes at once and record them in two different
 # restore points, so the second one brings the first to the front and steps aside.
 $script:OnlyInstance = $null
@@ -704,6 +719,25 @@ foreach ($x in $script:BackTitle, $script:BackText, $script:BackList, $backButto
 $script:BackPanel.Child = $backStack
 [void]$homePanel.Children.Add($script:BackPanel)
 
+# A newer Quietpane that you have already downloaded. Shown only when there is one; one line, two buttons.
+$script:UpdatePanel = New-Object System.Windows.Controls.Border
+$script:UpdatePanel.Visibility = 'Collapsed'
+$script:UpdatePanel.Margin = Get-Thick '0,0,12,12'
+$script:UpdatePanel.Padding = Get-Thick '16,10'
+$script:UpdatePanel.Background = Get-Brush '#EAF5F1'
+$script:UpdatePanel.BorderBrush = Get-Brush '#117A68'
+$script:UpdatePanel.BorderThickness = Get-Thick '4,0,0,0'
+$updateRow = New-Object System.Windows.Controls.WrapPanel
+$script:UpdateText = New-Text '' 13.5 'SemiBold' '#0F1B1C' '0,0,16,0'
+$script:UpdateText.VerticalAlignment = 'Center'
+$btnUpdateNow = New-Button 'Install it' -Primary
+$btnUpdateLater = New-Button 'Not now'
+foreach ($b in $btnUpdateNow, $btnUpdateLater) { $b.Margin = Get-Thick '0,0,10,0' }
+foreach ($x in $script:UpdateText, $btnUpdateNow, $btnUpdateLater) { [void]$updateRow.Children.Add($x) }
+$script:UpdatePanel.Child = $updateRow
+Set-MoreInfo $script:UpdateText 'Found in your Downloads folder. Quietpane never goes online to look - this is a file you downloaded.'
+[void]$homePanel.Children.Add($script:UpdatePanel)
+
 # Two simple bars: how full the disk is, and how much memory is in use.
 function New-Meter([string]$Title, [string]$FillColour) {
     $b = New-Object System.Windows.Controls.Border
@@ -924,7 +958,7 @@ $homeRather = New-Text 'Prefer to choose each item yourself? Use the tabs above 
 $homeTop = @($homePanel.Children)[0..1]
 $homePanel.Children.Clear()
 $meters.Margin = Get-Thick '0,20,0,0'
-foreach ($x in @($homeTop) + @($cards, $script:BackPanel, $homeButtons, $homeHint, $script:ResultPanel, $meters, $script:TotalsText, $homeDisclaimer, $homeRather)) { [void]$homePanel.Children.Add($x) }
+foreach ($x in @($homeTop) + @($script:UpdatePanel, $cards, $script:BackPanel, $homeButtons, $homeHint, $script:ResultPanel, $meters, $script:TotalsText, $homeDisclaimer, $homeRather)) { [void]$homePanel.Children.Add($x) }
 
 # 1. Health - how hard the PC is working, how warm it is, and how the battery and drive are holding up.
 # Its own tab, so Home stays calm - and nothing here is read unless this tab is open.
@@ -1317,6 +1351,35 @@ foreach ($opt in @(@('System', 'Match Windows'), @('Light', 'Light'), @('Dark', 
 }
 Set-MoreInfo $appearLabel 'Match Windows follows Settings > Personalisation > Colours, and changes with it while Quietpane is open. Light or Dark stays put whatever Windows does.'
 [void]$aboutPanel.Children.Add($appearRow)
+
+# Updates. Quietpane never goes online to look for one; these are the two ways you can.
+[void]$aboutPanel.Children.Add((New-GroupHeader 'Updates'))
+$script:VersionLine = New-Text '' 13 'Normal' '#0F1B1C' '0,8,0,8'
+[void]$aboutPanel.Children.Add($script:VersionLine)
+$updateButtons = New-Object System.Windows.Controls.WrapPanel
+$btnLookForUpdate = New-Button 'Look for a newer version'
+$btnUpdateFromFile = New-Button 'Install an update from a file...'
+foreach ($b in $btnLookForUpdate, $btnUpdateFromFile) { $b.Margin = Get-Thick '0,0,10,4'; [void]$updateButtons.Children.Add($b) }
+Set-MoreInfo $btnLookForUpdate 'Opens the Quietpane page on GitHub in your web browser. Quietpane itself never connects to anything.'
+Set-MoreInfo $btnUpdateFromFile 'Already downloaded a newer Quietpane.zip? Pick it here and Quietpane installs it for you.'
+[void]$aboutPanel.Children.Add($updateButtons)
+$btnLookForUpdate.Add_Click({ Open-ReleasePage })
+$btnUpdateFromFile.Add_Click({
+    $dlg = New-Object Microsoft.Win32.OpenFileDialog
+    $dlg.Title = 'Pick the Quietpane download'
+    $dlg.Filter = 'Quietpane download (*.zip)|*.zip'
+    try { $dlg.InitialDirectory = Get-QpDownloadsFolder } catch { }
+    if ($dlg.ShowDialog($window)) { Install-QuietpaneUpdate $dlg.FileName }
+})
+$btnUpdateNow.Add_Click({ if ($script:OfferedUpdate) { Install-QuietpaneUpdate $script:OfferedUpdate.Path } })
+$btnUpdateLater.Add_Click({
+    # "Not now" means not for this version; a newer one after it is offered again.
+    try {
+        New-Item -ItemType Directory -Path $info.DataRoot -Force | Out-Null
+        [IO.File]::WriteAllText($script:UpdateDismissedFile, [string]$script:OfferedUpdate.Version)
+    } catch { }
+    $script:UpdatePanel.Visibility = 'Collapsed'
+})
 
 function Get-DocText([string]$File) {
     $p = Join-Path $PSScriptRoot $File
@@ -3446,6 +3509,74 @@ function Show-ChoiceDialog {
     return $script:ChoiceResult
 }
 
+# ------------------------------------------------------------------ updates, without a connection
+$script:UpdateDismissedFile = Join-Path $info.DataRoot 'update-dismissed.txt'
+$script:OfferedUpdate = $null
+
+function Get-VersionLineText {
+    <# "You have Quietpane 1.22.0, from 29 September 2026." - and, once it is a few months old, a nudge. #>
+    $text = "You have Quietpane $($info.Version)"
+    $released = $null
+    try { $released = [datetime]::ParseExact([string]$info.Released, 'yyyy-MM-dd', [Globalization.CultureInfo]::InvariantCulture) } catch { }
+    if (-not $released) { return $text + '.' }
+    $text += ', from ' + $released.ToString('d MMMM yyyy', [Globalization.CultureInfo]::InvariantCulture)
+    if (((Get-Date) - $released).TotalDays -gt 90) { return $text + ' - there may be a newer one.' }
+    return $text + '.'
+}
+
+function Open-ReleasePage {
+    <# Says first that this opens the browser, and that it is the browser - not Quietpane - that connects. #>
+    $choice = Show-ChoiceDialog -Title 'Look for a newer version' -Message ("This opens the Quietpane page on GitHub in your web browser. The newest version is always at the top.`n`n" +
+        "Quietpane itself doesn't connect to anything - your browser does.") -Options @(
+        @{ Key = 'open'; Label = 'Open GitHub in my browser'; Primary = $true }
+    )
+    if ($choice -eq 'open') { Open-AsUser ($info.RepoUrl + '/releases/latest') }
+}
+
+function Update-UpdateOffer([string]$Folder = '') {
+    <# The About line, and the Home offer when a newer download is sitting in Downloads. #>
+    $script:VersionLine.Text = Get-VersionLineText
+    $found = $null
+    try { $found = Find-QpDownloadedUpdate -Folder $Folder } catch { }
+    $dismissed = ''
+    try { if (Test-Path -LiteralPath $script:UpdateDismissedFile) { $dismissed = ([IO.File]::ReadAllText($script:UpdateDismissedFile)).Trim() } } catch { }
+    if ($found -and $found.Version -ne $dismissed) {
+        $script:OfferedUpdate = $found
+        $script:UpdateText.Text = "Quietpane $($found.Version) is in your Downloads."
+        $script:UpdatePanel.Visibility = 'Visible'
+    } else {
+        $script:OfferedUpdate = $null
+        $script:UpdatePanel.Visibility = 'Collapsed'
+    }
+}
+
+function Install-QuietpaneUpdate([string]$Zip) {
+    <#
+        Unpacks a newer Quietpane next to its ZIP and starts it the way a double-click would, so Windows
+        asks for permission as usual; then this window steps aside. Says what will happen first.
+    #>
+    if (Test-Busy) { return }
+    $z = Get-QpZipVersion -Path $Zip
+    if (-not $z) { [void][System.Windows.MessageBox]::Show($window, "That file isn't a Quietpane download, so nothing was done.", 'Quietpane'); return }
+    if ((Compare-QpVersion $z.Version $info.Version) -le 0) {
+        [void][System.Windows.MessageBox]::Show($window, "That is Quietpane $($z.Version), and you already have $($info.Version). Nothing was done.", 'Quietpane'); return
+    }
+    $hash = (Get-FileHash -LiteralPath $z.Path -Algorithm SHA256).Hash
+    $choice = Show-ChoiceDialog -Title 'Install the update' -Message ("Quietpane $($z.Version) will be unpacked next to the file, into a folder called `"Quietpane $($z.Version)`", and started in place of this window. " +
+        "Windows will ask for permission, just as when you first opened Quietpane.`n`n" +
+        "$($z.Name)`nSHA256 $hash`nIt matches the one on the release page if it is genuine.") -Options @(
+        @{ Key = 'install'; Label = "Install Quietpane $($z.Version)"; Primary = $true }
+    )
+    if ($choice -ne 'install') { return }
+    try { $x = Expand-QpUpdate -Zip $z.Path -Current $info.Version }
+    catch { [void][System.Windows.MessageBox]::Show($window, $_.Exception.Message, 'Quietpane'); return }
+    Write-QpLog "Updating to Quietpane $($x.Version) from $($z.Path)" 'STEP'
+    # Step aside first, so the new window is not turned away as a second copy.
+    try { if ($script:OnlyInstance) { $script:OnlyInstance.ReleaseMutex(); $script:OnlyInstance.Dispose(); $script:OnlyInstance = $null } } catch { }
+    Open-AsUser $x.Start
+    $window.Close()
+}
+
 function Test-FindingActionable($f) {
     <#
         Whether there is anything left to do about a finding. Anything with a real file behind it can
@@ -4279,6 +4410,34 @@ function Test-Theme {
         ($missing.Count -eq 0), $used.Count, $(if ($missing.Count) { ', missing ' + ($missing -join ',') } else { '' }), $follows, $holds
 }
 
+function Test-UpdateOffer {
+    <#
+        The About line and the Home offer, drawn into the real window from a made-up Downloads folder: a
+        newer Quietpane ZIP must be offered by version, an older one must not, and nothing else is read.
+    #>
+    $t = Join-Path $env:TEMP ('qp-offer-' + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $t | Out-Null
+    try {
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        function New-OfferZip([string]$Name, [string]$Version) {
+            $src = Join-Path $t ('s' + [guid]::NewGuid().ToString('N'))
+            New-Item -ItemType Directory -Path (Join-Path $src 'src') -Force | Out-Null
+            Set-Content -LiteralPath (Join-Path $src 'src\Quietpane.psm1') -Value ("`$script:AppVersion  = '$Version'")
+            Set-Content -LiteralPath (Join-Path $src 'Quietpane.ps1') -Value '# window'
+            [IO.Compression.ZipFile]::CreateFromDirectory($src, (Join-Path $t $Name))
+            Remove-Item -LiteralPath $src -Recurse -Force
+        }
+        New-OfferZip 'Quietpane.zip' '99.0.0'
+        New-OfferZip 'Quietpane (1).zip' '0.1.0'
+        Update-UpdateOffer -Folder $t
+        $offered = ($script:UpdatePanel.Visibility -eq 'Visible') -and ($script:UpdateText.Text -eq 'Quietpane 99.0.0 is in your Downloads.')
+        Remove-Item -LiteralPath (Join-Path $t 'Quietpane.zip') -Force
+        Update-UpdateOffer -Folder $t
+        $quiet = ($script:UpdatePanel.Visibility -eq 'Collapsed')
+    } finally { Remove-Item -LiteralPath $t -Recurse -Force -ErrorAction SilentlyContinue }
+    'offered: {0}; older ignored: {1}; version line: {2}' -f $offered, $quiet, [bool]($script:VersionLine.Text -match "^You have Quietpane $([regex]::Escape($info.Version)), from \d+ \w+ 20\d\d")
+}
+
 function Test-Badge {
     # The taskbar badge draws and clears again.
     Update-TaskbarBadge ([pscustomobject]@{ Count = 3 })
@@ -4354,6 +4513,7 @@ if ($SelfTest) {
     'session: ' + (Test-SessionCard)
     'holding up: ' + (Test-SteadyCard)
     'theme: ' + (Test-Theme)
+    'updates: ' + (Test-UpdateOffer)
     return
 }
 
@@ -4388,6 +4548,7 @@ function Start-FirstRead {
     } -OnDone {
         param($s)
         Update-FromState $s; Update-PlaceControls; $script:LastReadAt = Get-Date
+        try { Update-UpdateOffer } catch { }
         # The sign-in check is done and nobody has opened the window: back to doing nothing at all.
         if (-not $script:FirstShown) { $timer.Stop() }
     }

@@ -37,3 +37,31 @@ You're welcome to, and it's a reasonable thing to do before running anything wit
 - **Scan the scripts, not just the ZIP.** The files inside are what actually run. Right-click the extracted folder and choose **Scan with Microsoft Defender**, or upload `Quietpane.zip` to a service such as [VirusTotal](https://www.virustotal.com), which unpacks it and reports each file.
 
 Because it's all plain text, the strongest check isn't a scanner at all - it's reading it. [Verify it yourself](README.md#verify-it-yourself) walks through it in four steps, including confirming that the app makes no network connections of any kind.
+
+## If your antivirus or Windows blocked it
+
+Quietpane is **not signed yet**, it asks for administrator rights, and it changes the kind of settings adware also changes. That combination gets it stopped in three different ways, and each one means something different:
+
+| What you see | What it means | What to do |
+|---|---|---|
+| **"Windows protected your PC"** (blue box) | SmartScreen hasn't seen enough people run an unsigned app yet. It isn't a detection. | **More info** > **Run anyway**, once you've checked the download (below). |
+| **"Smart App Control blocked..."**, or Quietpane says *"can't start on this PC yet"* | Windows 11 on this PC only runs signed apps. There is no way round it for an unsigned app, and there shouldn't be. | Wait for the signed release. **Please don't turn Smart App Control off for Quietpane**: on many PCs it can't be turned back on without resetting Windows. |
+| **Your antivirus quarantined or deleted it** | A heuristic - a rule about what files *do*, not a known threat. See [Scanning it yourself](#scanning-it-yourself). | Check the download, then report it to your antivirus as a false positive (below). |
+
+**Never add an exception or turn your protection off because of Quietpane.** If you can't run it with your protection on, wait for the signed release, which is what fixes most of this.
+
+**Check the download first.** Compare its SHA256 with the release page ([how](#check-that-your-download-is-genuine)); if you like, read the code ([Verify it yourself](README.md#verify-it-yourself)).
+
+**Report a false positive.** Every antivirus has a form for this - search for your antivirus's name and "false positive". Attach `Quietpane.zip` from the [release page](https://github.com/kgntmr/quietpane/releases/latest), say it was flagged wrongly, and link to [the source](https://github.com/kgntmr/quietpane). For Microsoft Defender, use the [Microsoft file submission page](https://www.microsoft.com/en-us/wdsi/filesubmission). It helps us if you [tell us](mailto:info@komodoworks.com) which antivirus it was, and the name it gave.
+
+### For the maintainer, with each release
+
+1. Submit `Quietpane.zip` to Microsoft ([file submission](https://www.microsoft.com/en-us/wdsi/filesubmission), as a *software developer*, *incorrectly detected*), before announcing the release.
+2. Submit it to each vendor users have reported, through that vendor's own false-positive form.
+3. Paste this, with the version and SHA256 filled in:
+
+   > Quietpane VERSION, `Quietpane.zip`, SHA256 `...`. Free, open-source (MIT) Windows privacy tool by KomodoWorks, Dublin. Plain-text PowerShell with no executable; full source at https://github.com/kgntmr/quietpane. It changes privacy settings, disables telemetry services, edits the hosts file and can quarantine files - only when the user confirms; most changes can be undone from inside the app. It makes no network connections. We believe this detection is a false positive and are happy to answer questions: info@komodoworks.com.
+
+4. Keep a note of the vendor, the detection name and the reply. Code is never changed to hide from a scanner - if a detection points at something Quietpane genuinely does badly, that gets fixed openly.
+
+**Signing is the real fix.** A signature from the [SignPath Foundation](README.md#code-signing-policy) certificate is the first thing SmartScreen and Smart App Control look for; SmartScreen also builds trust in a signed app as more people run it. Two things stand in the way: the SignPath application (pending), and GitHub Actions, which SignPath signs from and which is currently unavailable on this account.
