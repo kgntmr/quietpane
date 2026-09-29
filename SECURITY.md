@@ -28,3 +28,12 @@ Optional, and takes a minute. Each release lists the **SHA256 checksum** of `Qui
    Get-FileHash "$HOME\Downloads\Quietpane.zip"
    ```
 3. Compare the **Hash** it shows with the SHA256 on the [release page](https://github.com/kgntmr/quietpane/releases/latest). If they match, your copy is genuine. If they don't, delete it and download it again from the release page.
+
+## Scanning it yourself
+
+You're welcome to, and it's a reasonable thing to do before running anything with administrator rights. Two honest notes about what you'll see:
+
+- **A few engines may flag it, and that doesn't mean it's infected.** Quietpane switches off telemetry services, edits the hosts file and changes startup entries. Those are exactly the actions some scanners score as "riskware", "HackTool" or "PUA" on sight, because malware does them too - the difference is consent, and a scanner can't see consent. A handful of heuristic hits on a debloat script is ordinary; a broad consensus across the big engines would not be, and we'd want to hear about it.
+- **Scan the scripts, not just the ZIP.** The files inside are what actually run. Right-click the extracted folder and choose **Scan with Microsoft Defender**, or upload `Quietpane.zip` to a service such as [VirusTotal](https://www.virustotal.com), which unpacks it and reports each file.
+
+Because it's all plain text, the strongest check isn't a scanner at all - it's reading it. [Verify it yourself](README.md#verify-it-yourself) walks through it in four steps, including confirming that the app makes no network connections of any kind.

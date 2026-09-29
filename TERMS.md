@@ -1,6 +1,6 @@
 # Terms of Use: Quietpane
 
-**Last updated: 23 September 2026**
+**Last updated: 29 September 2026**
 
 These terms explain, in plain language, how you may use Quietpane. The software itself is licensed under the [MIT License](LICENSE). Where these terms and the MIT License differ on copyright or licensing, the MIT License applies.
 
@@ -9,7 +9,7 @@ Quietpane is developed by **KomodoWorks**, an independent technology studio in D
 It is **free**. There's no purchase, no subscription, no account and no in-app offer.
 
 ## 2. What it does
-Quietpane can look at your computer without changing it (the Safety scan, the Health tab, "Where your space went", "What's talking to the internet", what each startup program costs you, what your browser add-ons are allowed to read, how your PC holds up over a session while you ask it to watch, Windows' own record of how steady it has been, and the record of which apps used your camera, microphone and location). When you choose to, it can also change Windows and application settings, switch off services, scheduled tasks and startup items, stop an app using the camera, microphone or location, tell a browser not to load an add-on you picked (a setting under your own account, which the browser reports as blocked by an administrator), add entries to the Windows hosts file, remove pre-installed apps, run a program's own uninstaller, move files and folders you pick to the Recycle Bin, write a session up as a page on your Desktop when you ask for it, add or remove its own Start menu and desktop shortcuts, start itself when you sign in (a task in Task Scheduler) and, if you choose, check once at that moment for anything that switched itself back on, keep its own copy in Program Files for those two to open, and deal with threats: ask Microsoft Defender to remove them, quarantine them, or delete them.
+Quietpane can look at your computer without changing it (the Safety scan, the Health tab - including asking the drive it runs from about its own temperature, wear and hours, which opens the drive read-only and alters nothing on it - "Where your space went", "What's talking to the internet", what each startup program costs you, what your browser add-ons are allowed to read, how your PC holds up over a session while you ask it to watch, Windows' own record of how steady it has been, and the record of which apps used your camera, microphone and location). When you choose to, it can also change Windows and application settings, switch off services, scheduled tasks and startup items, stop an app using the camera, microphone or location, tell a browser not to load an add-on you picked (a setting under your own account, which the browser reports as blocked by an administrator), add entries to the Windows hosts file, remove pre-installed apps, run a program's own uninstaller, move files and folders you pick to the Recycle Bin, write a session up as a page on your Desktop when you ask for it, add or remove its own Start menu and desktop shortcuts, start itself when you sign in (a task in Task Scheduler) and, if you choose, check once at that moment for anything that switched itself back on, keep its own copy in Program Files for those two to open, and deal with threats: ask Microsoft Defender to remove them, quarantine them, or delete them.
 
 **It only makes changes you have chosen and confirmed.** Before applying settings you can use "Preview" to see exactly what would change.
 
@@ -27,7 +27,9 @@ Most changes are recorded in a restore point that you can undo, and clean-up onl
 ## 4. No warranty
 Quietpane is provided free of charge, **"as is"**, without warranty of any kind, to the extent permitted by applicable law. Every PC is different, and Windows and third-party updates can change how settings behave. We can't guarantee the app will suit your particular system.
 
-The Safety scan relies on Microsoft Defender and on Quietpane's own checks. **It cannot guarantee that a PC is free of malware**, and a finding from Quietpane's own checks is a signal, not proof. Readings on the Health tab come from Windows and your drivers, and may be approximate.
+The Safety scan relies on Microsoft Defender and on Quietpane's own checks. **It cannot guarantee that a PC is free of malware**, and a finding from Quietpane's own checks is a signal, not proof.
+
+**Health readings** come from Windows, from your drivers and - for the drive's temperature, wear and hours - from the drive itself, and may be approximate. The processor's temperature comes from Windows' thermal sensor, which on some PCs is a sensor near the chip rather than the chip; reading the chip directly would need a kernel driver, and Quietpane will not install one. Where a figure cannot be had, the app says **not shared** rather than showing a number. The single sentence at the top of the Health tab is a **summary of those same readings, not advice**: it says what is happening, never what you ought to do about it, and it is not a diagnosis of a hardware fault. If you think a drive or battery is failing, use the manufacturer's own tools and keep backups.
 
 **Browser add-ons:** Quietpane reports what an add-on asks the browser for, as written in the add-on's own manifest. It cannot tell a useful add-on from a harmful one - an ad blocker and a password stealer ask for the same things - and it does not judge one. Switching an add-on off uses the browser's own policy setting, which the browser reports as blocked by an administrator.
 

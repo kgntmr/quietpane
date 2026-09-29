@@ -5,13 +5,18 @@
 <h1 align="center">Quietpane</h1>
 
 <p align="center">
-  <b>Take your Windows PC back.</b><br>
-  Switch off tracking, clear out the bloat your PC came with, and free up space. Everything happens on your PC, and nothing leaves it.<br><br>
+  <b>See what your PC is telling on you, and switch it off.</b><br>
+  Every browser add-on and what it is allowed to read. Which apps used your camera and microphone, and when. What is talking to the internet right now. Then the tracking, the bloat and the wasted space.<br>
+  Everything happens on your PC, and nothing leaves it.<br><br>
   Developed by <a href="https://www.komodoworks.com"><b>KomodoWorks.com</b></a> &middot; Free &amp; open source (MIT) &middot; Windows 10 / 11
 </p>
 
 <p align="center">
   <a href="https://github.com/kgntmr/quietpane/releases/latest/download/Quietpane.zip"><b>⬇&nbsp;&nbsp;Download Quietpane</b></a> &nbsp;(one small ZIP file)
+</p>
+
+<p align="center">
+  <sub><b>No <code>.exe</code>, no installer, no compiled anything.</b> Quietpane is plain-text PowerShell, so you can read every line before you run it - and you should, with anything that asks for administrator rights. <a href="#verify-it-yourself">How to check it in four steps</a>.</sub>
 </p>
 
 <p align="center"><img src="docs/screenshot-home.png" width="820" alt="Quietpane home screen: cards showing what could be better, and one button that does it"></p>
@@ -32,7 +37,9 @@ Quietpane isn't [digitally signed](#code-signing-policy) yet, so Windows asks a 
 | "Do you want to run this file?" | **Run** |
 | "Do you want to allow this app to make changes?" | **Yes** |
 
-Just want a check-up that changes nothing? Double-click **Safety scan only** instead.
+**You should be suspicious of that**, and of anything else that asks for administrator rights. A signing certificate has been [applied for](#code-signing-policy); until it comes through, the honest answer is that a signature only tells you who published something, not what it does. Quietpane offers you the stronger thing instead: there is no `.exe` and nothing compiled, so you can read the whole app before running it, and [check in about a minute](#verify-it-yourself) that it makes no network connections at all.
+
+**Want to look before you leap?** Double-click **Safety scan only**. It changes nothing on your PC - it only looks and tells you what it found.
 
 > **A good start, not a guarantee.** Quietpane tidies up the usual troublemakers, but it can't promise a PC is clean. If yours still feels wrong, run a deeper scan with a dedicated security tool too.
 
@@ -45,7 +52,7 @@ Just want a check-up that changes nothing? Double-click **Safety scan only** ins
 - **Owns up when something goes wrong.** If a part of your PC can't be read, that part says so and the rest still works. If Undo can't put something back, it says how many and keeps the restore point so you can try again. One job runs at a time, only one copy of the app opens at once, and an error never takes the window down with it.
 - **Says less, means more.** Every screen is one plain line per thing, in everyday words. The detail behind it is one hover or one Tab away, and the full running commentary is always in **Show details** at the bottom. An automated test keeps the window from filling up with words again.
 - **Works for everyone.** Everything can be done with a keyboard alone, with a clear outline showing where you are; every control has a name screen readers such as Narrator can say, and the status line is read out as it changes. All text meets the WCAG AA contrast standard, and the automated tests fail if a control ever loses its name or a colour gets too faint to read.
-- **Hides nothing.** Plain-text PowerShell you can read, plus three short C# blocks (the graphics driver's temperature, adding up folder sizes, and making the Start-menu shortcut) and two lines that give the app its own taskbar icon and a sharp window. No installer and no `.exe`: it runs from the folder you unzip, and only copies itself to Program Files if you ask for shortcuts or to start it when you sign in.
+- **Hides nothing.** Plain-text PowerShell you can read, plus four short C# blocks (the graphics driver's temperature, the drive's own temperature and wear, adding up folder sizes, and making the Start-menu shortcut) and two lines that give the app its own taskbar icon and a sharp window. No installer and no `.exe`: it runs from the folder you unzip, and only copies itself to Program Files if you ask for shortcuts or to start it when you sign in.
 
 ## A look around
 
@@ -54,7 +61,7 @@ Just want a check-up that changes nothing? Double-click **Safety scan only** ins
     <td width="33%" align="center">
       <a href="docs/screenshot-health.png"><img src="docs/screenshot-health.png" alt="The Health tab: one sentence saying how the PC is doing, then matching tiles for the processor, graphics, memory and drive, each with its figure, a bar, a temperature and the last two minutes, and one list of the busiest programs"></a><br>
       <b>Health</b><br>
-      How hard it is working and how warm it is - and how it held up over the whole session.
+      One sentence saying how it's doing, then the working: busy, warm, memory, drive.
     </td>
     <td width="33%" align="center">
       <a href="docs/screenshot-privacy.png"><img src="docs/screenshot-privacy.png" alt="The Privacy tab: browser add-ons listed with what each one is allowed to read, then camera and microphone use, then the settings you can switch off"></a><br>
@@ -114,7 +121,7 @@ Then: which apps used your camera, microphone and location, and when, as Windows
 
 ## Verify it yourself
 
-1. **Read it.** The app is `Quietpane.ps1` (the window), `src/Quietpane.psm1` (the engine) and `src/catalog/*.psd1` (the lists of settings, apps, folders and brands). The non-PowerShell code is three short C# blocks in the engine, all of them readable in `src/Quietpane.psm1`: one asks the graphics driver three read-only questions (list the adapters, ask each one, close it), one adds up folder sizes for "Where your space went" (it reads names and sizes and opens nothing), and one makes the Start-menu shortcut through Windows' own shortcut object. The window adds two lines of its own: one names the app to Windows, so the taskbar shows its icon instead of PowerShell's, and one asks Windows to draw the window at your screen's real resolution.
+1. **Read it.** The app is `Quietpane.ps1` (the window), `src/Quietpane.psm1` (the engine) and `src/catalog/*.psd1` (the lists of settings, apps, folders and brands). The non-PowerShell code is four short C# blocks in the engine, all of them readable in `src/Quietpane.psm1`: one asks the graphics driver three read-only questions (list the adapters, ask each one, close it), one asks the drive about its own temperature and wear (it opens the drive with **no read or write rights at all** - only enough to ask it about itself - so it cannot alter a byte, and closes it again), one adds up folder sizes for "Where your space went" (it reads names and sizes and opens nothing), and one makes the Start-menu shortcut through Windows' own shortcut object. The window adds two lines of its own: one names the app to Windows, so the taskbar shows its icon instead of PowerShell's, and one asks Windows to draw the window at your screen's real resolution.
 2. **Search for network code.** In the folder, run:
    ```powershell
    Select-String -Path .\Quietpane.ps1, .\src\Quietpane.psm1 -Pattern 'Invoke-WebRequest|Invoke-RestMethod|WebClient|HttpClient|BitsTransfer|TcpClient|curl|wget|DownloadString'
@@ -124,6 +131,18 @@ Then: which apps used your camera, microphone and location, and when, as Windows
 4. **See what it keeps.** `%ProgramData%\Quietpane` holds restore points and their logs, the audit log, the quarantine, and a few small notes (see the [Privacy Policy](PRIVACY.md)). Scan reports go on your Desktop. Delete any of it whenever you like. Only if you add shortcuts or the sign-in start: `C:\Program Files\Quietpane` holds a copy of the app's own files, and Task Scheduler has one task, **Quietpane (KomodoWorks)**, which the Safety scan labels as Quietpane's own.
 
 ## FAQ
+
+**Isn't this just another "PC optimizer"?**
+That's a fair question to lead with - it's a category full of scams, and several famous names in it ended up shipping adware or worse. Quietpane is free with nothing to upsell, there is no "pro" version and no account. It never invents problems: a setting your PC doesn't have is shown as **[not on this PC]** rather than as something to fix, a reading your PC won't share says **not shared** rather than showing a zero, and it says plainly that it **cannot** promise a PC is clean. It doesn't promise to make anything faster. And it's MIT-licensed plain text, so none of this has to be taken on trust - see [Verify it yourself](#verify-it-yourself).
+
+**Why does it need administrator rights?**
+Because the things it changes are system settings - services, scheduled tasks, machine-wide registry values. Anything that could change those without administrator rights would be a Windows security flaw. Use **Safety scan only** if you'd rather it just looked, and read [what it deliberately doesn't do](#what-it-deliberately-doesnt-do) before you give it anything.
+
+**Windows says "Unknown publisher". Should I be worried?**
+You should be careful with any unsigned app that wants administrator rights, including this one. A certificate has been [applied for](#code-signing-policy). Until it arrives, the thing worth knowing is that Quietpane has no `.exe` and nothing compiled - you can read the entire app, and confirm in a minute that it never connects to anything. Anyone offering you a Quietpane `.exe` or a "cracked" version is offering you something else; see the [Security Policy](SECURITY.md#getting-a-genuine-copy).
+
+**Another program says my SSD is at 60 °C and Quietpane says something different.**
+Quietpane is probably right, and the tool that says 60 is probably reading Windows. On a good many PCs the storage driver reports a made-up temperature that never moves whatever the drive is doing - 60 °C at three in the morning and in the middle of a heavy copy alike - along with no wear and no hours. Quietpane asks the drive itself first and only falls back to Windows if the drive won't answer. Watch the number while you copy a large folder: a real one climbs and then falls again.
 
 **A window full of code opened, or Windows asked "How do you want to open this file?"**
 You opened one of the app's own files. Close it, pick nothing, and double-click **Start Quietpane** instead.
@@ -138,7 +157,7 @@ Windows Home and Pro can't go below Required. Switching off the DiagTrack servic
 That service, task or program isn't on your Windows version, or is already gone.
 
 **Is my download genuine?**
-Only download from this repository's [Releases](https://github.com/kgntmr/quietpane/releases) page. [Here's how to check the file](SECURITY.md#check-that-your-download-is-genuine).
+Only download from this repository's [Releases](https://github.com/kgntmr/quietpane/releases) page, and check the SHA256 printed there against your copy - [how to do that](SECURITY.md#check-that-your-download-is-genuine). You can also [scan it yourself](SECURITY.md#scanning-it-yourself) before running it.
 
 **I moved the Quietpane folder and my shortcut stopped working.**
 Shortcuts made before 1.11.0 opened the folder you unzipped. Double-click **Start Quietpane** in the folder's new place once: it points every Quietpane shortcut, including one pinned to the taskbar, at its own copy in Program Files, so it can't happen again.
@@ -179,7 +198,7 @@ Free code signing provided by [SignPath.io](https://about.signpath.io), certific
   ```powershell
   Start-Process powershell -Verb RunAs -ArgumentList '-NoExit','-ExecutionPolicy','Bypass','-File',"$PWD\tests\Run-QuietpaneTests.ps1",'-Live'
   ```
-  An elevated window says "Administrator:" in its title bar. 171 checks run there; the one left over only runs on a PC without Defender.
+  An elevated window says "Administrator:" in its title bar. Without administrator rights **229 checks run and 10 are skipped** - the quarantine round trip, permanent deletion, the audit log, the sign-in start and EICAR; the elevated window runs those too. One check only ever runs on a PC without Defender.
 - **Check by hand:** [`docs/manual-checks.md`](docs/manual-checks.md) lists what still needs a person, including the AMTSO feature checks. Those stay manual on purpose: automating them would mean the app downloading files.
 - **Contribute:** the lists in [`src/catalog/`](src/catalog) are plain data, so adding a setting, app, folder, brand or startup note needs no code. Describe side effects honestly, and test with **Preview** first. The reasons behind a few design choices are in [`docs/LESSONS-LEARNED.md`](docs/LESSONS-LEARNED.md).
 
