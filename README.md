@@ -170,6 +170,8 @@ Removing it doesn't undo its changes, so use **Undo** first if you want your PC 
 - **[Privacy Policy](PRIVACY.md):** collects no personal data and makes no network connections.
 - **[Terms of Use](TERMS.md):** free, open source, provided as is. Irish law; your consumer rights are unaffected.
 - **[Security Policy](SECURITY.md):** reporting a vulnerability, and telling a genuine copy from a fake.
+- **[Contributing](CONTRIBUTING.md):** how to add to the lists, and the rules the tests enforce.
+- **[Code of Conduct](CODE_OF_CONDUCT.md):** Contributor Covenant 2.1.
 - **[License](LICENSE):** MIT.
 
 Quietpane is independent and not affiliated with or endorsed by Microsoft, NVIDIA, Intel, AMD or any PC maker. All trademarks belong to their owners.
@@ -180,7 +182,9 @@ Free code signing provided by [SignPath.io](https://about.signpath.io), certific
 
 > **Status:** applied for in September 2026, waiting for approval. Until then releases are **not signed** and Windows shows "Unknown publisher". This section will say when signed releases start.
 
-**What gets signed:** only files built from this repository's source by GitHub Actions and published on its [Releases](https://github.com/kgntmr/quietpane/releases) page. Every signing request is approved by hand.
+**What gets signed:** only files published on this repository's [Releases](https://github.com/kgntmr/quietpane/releases) page. Every signing request is approved by hand.
+
+**How releases are built today, stated plainly:** GitHub Actions builds and tests Quietpane from this repository's source on every push and pull request, and keeps the resulting ZIP as a build artifact. **Release publication is currently performed manually** - the file attached to a release is built on a maintainer's PC and uploaded by hand, so the published download is not yet the artifact Actions produced. Until that changes, treat the SHA256 on the release page and the readable source as the things to check, not the build pipeline. This section will say so when the release pipeline consumes the Actions-built artifact.
 
 | Role | Members |
 |---|---|
@@ -200,7 +204,8 @@ Free code signing provided by [SignPath.io](https://about.signpath.io), certific
   ```
   An elevated window says "Administrator:" in its title bar. Without administrator rights **229 checks run and 10 are skipped** - the quarantine round trip, permanent deletion, the audit log, the sign-in start and EICAR; the elevated window runs those too. One check only ever runs on a PC without Defender.
 - **Check by hand:** [`docs/manual-checks.md`](docs/manual-checks.md) lists what still needs a person, including the AMTSO feature checks. Those stay manual on purpose: automating them would mean the app downloading files.
-- **Contribute:** the lists in [`src/catalog/`](src/catalog) are plain data, so adding a setting, app, folder, brand or startup note needs no code. Describe side effects honestly, and test with **Preview** first. The reasons behind a few design choices are in [`docs/LESSONS-LEARNED.md`](docs/LESSONS-LEARNED.md).
+- **Contribute:** the lists in [`src/catalog/`](src/catalog) are plain data, so adding a setting, app, folder, brand or startup note needs no code. Describe side effects honestly, and test with **Preview** first. [`CONTRIBUTING.md`](CONTRIBUTING.md) shows a real entry, the word limits the tests enforce, and the two tests that catch people out. The reasons behind a few design choices are in [`docs/LESSONS-LEARNED.md`](docs/LESSONS-LEARNED.md).
+- **What CI checks:** every push and pull request runs the full suite on `windows-latest`, builds the ZIP, and verifies that every script file is still plain ASCII with CRLF endings - see [`.github/workflows/tests.yml`](.github/workflows/tests.yml).
 
 ---
 

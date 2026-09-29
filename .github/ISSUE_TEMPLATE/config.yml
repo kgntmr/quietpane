@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Found a security problem?
+    url: https://github.com/kgntmr/quietpane/blob/main/SECURITY.md
+    about: 'Please don''t post it publicly. Email info@komodoworks.com with the subject "Security: Quietpane".'
+  - name: Just a question?
+    url: https://komodoworks.com/en/contact
+    about: Anything that isn't a bug or a suggestion for one of the lists.
+  - name: How do I remove Quietpane, and other common questions
+    url: https://github.com/kgntmr/quietpane#faq
+    about: The FAQ covers the questions that come up most, including the Windows warnings.
