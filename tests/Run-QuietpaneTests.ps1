@@ -1882,6 +1882,107 @@ Test-Case 'the window keeps its words down' {
     $counts.Count -eq 9 -and $total -lt 2300 -and $counts['Privacy'] -lt 950 -and $counts['Home'] -lt 200 -and $counts['About'] -lt 210
 }
 
+Section 'Updates, without a connection'
+# Made-up downloads in a temporary folder: never the real Downloads folder, never the network.
+$updDir = Join-Path $env:TEMP ('qp-upd-' + [guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path $updDir | Out-Null
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+function New-TestDownload {
+    param([string]$Name, [string]$Version, [switch]$NoWindow, [switch]$Escapes, [switch]$Marked)
+    $src = Join-Path $updDir ('s-' + [guid]::NewGuid().ToString('N'))
+    $app = Join-Path $src 'Quietpane\App files - no need to open'
+    New-Item -ItemType Directory -Path (Join-Path $app 'src') -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $app 'src\Quietpane.psm1') -Value ("# engine`r`n`$script:AppVersion  = '$Version'`r`n`$script:AppReleased = '2027-01-02'")
+    if (-not $NoWindow) { Set-Content -LiteralPath (Join-Path $app 'Quietpane.ps1') -Value '# window' }
+    Set-Content -LiteralPath (Join-Path $src 'Quietpane\Start Quietpane.cmd') -Value '@echo off'
+    $zip = Join-Path $updDir $Name
+    [IO.Compression.ZipFile]::CreateFromDirectory($src, $zip)
+    Remove-Item -LiteralPath $src -Recurse -Force
+    if ($Escapes) {
+        $a = [IO.Compression.ZipFile]::Open($zip, 'Update')
+        $w = New-Object IO.StreamWriter(($a.CreateEntry('../outside.txt')).Open()); $w.Write('x'); $w.Dispose(); $a.Dispose()
+    }
+    if ($Marked) { Set-Content -LiteralPath $zip -Stream 'Zone.Identifier' -Value "[ZoneTransfer]`r`nZoneId=3`r`nHostUrl=https://github.com/" }
+    $zip
+}
+$zNew = New-TestDownload 'Quietpane.zip' '99.1.0' -Marked
+$zOld = New-TestDownload 'Quietpane (1).zip' '0.9.0'
+$zHalf = New-TestDownload 'Quietpane (2).zip' '99.9.0' -NoWindow
+$zEvil = New-TestDownload 'Quietpane (3).zip' '99.8.0' -Escapes
+Test-Case 'which Quietpane is in a ZIP is read from inside it, without unpacking anything' {
+    $z = Get-QpZipVersion -Path $zNew
+    $z.Version -eq '99.1.0' -and $z.Released -eq '2027-01-02' -and
+    @(Get-ChildItem -LiteralPath $updDir -Directory).Count -eq 0
+}
+Test-Case 'a ZIP without both halves of Quietpane is not taken for one' {
+    $null -eq (Get-QpZipVersion -Path $zHalf)
+}
+Test-Case 'a ZIP that names a path outside itself is never offered' {
+    $null -eq (Get-QpZipVersion -Path $zEvil)
+}
+Test-Case 'only the newest download newer than this one is offered, and only files named Quietpane' {
+    Set-Content -LiteralPath (Join-Path $updDir 'Holiday photos.zip') -Value 'not a zip'
+    $f = Find-QpDownloadedUpdate -Folder $updDir -Current '1.22.0'
+    $none = Find-QpDownloadedUpdate -Folder $updDir -Current '100.0.0'
+    $f.Version -eq '99.1.0' -and $f.Name -eq 'Quietpane.zip' -and $null -eq $none
+}
+Test-Case 'an older or same version is refused, not installed' {
+    $older = try { Expand-QpUpdate -Zip $zOld -Current '1.22.0' | Out-Null; $false } catch { $_.Exception.Message -match 'not newer' }
+    $same = try { Expand-QpUpdate -Zip $zNew -Current '99.1.0' | Out-Null; $false } catch { $_.Exception.Message -match 'not newer' }
+    $older -and $same
+}
+Test-Case 'unpacking keeps Windows'' downloaded-from-the-internet mark on every file' {
+    # Without it SmartScreen would no longer look at the new version before it runs.
+    $x = Expand-QpUpdate -Zip $zNew -Current '1.22.0'
+    $files = @(Get-ChildItem -LiteralPath $x.Folder -Recurse -File)
+    $marked = @($files | Where-Object { try { (Get-Content -LiteralPath $_.FullName -Stream 'Zone.Identifier' -Raw -ErrorAction Stop) -match 'ZoneId=3' } catch { $false } })
+    $x.Marked -and $files.Count -ge 3 -and $marked.Count -eq $files.Count -and (Split-Path $x.Start -Leaf) -eq 'Start Quietpane.cmd' -and
+        (Split-Path $x.Folder -Leaf) -eq 'Quietpane 99.1.0'
+}
+Test-Case 'installing the same download twice reuses what was unpacked' {
+    $x = Expand-QpUpdate -Zip $zNew -Current '1.22.0'
+    $x.Reused -and @(Get-ChildItem -LiteralPath $updDir -Directory -Filter 'Quietpane 99.1.0*').Count -eq 1
+}
+Test-Case 'nothing is ever written outside the update''s own folder' {
+    $refused = try { Expand-QpUpdate -Zip $zEvil -Current '1.22.0' | Out-Null; $false } catch { $true }
+    $refused -and -not (Test-Path (Join-Path (Split-Path $updDir) 'outside.txt'))
+}
+Test-Case 'an old folder opens the newer installed copy - and that copy never sends itself anywhere' {
+    $install = Join-Path $updDir 'Program Files copy'
+    New-Item -ItemType Directory -Path (Join-Path $install 'src') -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $install 'src\Quietpane.psm1') -Value "`$script:AppVersion  = '99.2.0'"
+    Set-Content -LiteralPath (Join-Path $install 'Quietpane.ps1') -Value '# window'
+    $fromOld = Get-QpNewerInstalledCopy -Running (Join-Path $updDir 'old folder') -InstallRoot $install -Current '1.22.0'
+    $fromItself = Get-QpNewerInstalledCopy -Running $install -InstallRoot $install -Current '1.22.0'
+    $fromNewer = Get-QpNewerInstalledCopy -Running (Join-Path $updDir 'old folder') -InstallRoot $install -Current '99.3.0'
+    $fromOld.Version -eq '99.2.0' -and $null -eq $fromItself -and $null -eq $fromNewer
+}
+Remove-Item -LiteralPath $updDir -Recurse -Force -ErrorAction SilentlyContinue
+Test-Case 'a downloaded update is started the way a double-click starts it, never with this window''s rights' {
+    # Starting it from the elevated window would give whatever was in the ZIP administrator rights with
+    # nobody asked. It must go through Open-AsUser (Explorer, as the signed-in user).
+    $src = Get-Content (Join-Path $root 'Quietpane.ps1') -Raw
+    $body = [regex]::Match($src, '(?s)function Install-QuietpaneUpdate.*?\n}\r?\n').Value
+    $body -match 'Open-AsUser \$x\.Start' -and $body -notmatch 'Start-Process' -and $body -match 'ReleaseMutex'
+}
+Test-Case 'looking for a newer version says it opens the browser, and only then does' {
+    $src = Get-Content (Join-Path $root 'Quietpane.ps1') -Raw
+    $body = [regex]::Match($src, '(?s)function Open-ReleasePage.*?\n}\r?\n').Value
+    $body -match 'Show-ChoiceDialog' -and $body -match "doesn't connect to anything" -and $body -match "if \(\`$choice -eq 'open'\) \{ Open-AsUser" -and
+        $body -match '/releases/latest'
+}
+Test-Case 'the About line and the Home offer draw from a made-up Downloads folder' {
+    $cardsOut -match 'updates: offered: True; older ignored: True; version line: True'
+}
+Test-Case 'every launcher explains a PC that only runs signed apps, instead of failing silently' {
+    $files = @('Start Quietpane.cmd', 'Safety scan only.cmd', 'tools\release\Start Quietpane.cmd', 'tools\release\Safety scan only.cmd')
+    @($files | Where-Object {
+        $c = Get-Content (Join-Path $root $_) -Raw
+        $c -match '\$ExecutionContext\.SessionState\.LanguageMode' -and $c -match 'if /i not "%QPMODE%"=="FullLanguage" goto restricted' -and
+            $c -match "don't switch Smart App Control off" -and $c -match ':restricted'
+    }).Count -eq 4
+}
+
 Section 'Keyboards and screen readers'
 $selfTestOut = & powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File (Join-Path $root 'Quietpane.ps1') -SelfTest 2>&1 | Out-String
 Test-Case 'every control you can reach with the keyboard has a name a screen reader can say' {

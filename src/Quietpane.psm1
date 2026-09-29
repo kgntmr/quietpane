@@ -19,7 +19,8 @@
       * No network requests, no telemetry, no data collection. Everything stays on this PC.
 #>
 
-$script:AppVersion  = '1.21.0'
+$script:AppVersion  = '1.22.0'
+$script:AppReleased = '2026-09-29'   # the day this version was published; bumped with the version
 $script:Brand       = @{ Name = 'KomodoWorks'; Url = 'https://www.komodoworks.com'; Email = 'info@komodoworks.com'; Repo = 'https://github.com/kgntmr/quietpane' }
 $script:AssetsRoot  = Join-Path (Split-Path $PSScriptRoot -Parent) 'assets'
 $script:LogSink     = $null
@@ -45,6 +46,7 @@ $script:ProtectedAppPattern = '^(Microsoft\.WindowsStore|Microsoft\.StorePurchas
 function Get-QpInfo {
     [pscustomobject]@{
         Version    = $script:AppVersion
+        Released   = $script:AppReleased
         BrandName  = $script:Brand.Name
         BrandUrl   = $script:Brand.Url
         BrandEmail = $script:Brand.Email
@@ -3269,6 +3271,148 @@ function Get-QpAppVersion([string]$Root) {
     return ''
 }
 
+# ---------------------------------------------------------------- updates, without a connection
+#
+# Quietpane never asks the internet whether there is a newer version, and never will. What it can do is
+# notice a newer Quietpane you have already downloaded yourself, and install it for you.
+#
+# Two protections matter more than the convenience. First, a ZIP from the internet carries Windows' mark
+# saying so, and everything unzipped from it inherits that mark - it is what makes SmartScreen look at
+# a file before it runs. Windows' own "Extract All" copies the mark across; so does this. Second, this
+# window runs with administrator rights. Starting the new version from it directly would hand those
+# rights to whatever was inside the ZIP without anyone being asked, so the new version is started the
+# way a double-click starts it - by the signed-in user, through Explorer - and Windows asks as usual.
+
+$script:UpdateMaxZipBytes = 10MB       # the real download is a quarter of a megabyte
+$script:UpdateMaxUnpackedBytes = 50MB  # and unpacks to about one megabyte
+
+function Get-QpDownloadsFolder {
+    <# The signed-in user's Downloads folder, wherever it has been moved to. #>
+    try {
+        $p = (New-Object -ComObject Shell.Application).NameSpace('shell:Downloads').Self.Path
+        if ($p -and (Test-Path -LiteralPath $p -PathType Container)) { return $p }
+    } catch { }
+    return (Join-Path $env:USERPROFILE 'Downloads')
+}
+
+function Get-QpZipVersion {
+    <#
+        Which Quietpane is inside a ZIP, read from inside it - nothing is unpacked. The ZIP counts only if
+        it has the engine and the window side by side; otherwise, or if it can't be read, $null.
+    #>
+    param([Parameter(Mandatory)][string]$Path)
+    $zip = $null
+    try {
+        $f = Get-Item -LiteralPath $Path -ErrorAction Stop
+        if ($f.Length -gt $script:UpdateMaxZipBytes) { return $null }
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        $zip = [IO.Compression.ZipFile]::OpenRead($f.FullName)
+        $names = @($zip.Entries | ForEach-Object { $_.FullName -replace '\\', '/' })
+        # A real download never names a path outside itself; one that does is not offered at all.
+        if (@($names | Where-Object { $_ -match '(^|/)\.\.(/|$)' -or $_ -match '^/' -or $_ -match ':' }).Count) { return $null }
+        $engine =@($zip.Entries | Where-Object { ($_.FullName -replace '\\', '/') -match '(^|/)src/Quietpane\.psm1$' } | Sort-Object { $_.FullName.Length })[0]
+        if (-not $engine) { return $null }
+        $root = ($engine.FullName -replace '\\', '/') -replace 'src/Quietpane\.psm1$', ''
+        if ($names -notcontains ($root + 'Quietpane.ps1')) { return $null }
+        $reader = New-Object IO.StreamReader($engine.Open())
+        try {
+            $version = $null; $released = $null
+            for ($i = 0; $i -lt 80 -and -not $reader.EndOfStream; $i++) {
+                $line = $reader.ReadLine()
+                if ($line -match "^\`$script:AppVersion\s*=\s*'([0-9][0-9.]*)'") { $version = $matches[1] }
+                if ($line -match "^\`$script:AppReleased\s*=\s*'([0-9-]+)'") { $released = $matches[1] }
+            }
+        } finally { $reader.Dispose() }
+        if (-not $version) { return $null }
+        [pscustomobject]@{ Path = $f.FullName; Name = $f.Name; Version = $version; Released = $released; Size = $f.Length; AppRoot = $root }
+    } catch { return $null } finally { if ($zip) { $zip.Dispose() } }
+}
+
+function Find-QpDownloadedUpdate {
+    <#
+        The newest Quietpane ZIP in a folder (the Downloads folder unless told otherwise) that is newer than
+        the one running. Only files named Quietpane*.zip are looked at - "Quietpane (1).zip" included -
+        and nothing else in the folder is opened. $null when there is none.
+    #>
+    param([string]$Folder = '', [string]$Current = $script:AppVersion)
+    if (-not $Folder) { $Folder = Get-QpDownloadsFolder }
+    if (-not (Test-Path -LiteralPath $Folder -PathType Container)) { return $null }
+    $best = $null
+    foreach ($f in @(Get-ChildItem -LiteralPath $Folder -Filter 'Quietpane*.zip' -File -ErrorAction SilentlyContinue)) {
+        $z = Get-QpZipVersion -Path $f.FullName
+        if (-not $z) { continue }
+        if ((Compare-QpVersion $z.Version $Current) -le 0) { continue }
+        if (-not $best -or (Compare-QpVersion $z.Version $best.Version) -gt 0) { $best = $z }
+    }
+    return $best
+}
+
+function Expand-QpUpdate {
+    <#
+        Unpacks a newer Quietpane into a visible folder beside the ZIP ("Quietpane 1.23.0"), carrying the
+        ZIP's downloaded-from-the-internet mark onto every file, exactly as Windows' own Extract All does.
+        Returns where it went and which file starts it. Refuses anything that is not a newer Quietpane,
+        anything that would write outside that folder, and anything implausibly large.
+    #>
+    param([Parameter(Mandatory)][string]$Zip, [string]$Current = $script:AppVersion, [string]$Destination = '')
+    $z = Get-QpZipVersion -Path $Zip
+    if (-not $z) { throw 'That file is not a Quietpane download.' }
+    if ((Compare-QpVersion $z.Version $Current) -le 0) { throw ('That is Quietpane {0}, which is not newer than this one ({1}).' -f $z.Version, $Current) }
+    if (-not $Destination) { $Destination = Join-Path (Split-Path -Parent $z.Path) ('Quietpane ' + $z.Version) }
+    $Destination = [IO.Path]::GetFullPath($Destination).TrimEnd('\')
+
+    # Already unpacked, and still that version: use it rather than unpack again.
+    $startName = 'Start Quietpane.cmd'
+    $existing = @(Get-ChildItem -LiteralPath $Destination -Recurse -Filter $startName -File -ErrorAction SilentlyContinue | Sort-Object { $_.FullName.Length })
+    foreach ($s in $existing) {
+        $appRoot = @($s.Directory.FullName, (Join-Path $s.Directory.FullName 'App files - no need to open')) | Where-Object { Get-QpAppVersion $_ } | Select-Object -First 1
+        if ($appRoot -and (Get-QpAppVersion $appRoot) -eq $z.Version) {
+            return [pscustomobject]@{ Folder = $Destination; Start = $s.FullName; Version = $z.Version; Reused = $true }
+        }
+    }
+    if (Test-Path -LiteralPath $Destination) {
+        $n = 2
+        while (Test-Path -LiteralPath ('{0} ({1})' -f $Destination, $n)) { $n++ }
+        $Destination = '{0} ({1})' -f $Destination, $n
+    }
+
+    $mark = $null
+    try { $mark = Get-Content -LiteralPath $z.Path -Stream 'Zone.Identifier' -Raw -ErrorAction Stop } catch { }
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $archive = [IO.Compression.ZipFile]::OpenRead($z.Path)
+    try {
+        $total = ($archive.Entries | Measure-Object -Property Length -Sum).Sum
+        if ($total -gt $script:UpdateMaxUnpackedBytes) { throw 'That file unpacks to far more than Quietpane is, so it was not opened.' }
+        $prefix = $Destination + '\'
+        foreach ($e in $archive.Entries) {
+            $target = [IO.Path]::GetFullPath((Join-Path $Destination ($e.FullName -replace '/', '\')))
+            # Nothing may land outside the folder, whatever the names inside the ZIP say.
+            if (-not $target.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) { throw 'That file tries to put things outside its own folder, so it was not unpacked.' }
+            if ($e.FullName.EndsWith('/') -or $e.FullName.EndsWith('\')) { New-Item -ItemType Directory -Path $target -Force | Out-Null; continue }
+            New-Item -ItemType Directory -Path (Split-Path -Parent $target) -Force | Out-Null
+            [IO.Compression.ZipFileExtensions]::ExtractToFile($e, $target, $false)
+            if ($mark) { Set-Content -LiteralPath $target -Stream 'Zone.Identifier' -Value $mark -NoNewline -ErrorAction Stop }
+        }
+    } finally { $archive.Dispose() }
+    $start = @(Get-ChildItem -LiteralPath $Destination -Recurse -Filter $startName -File | Sort-Object { $_.FullName.Length })[0]
+    if (-not $start) { throw 'The unpacked copy has no Start Quietpane file.' }
+    [pscustomobject]@{ Folder = $Destination; Start = $start.FullName; Version = $z.Version; Reused = $false; Marked = [bool]$mark }
+}
+
+function Get-QpNewerInstalledCopy {
+    <#
+        Quietpane's own copy in Program Files, when it is newer than the one running from somewhere else -
+        so opening an old unzipped folder brings up the version you updated to. That copy can only have
+        been written by an administrator, which is why it is safe to start directly. $null otherwise,
+        and always $null when this IS that copy, so it can never send itself round in a circle.
+    #>
+    param([Parameter(Mandatory)][string]$Running, [string]$InstallRoot = $script:InstallRoot, [string]$Current = $script:AppVersion)
+    if (Test-QpSamePath $Running $InstallRoot) { return $null }
+    $v = Get-QpAppVersion $InstallRoot
+    if (-not $v -or (Compare-QpVersion $v $Current) -le 0) { return $null }
+    [pscustomobject]@{ Root = $InstallRoot; Version = $v; Script = (Join-Path $InstallRoot 'Quietpane.ps1') }
+}
+
 function Get-QpAppFileList([string]$Root) {
     <# The files that make up Quietpane, relative to its folder. #>
     $Root = [IO.Path]::GetFullPath($Root).TrimEnd('\')
@@ -5786,6 +5930,7 @@ Export-ModuleMember -Function Get-QpInfo, Set-QpLogSink, Write-QpLog, Test-QpAdm
     Get-QpOldFiles, Get-QpEasyWins, Invoke-QpEasyWin,
     Get-QpShortcutPaths, Test-QpShortcuts, New-QpShortcuts, Remove-QpShortcuts, Initialize-QpShortcut, Get-QpOwnShortcuts,
     Install-QpCopy, Remove-QpCopy, Start-QpCopyRemoval, Get-QpAppVersion, Compare-QpVersion, Test-QpCopyMatches, Sync-QpInstall,
+    Get-QpDownloadsFolder, Get-QpZipVersion, Find-QpDownloadedUpdate, Expand-QpUpdate, Get-QpNewerInstalledCopy,
     Get-QpSignInTask, Test-QpSignInStart, Enable-QpSignInStart, Disable-QpSignInStart, Test-QpOwnSignInTask, New-QpSignInTask, Get-QpSignInAction,
     Test-QpSignInWatch, Test-QpTaskWatches,
     Get-QpConnections, Get-QpAddressLabel, Test-QpPrivateAddress,

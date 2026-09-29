@@ -58,6 +58,10 @@ ALSO IN THE APP
               its taskbar icon - if Windows switches things back on.
               Quietpane follows Windows' light or dark setting; under
               Appearance you can fix it to Light or Dark instead.
+              Updates: "Look for a newer version" opens the release
+              page in your browser (Quietpane itself never goes online).
+              Download the new Quietpane.zip, open Quietpane again, and
+              Home offers to install it for you.
    Undo       Changed your mind? Everything recorded can be put back.
               Cleaned-up files are in your Recycle Bin.
 

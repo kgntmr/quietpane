@@ -212,6 +212,18 @@ These need eyes, not assertions:
   under Appearance and flip Windows again - Quietpane must stay light. Close and reopen: the choice
   is remembered. Windows' own controls (tick boxes, scroll bars) keep Windows' look in both themes.
 
+- **Smart App Control, for real.** On a Windows 11 PC with Smart App Control *on* (a fresh
+  install, or a test VM - never turn it off and on again on a real PC), double-click *Start
+  Quietpane*: the console must explain that the PC only runs signed apps, and must not tell anyone
+  to switch Smart App Control off. Repeat once releases are signed: it should then simply start.
+- **An update, end to end.** Put a newer `Quietpane.zip`, downloaded through a browser, in
+  Downloads. Open the older Quietpane: Home offers it. *Install it* shows the version and SHA256,
+  unpacks to `Downloads\Quietpane <version>`, closes, and **Windows asks for permission** before
+  the new one opens - if it opens without asking, stop: that is a bug. Check one unpacked file in
+  PowerShell with `Get-Content <file> -Stream Zone.Identifier`: it must say `ZoneId=3`.
+- **The old folder after an update.** With shortcuts added in About, open the old unzipped folder:
+  the newer copy opens instead, once, with no loop.
+
 ## 4. What is deliberately not tested
 
 - Live ransomware, remote access tools, stealers or loaders. Never, in any environment.
