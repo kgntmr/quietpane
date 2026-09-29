@@ -1,0 +1,85 @@
+name: Something went wrong
+description: Quietpane did something unexpected, or stopped working
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time. A person reads every one of these.
+
+        **If this is a security problem, please close this and email info@komodoworks.com instead**,
+        with the subject "Security: Quietpane". The [Security Policy](https://github.com/kgntmr/quietpane/blob/main/SECURITY.md)
+        explains why, and what happens next.
+
+  - type: checkboxes
+    id: not-security
+    attributes:
+      label: First, the one thing that doesn't belong here
+      options:
+        - label: This isn't a security problem. (If it is, email info@komodoworks.com instead.)
+          required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Which version of Quietpane?
+      description: It's at the bottom of the window, next to "No data leaves this PC".
+      placeholder: "1.20.1"
+    validations:
+      required: true
+
+  - type: input
+    id: windows
+    attributes:
+      label: Which version of Windows?
+      description: Press Start, type "winver", and copy the version and build - or just say Windows 10 or 11.
+      placeholder: "Windows 11 24H2, build 26100.1742"
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What you expected, and what you got instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: What did you do just before it happened?
+      description: Enough for someone else to end up in the same place. "I clicked X, then Y" is perfect.
+      placeholder: |
+        1. Opened the Privacy tab
+        2. Ticked ...
+        3. Pressed Apply, and ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: details
+    attributes:
+      label: Anything from "Show details"?
+      description: |
+        The line at the bottom of the window opens the running commentary. If there's an error in it,
+        the last few lines are usually the useful part.
+
+        **Please don't paste a scan report, and remove anything personal first.** Reports have your
+        username inside folder paths and the names of programs you use.
+      render: text
+    validations:
+      required: false
+
+  - type: dropdown
+    id: undo
+    attributes:
+      label: Did you try Undo?
+      description: Only relevant if something changed on your PC. It's fine to say no.
+      options:
+        - Nothing changed, so there was nothing to undo
+        - No, not yet
+        - Yes, and it put things back
+        - Yes, and it didn't put things back
+    validations:
+      required: false

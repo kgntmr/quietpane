@@ -1,0 +1,69 @@
+name: Suggest something for a list
+description: A setting, app, folder, brand extra or startup note Quietpane should know about
+labels: ["catalog"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The lists Quietpane works from are plain data, so this needs no code - and no Git, if you'd
+        rather not. Describe it here and it can be added for you.
+
+        If you are happy editing a file, [CONTRIBUTING.md](https://github.com/kgntmr/quietpane/blob/main/CONTRIBUTING.md#the-easiest-way-to-help-add-a-catalog-entry)
+        shows a real entry and the handful of rules the tests enforce.
+
+  - type: dropdown
+    id: which
+    attributes:
+      label: Which list?
+      options:
+        - A privacy or telemetry setting to switch off
+        - A pre-installed app people might want gone
+        - A folder that's safe to clear for space
+        - A brand extra (NVIDIA, Intel, AMD, MSI, ASUS, Dell, HP, Lenovo, Acer...)
+        - A sign-in item that needs a plain-language note
+        - A browser add-on permission that needs explaining
+        - Not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What is it?
+      description: The name of the setting, app, service, task or folder. Exactly as Windows spells it, if you know.
+    validations:
+      required: true
+
+  - type: textarea
+    id: plain
+    attributes:
+      label: How would you describe it to someone who isn't technical?
+      description: |
+        One line. This is the hard part and the most useful thing you can give us - nine words or
+        fewer if you can manage it.
+      placeholder: "Stop sending crash reports to Microsoft"
+    validations:
+      required: true
+
+  - type: textarea
+    id: side-effects
+    attributes:
+      label: What stops working if someone switches this off?
+      description: |
+        Honestly, please - including "nothing that I noticed". Something with a real cost still
+        belongs on the list; it just won't be ticked by default.
+
+        Naming what survives is as useful as naming what breaks: *"Programs behave the same; the
+        reports just stay here."*
+    validations:
+      required: true
+
+  - type: textarea
+    id: verified
+    attributes:
+      label: Have you tried it?
+      description: |
+        Did you switch it off on your own PC, and what happened afterwards? A suggestion nobody has
+        tested is still welcome - just say so, and it'll be tested before it goes in.
+    validations:
+      required: false

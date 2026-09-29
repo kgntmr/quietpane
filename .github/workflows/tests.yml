@@ -1,0 +1,106 @@
+# Builds and tests Quietpane from source on every push and pull request.
+#
+# Windows PowerShell 5.1 on purpose: that is what Quietpane targets and what people actually run it
+# with, so testing under PowerShell 7 would be testing something else.
+#
+# Four of the checks start a real WPF window (Quietpane.ps1 -SelfTest, in STA, without showing it).
+# They run here like any other check. If a hosted runner ever cannot do that, those checks FAIL and
+# this workflow goes red - which is the point. Narrowing the suite to make the badge green again,
+# while the documentation still says 229 checks pass, would quietly change what "tests pass" means.
+# Whatever CI actually runs is the number the README and CONTRIBUTING quote.
+
+name: Tests
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  windows:
+    name: Checks and build
+    runs-on: windows-latest
+
+    steps:
+      - name: Get the source
+        uses: actions/checkout@v4
+
+      # Git is told not to touch line endings in these files (.gitattributes marks them -text), so
+      # what is in the repository is exactly what lands on someone's PC. CONTRIBUTING.md asks
+      # contributors for CRLF and pure ASCII; this is what makes that true rather than hopeful.
+      - name: Line endings and plain ASCII
+        shell: powershell
+        run: |
+          $bad = @()
+          $files = @(Get-ChildItem -Path . -Recurse -File -ErrorAction Stop |
+              Where-Object { $_.Extension -in '.ps1', '.psm1', '.psd1', '.cmd' -and $_.FullName -notmatch '\\dist\\' })
+          # A check that finds nothing must not pass. If the walk is ever cut short - a path too long,
+          # a permission - the honest outcome is a failure, not "0 files, all fine".
+          if ($files.Count -lt 10) {
+              Write-Host ("Only {0} script files found; this repository has more than that." -f $files.Count) -ForegroundColor Red
+              Write-Host "The check did not really run, so it cannot be said to have passed."
+              exit 1
+          }
+          foreach ($f in $files) {
+              $bytes = [IO.File]::ReadAllBytes($f.FullName)
+              $nonAscii = 0; $loneLf = 0
+              for ($i = 0; $i -lt $bytes.Length; $i++) {
+                  $b = $bytes[$i]
+                  if ($b -eq 0x0A) {
+                      if ($i -eq 0 -or $bytes[$i - 1] -ne 0x0D) { $loneLf++ }
+                      continue
+                  }
+                  if ($b -eq 0x0D -or $b -eq 0x09) { continue }
+                  if ($b -lt 0x20 -or $b -gt 0x7E) { $nonAscii++ }
+              }
+              if ($nonAscii -or $loneLf) {
+                  $bad += [pscustomobject]@{
+                      File = Resolve-Path -Relative $f.FullName
+                      NonAscii = $nonAscii
+                      LoneLF = $loneLf
+                  }
+              }
+          }
+          if ($bad.Count) {
+              Write-Host "These files are not plain ASCII with CRLF endings:`n" -ForegroundColor Red
+              $bad | Format-Table -AutoSize | Out-String | Write-Host
+              Write-Host "NonAscii counts bytes outside 32-126 (plus tab). LoneLF counts newlines with no carriage return."
+              Write-Host "See the 'Line endings and plain ASCII' section of CONTRIBUTING.md."
+              exit 1
+          }
+          Write-Host ("{0} script files checked: all plain ASCII with CRLF endings." -f $files.Count) -ForegroundColor Green
+
+      - name: Run the checks
+        shell: powershell
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File tests\Run-QuietpaneTests.ps1
+
+      - name: Build the download
+        shell: powershell
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File tools\build-release.ps1
+
+      # The ZIP is not reproducible yet - tools\build-release.ps1 stamps each entry with the source
+      # file's timestamp, and a fresh checkout has fresh timestamps - so this artifact's hash will not
+      # match a local build of the same commit. The files inside it will. Listing the per-file hashes
+      # here is what makes that comparison possible without downloading anything.
+      - name: Hash what went into it
+        shell: powershell
+        run: |
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $zip = [IO.Compression.ZipFile]::OpenRead((Resolve-Path 'dist\Quietpane.zip'))
+          try {
+              $zip.Entries | Sort-Object FullName | ForEach-Object {
+                  $s = $_.Open()
+                  try {
+                      $hash = (Get-FileHash -InputStream $s -Algorithm SHA256).Hash
+                  } finally { $s.Dispose() }
+                  '{0}  {1}' -f $hash, $_.FullName
+              }
+          } finally { $zip.Dispose() }
+          Write-Host ("`nZIP itself: {0}" -f (Get-FileHash 'dist\Quietpane.zip' -Algorithm SHA256).Hash)
+
+      - name: Keep the build
+        uses: actions/upload-artifact@v4
+        with:
+          name: Quietpane-zip
+          path: dist/Quietpane.zip
+          if-no-files-found: error
