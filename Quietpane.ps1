@@ -3620,7 +3620,7 @@ function Show-HomeResult($r) {
     if ($r.BytesFreed -gt 0) { $lines += "Freed about $(Format-QpBytes $r.BytesFreed) of space - it is in your Recycle Bin, empty it whenever you like." }
     if ($r.MemoryFreed -gt 0) { $lines += "Memory in use dropped by about $(Format-QpBytes $r.MemoryFreed)." }
     $lines += ''
-    $lines += 'Restart your PC to finish. Changed your mind? "Undo everything" puts it all back.'
+    $lines += 'Restart your PC to finish. Changed your mind? "Undo everything" restores settings; cleared files stay in your Recycle Bin, and removed apps reinstall from the Microsoft Store.'
     Show-MeterGains ([int64]$r.BytesFreed) ([int64]$r.MemoryFreed)
     $script:ResultTitle.Text = 'All done!'
     $script:ResultText.Text = $lines -join [Environment]::NewLine

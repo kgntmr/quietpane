@@ -38,7 +38,7 @@ ALSO IN THE APP
               "How it has been holding up" is Windows' own score out of
               ten, with what has crashed in the last month. A session can
               be saved to your Desktop as one page to keep or send on.
-   Privacy    Every browser add-on you have, and what each one is allowed
+   Privacy    Your browser add-ons, and what each one is allowed
               to read - "reads and changes everything on every site you
               visit" - with a tick box to switch off the ones you don't
               want. Also which apps used your camera, microphone and
