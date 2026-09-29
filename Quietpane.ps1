@@ -555,52 +555,83 @@ function New-Meter([string]$Title, [string]$FillColour) {
     $b.Child = $sp
     return [pscustomobject]@{ Border = $b; Value = $value; Fill = $fill; Caption = $caption; Delta = $delta; TrackWidth = 272 }
 }
-# Live tiles: how hard the PC is working right now, and how warm it is. Same shape as a meter, so the
-# same fill and gain helpers work on them.
-function New-LiveTile([string]$Title, [string]$FillColour, [string]$SparkColour = '') {
-    # The bar can be a light amber because it is a big block; an 8px dot in that same amber would be
-    # too faint on this cream, so the trend's dot uses a darker step of the same hue.
-    if (-not $SparkColour) { $SparkColour = $FillColour }
+# Two jobs, two sets of colour. Words are read close up and need contrast against the cream behind
+# them, so the text set is the darker one; a bar is a big block and only has to be told apart from the
+# other bars. Both were put through the palette checker rather than chosen by eye: the bar pair clears
+# the colour-blindness separation it asks for (deutan 9.8, normal 25.5) and every text colour clears
+# 4.5:1 on this background. The house green is a little grey for a chart colour by that checker's
+# reckoning, and it stays anyway - it is the product's own colour, and no tile depends on it alone.
+$script:BarColours = @{ ok = '#117A68'; high = '#A02020' }
+#
+# Live tiles: how hard the PC is working right now, and how warm it is.
+#
+# Every tile is built to exactly the same pattern - heading, one number, one bar, one line of plain
+# words, one caption, one trend - and nothing may be added to one that the others don't have. That is
+# the whole trick: four tiles the same shape can be compared at a glance, and four tiles of different
+# heights and different numbers of lines have to be read one at a time. What used to hang off the
+# bottom of a tile (which programs were busiest) now sits in one row beneath all four, because it was
+# the same handful of programs repeated four times.
+#
+# The bar carries a mark at the point where that reading stops being ordinary, so "is 72% bad?" is
+# answered by looking rather than by knowing. Colour only ever says how things stand - calm or serious -
+# and never which tile it is, and the plain word beside it always says the same thing in text.
+function New-LiveTile([string]$Title) {
     $sp = New-Object System.Windows.Controls.StackPanel
-    $sp.Width = 150
-    $sp.Margin = Get-Thick '0,0,18,4'
+    $sp.Width = 172
+    $sp.Margin = Get-Thick '0,0,16,10'
     [void]$sp.Children.Add((New-Text $Title 11 'SemiBold' '#4B5B5C' '0,0,0,2'))
-    $value = New-Text '...' 21 'SemiBold' '#0F1B1C' '0,0,0,6' 'Fraunces, Georgia'
+    $value = New-Text '...' 25 'SemiBold' '#0F1B1C' '0,0,0,7' 'Fraunces, Georgia'
     [void]$sp.Children.Add($value)
     $track = New-Object System.Windows.Controls.Border
     $track.Height = 10
-    $track.Width = 140
+    $track.Width = 156
     $track.HorizontalAlignment = 'Left'
     $track.Background = Get-Brush '#EDE6D5'
     $track.CornerRadius = New-Object System.Windows.CornerRadius(5)
+    # A grid, so the mark can sit over the fill instead of beside it.
+    $lane = New-Object System.Windows.Controls.Grid
     $fill = New-Object System.Windows.Controls.Border
     $fill.Height = 10
     $fill.Width = 0
     $fill.HorizontalAlignment = 'Left'
-    $fill.Background = Get-Brush $FillColour
+    $fill.Background = Get-Brush $script:BarColours.ok
     $fill.CornerRadius = New-Object System.Windows.CornerRadius(5)
-    $track.Child = $fill
+    [void]$lane.Children.Add($fill)
+    # "Where this stops being ordinary": a notch on the track, not a number to memorise.
+    $mark = New-Object System.Windows.Controls.Border
+    $mark.Width = 2; $mark.Height = 14
+    $mark.HorizontalAlignment = 'Left'
+    $mark.VerticalAlignment = 'Center'
+    $mark.Background = Get-Brush '#8C9694'
+    $mark.Visibility = 'Collapsed'
+    [void]$lane.Children.Add($mark)
+    $track.Child = $lane
     [void]$sp.Children.Add($track)
-    # The last two minutes under the number, so a spike that has passed is still visible. Each tile is
-    # its own small chart of one thing, which its own heading already names.
+    # The bar is this second; the trend directly under it is the last two minutes, drawn the same width
+    # and on the same nought-to-a-hundred scale, so the two read as one picture of the same thing.
+    #
+    # It sits here, above the words, on purpose. Everything below varies in length - one card is called
+    # "RTX 4060 Laptop GPU" and another "NVMe Micron_2400E_MTFDKBA512QFM" - so anything placed after the
+    # words lands at a different height in every tile, and four charts at four different heights cannot
+    # be compared at a glance. Above them, all four line up exactly.
     $spark = New-Object System.Windows.Controls.Canvas
-    $spark.Width = 140; $spark.Height = 26
-    $spark.Margin = Get-Thick '0,6,0,0'
+    $spark.Width = 156; $spark.Height = 26
+    $spark.Margin = Get-Thick '0,5,0,0'
     $spark.HorizontalAlignment = 'Left'
     $spark.Visibility = 'Collapsed'
     [void]$sp.Children.Add($spark)
-    $heat = New-Text '' 12.5 'SemiBold' '#117A68' '0,7,0,0'
-    $caption = New-Text '' 12 'Normal' '#4B5B5C' '0,2,0,0'
-    # "What's using it": the busiest programs right now, one per line.
-    $top = New-Text '' 11.5 'Normal' '#4B5B5C' '0,4,0,0'
-    $top.Visibility = 'Collapsed'
-    $extra = New-Text '' 11.5 'Normal' '#66706F' '0,2,0,0'
+    $heat = New-Text '' 12.5 'SemiBold' '#117A68' '0,8,0,0'
+    $caption = New-Text '' 11.5 'Normal' '#66706F' '0,2,0,0'
+    $caption.TextWrapping = 'Wrap'
+    # Kept for the one thing worth interrupting the pattern for: being held back to cool off.
+    $extra = New-Text '' 11.5 'Normal' '#66706F' '0,4,0,0'
+    $extra.TextWrapping = 'Wrap'
     $extra.Visibility = 'Collapsed'
     $delta = New-Text '' 12.5 'SemiBold' '#117A68' '0,4,0,0'
     $delta.Visibility = 'Collapsed'
-    foreach ($x in $heat, $caption, $top, $extra, $delta) { [void]$sp.Children.Add($x) }
-    return [pscustomobject]@{ Border = $sp; Value = $value; Fill = $fill; Heat = $heat; Caption = $caption; Top = $top; Extra = $extra; Delta = $delta; TrackWidth = 140
-        Spark = $spark; SparkColour = $SparkColour }
+    foreach ($x in $heat, $caption, $extra, $delta) { [void]$sp.Children.Add($x) }
+    return [pscustomobject]@{ Border = $sp; Value = $value; Fill = $fill; Mark = $mark; Heat = $heat; Caption = $caption
+        Extra = $extra; Delta = $delta; TrackWidth = 156; Spark = $spark; SparkColour = '#117A68' }
 }
 
 $meters = New-Object System.Windows.Controls.WrapPanel
@@ -616,19 +647,39 @@ $script:LivePanel.BorderBrush = Get-Brush '#E6DFCC'
 $script:LivePanel.BorderThickness = Get-Thick '1'
 $liveStack = New-Object System.Windows.Controls.StackPanel
 [void]$liveStack.Children.Add((New-Text 'RIGHT NOW' 11.5 'SemiBold' '#4B5B5C' '0,0,0,6'))
+# The answer first. Everything below it is the working.
+$verdictRow = New-Object System.Windows.Controls.StackPanel
+$verdictRow.Orientation = 'Horizontal'
+$verdictRow.Margin = Get-Thick '0,0,0,2'
+$script:VerdictDot = New-Object System.Windows.Shapes.Ellipse
+$script:VerdictDot.Width = 11; $script:VerdictDot.Height = 11
+$script:VerdictDot.VerticalAlignment = 'Center'
+$script:VerdictDot.Margin = Get-Thick '0,0,8,0'
+$script:VerdictDot.Fill = Get-Brush '#8C9694'
+[void]$verdictRow.Children.Add($script:VerdictDot)
+$script:VerdictText = New-Text 'Having a look...' 18 'SemiBold' '#0F1B1C' '0' 'Fraunces, Georgia'
+$script:VerdictText.VerticalAlignment = 'Center'
+[void]$verdictRow.Children.Add($script:VerdictText)
+[void]$liveStack.Children.Add($verdictRow)
+$script:VerdictWhy = New-Text '' 12.5 'Normal' '#4B5B5C' '19,0,0,12'
+[void]$liveStack.Children.Add($script:VerdictWhy)
 $liveTiles = New-Object System.Windows.Controls.WrapPanel
-$script:TileCpu    = New-LiveTile 'PROCESSOR' '#117A68'
-$script:TileGpu    = New-LiveTile 'GRAPHICS' '#117A68'
-$script:TileMemory = New-LiveTile 'MEMORY' '#FFB627' '#9A6700'
-$script:TileVram   = New-LiveTile 'VIDEO MEMORY' '#FFB627' '#9A6700'
-foreach ($t in $script:TileCpu, $script:TileGpu, $script:TileMemory, $script:TileVram) { [void]$liveTiles.Children.Add($t.Border) }
+$script:TileCpu    = New-LiveTile 'PROCESSOR'
+$script:TileGpu    = New-LiveTile 'GRAPHICS'
+$script:TileMemory = New-LiveTile 'MEMORY'
+$script:TileDisk   = New-LiveTile 'THE DRIVE'
+foreach ($t in $script:TileCpu, $script:TileGpu, $script:TileMemory, $script:TileDisk) { [void]$liveTiles.Children.Add($t.Border) }
 [void]$liveStack.Children.Add($liveTiles)
-# Three more things Windows keeps that the tiles have no room for, on one line, and left out when a PC
-# doesn't report them.
-$script:LiveExtra = New-Text '' 12 'Normal' '#4B5B5C' '0,6,0,0'
-Set-MoreInfo $script:LiveExtra 'Promised memory fills up before the memory chips do, and is usually the real reason a PC starts crawling. Speed under 100% at a busy moment means something is holding the processor back. A disk that stays busy while the processor is idle is what "slow" usually turns out to be.'
-[void]$liveStack.Children.Add($script:LiveExtra)
-$script:LiveNote = New-Text 'Live, every 2 seconds. Nothing is recorded.' 11.5 'Normal' '#66706F' '0,4,0,0'
+# One list for all four tiles. It used to be four lists of much the same programs.
+$script:BusyStrip = New-Object System.Windows.Controls.StackPanel
+$script:BusyStrip.Margin = Get-Thick '0,4,0,0'
+$script:BusyHead = New-Text 'BUSIEST RIGHT NOW' 11 'SemiBold' '#4B5B5C' '0,0,0,4'
+[void]$script:BusyStrip.Children.Add($script:BusyHead)
+$script:BusyRows = New-Object System.Windows.Controls.StackPanel
+[void]$script:BusyStrip.Children.Add($script:BusyRows)
+Set-MoreInfo $script:BusyStrip 'The programs working your PC hardest this second, counted the way Task Manager counts them. A program near the top of this list while your PC feels slow is the one to look at first.'
+[void]$liveStack.Children.Add($script:BusyStrip)
+$script:LiveNote = New-Text 'Live, every 2 seconds. Nothing is recorded.' 11.5 'Normal' '#66706F' '0,10,0,0'
 [void]$liveStack.Children.Add($script:LiveNote)
 $script:LivePanel.Child = $liveStack
 # The memory tile carries the "freed just now" note that the old memory bar used to.
@@ -2275,14 +2326,30 @@ function Get-ShortName([string]$Name) {
     return $n.Trim()
 }
 
-function Set-MemoryTile([double]$Used, [double]$Total) {
+function Set-MemoryTile([double]$Used, [double]$Total, $PromisedPct = $null) {
+    <#
+        Memory in the same shape as the others: a number, a bar, a plain word, a caption.
+
+        Where the others have a temperature, memory has the figure that actually explains a PC grinding
+        to a halt - how much Windows has promised out to programs, which fills up before the memory
+        chips do. It used to sit in a row of three bare percentages at the bottom of the panel, where it
+        meant nothing to anybody. Here it is the thing that decides the word.
+    #>
     if ($Total -le 0) { return }
-    $script:TileMemory.Value.Text = '{0:N0}%' -f (100 * $Used / $Total)
-    # Memory has no temperature, so its first line says what the number is, lining up with the others.
-    $script:TileMemory.Heat.Text = 'in use right now'
-    $script:TileMemory.Heat.Foreground = Get-Brush '#4B5B5C'; $script:TileMemory.Heat.FontWeight = 'Normal'
-    $script:TileMemory.Caption.Text = '{0} of {1}' -f (Format-QpBytes $Used), (Format-QpBytes $Total)
-    Set-MeterFill $script:TileMemory ($Used / $Total)
+    $t = $script:TileMemory
+    $pct = 100 * $Used / $Total
+    $t.Value.Text = '{0:N0}%' -f $pct
+    Set-MeterFill $t ($Used / $Total)
+    Set-TileMark $t 0.9
+    # Whichever is under more pressure decides the word, because either one can be what runs out.
+    $worst = @(@($pct, $PromisedPct) | Where-Object { $null -ne $_ } | ForEach-Object { [double]$_ } | Sort-Object -Descending)[0]
+    $word, $level = if ($worst -ge 90) { 'nearly full', 'high' } elseif ($worst -ge 80) { 'filling up', 'warn' } else { 'plenty free', 'ok' }
+    $t.Heat.Text = $word
+    Set-TileState $t $level
+    $caption = '{0} of {1} in use' -f (Format-QpBytes $Used), (Format-QpBytes $Total)
+    if ($null -ne $PromisedPct) { $caption += [Environment]::NewLine + ('{0}% promised to programs' -f $PromisedPct) }
+    $t.Caption.Text = $caption
+    $t.Heat.ToolTip = 'Memory in use is what the chips are holding. Promised is what Windows has undertaken to find if every program asks at once - it runs out first, and when it does the PC starts crawling however much memory is fitted.'
 }
 
 $script:HeatColours = @{ ok = '#117A68'; warn = '#9A6700'; high = '#A83232'; none = '#66706F' }
@@ -2305,19 +2372,74 @@ function Set-HeatText($Block, $Celsius, $MaxC, [bool]$Stuck, [string]$Tip) {
     $Block.ToolTip = $Tip
 }
 
-function Set-TopText($Tile, $Top) {
-    # "No Man's Sky 94%" - the busiest programs, one per line, names kept short enough for the tile.
-    $lines = @(@($Top) | Where-Object { $_ } | ForEach-Object {
-        $n = [string]$_.Name
-        if ($n.Length -gt 22) { $n = $n.Substring(0, 21).TrimEnd() + [char]0x2026 }
-        '{0} {1}%' -f $n, $_.Pct
-    })
-    if ($lines.Count) {
-        $Tile.Top.Text = $lines -join "`n"
-        $Tile.Top.ToolTip = 'The programs using it most right now, the same way Task Manager counts them.'
-        $Tile.Top.Visibility = 'Visible'
-    } else {
-        $Tile.Top.Visibility = 'Collapsed'
+function Set-TileState($Tile, [string]$Level) {
+    <#
+        How this one reading stands, in two places at once: the bar turns red when something is actually
+        wrong, and the line under it is coloured to match. Neither is ever alone - the line always says
+        the same thing in words, so none of this depends on seeing colour.
+    #>
+    if (-not $Level) { $Level = 'none' }
+    $Tile.Fill.Background = Get-Brush $(if ($Level -eq 'high') { $script:BarColours.high } else { $script:BarColours.ok })
+    $Tile.Heat.Foreground = Get-Brush $script:HeatColours[$Level]
+}
+
+function Set-TileMark($Tile, $Ratio) {
+    <# The notch on the track where this reading stops being ordinary. Hidden where there is no such point. #>
+    if ($null -eq $Ratio) { $Tile.Mark.Visibility = 'Collapsed'; return }
+    $r = [double]$Ratio
+    if ($r -le 0 -or $r -ge 1) { $Tile.Mark.Visibility = 'Collapsed'; return }
+    $Tile.Mark.Margin = Get-Thick ('{0},0,0,0' -f [math]::Round($Tile.TrackWidth * $r))
+    $Tile.Mark.Visibility = 'Visible'
+}
+
+function Show-BusyStrip($r) {
+    <#
+        One row of the programs working this PC hardest, drawn once for the whole panel.
+
+        Each tile used to carry its own list, which meant the same three programs written out four
+        times in four small columns - most of the reading on the tab, and none of it new. Merged, the
+        processor and the graphics card are asked the same question and the loudest answer wins, so a
+        game that is hammering the graphics card appears once with its real figure.
+    #>
+    $script:BusyRows.Children.Clear()
+    $all = @()
+    foreach ($p in @($r.CpuTop)) { if ($p) { $all += [pscustomobject]@{ Name = [string]$p.Name; Pct = [double]$p.Pct; What = 'processor' } } }
+    foreach ($g in @($r.Gpus)) { foreach ($p in @($g.Top)) { if ($p) { $all += [pscustomobject]@{ Name = [string]$p.Name; Pct = [double]$p.Pct; What = 'graphics' } } } }
+    # The same program can be busy on both; it is one program, so it is shown once, at its loudest.
+    $top = @($all | Where-Object { $_.Name } | Group-Object Name | ForEach-Object {
+            $best = @($_.Group | Sort-Object Pct -Descending)[0]
+            [pscustomobject]@{ Name = $_.Name; Pct = $best.Pct; What = $best.What }
+        } | Sort-Object Pct -Descending | Select-Object -First 3)
+    if (-not $top.Count) { $script:BusyStrip.Visibility = 'Collapsed'; return }
+    $script:BusyStrip.Visibility = 'Visible'
+    foreach ($p in $top) {
+        $row = New-Object System.Windows.Controls.StackPanel
+        $row.Orientation = 'Horizontal'
+        $row.Margin = Get-Thick '0,0,0,3'
+        $name = New-Text (Get-ShortName $p.Name) 12 'Normal' '#0F1B1C' '0'
+        $name.Width = 190
+        $name.TextTrimming = 'CharacterEllipsis'
+        $name.VerticalAlignment = 'Center'
+        [void]$row.Children.Add($name)
+        # A bar on the same scale for all three, so the gap between first and third is visible.
+        $track = New-Object System.Windows.Controls.Border
+        $track.Height = 8; $track.Width = 120
+        $track.Background = Get-Brush '#EDE6D5'
+        $track.CornerRadius = New-Object System.Windows.CornerRadius(4)
+        $track.VerticalAlignment = 'Center'
+        $bar = New-Object System.Windows.Controls.Border
+        $bar.Height = 8
+        $bar.Width = [math]::Max(4, [math]::Round(120 * [math]::Min(100, [math]::Max(0, $p.Pct)) / 100))
+        $bar.HorizontalAlignment = 'Left'
+        $bar.Background = Get-Brush $script:BarColours.ok
+        $bar.CornerRadius = New-Object System.Windows.CornerRadius(4)
+        $track.Child = $bar
+        [void]$row.Children.Add($track)
+        $what = if ($p.What -eq 'graphics') { 'the graphics card' } else { 'the processor' }
+        $fig = New-Text ('{0:N0}% of {1}' -f $p.Pct, $what) 12 'Normal' '#4B5B5C' '10,0,0,0'
+        $fig.VerticalAlignment = 'Center'
+        [void]$row.Children.Add($fig)
+        [void]$script:BusyRows.Children.Add($row)
     }
 }
 
@@ -2352,8 +2474,15 @@ function Update-BatteryCard($Live) {
     $c.Border.Visibility = 'Visible'
 }
 
+$script:DriveLast = $null   # the last drive reading, so the live drive tile can show its temperature
+$script:DriveRead = $false  # whether the drive has been asked yet at all - "not yet" is not "nothing to say"
 function Update-DriveCard($d) {
-    <# Windows' own verdict on the drive it runs from, with wear and heat where the drive shares them. #>
+    <#
+        How the drive is holding up over its life - the slow story. How busy and how warm it is this
+        second is the drive tile's job, up with the other live readings.
+    #>
+    $script:DriveLast = $d
+    $script:DriveRead = $true
     $c = $script:DriveCard
     $track = $c.Fill.Parent
     if (-not $d) {
@@ -2362,7 +2491,7 @@ function Update-DriveCard($d) {
         $track.Visibility = 'Collapsed'; $script:DriveHeatText.Visibility = 'Collapsed'
         return
     }
-    $deg = [char]0x00B0; $dot = [char]0x00B7
+    $dot = [char]0x00B7
     if ($d.Health -and $d.Health -ne 'Healthy') {
         $c.Value.Text = 'Needs attention'
         $c.Value.Foreground = Get-Brush $script:HeatColours.high
@@ -2374,17 +2503,22 @@ function Update-DriveCard($d) {
     }
     # The bar is how much of its rated life the drive has used - only when the drive says.
     if ($null -ne $d.WearPct) { Set-MeterFill $c ([math]::Min(100, $d.WearPct) / 100); $track.Visibility = 'Visible' } else { $track.Visibility = 'Collapsed' }
-    if ($null -ne $d.TempC) {
-        $h = Get-QpHeatWord -Celsius $d.TempC -Kind Drive
-        $script:DriveHeatText.Text = '{0}{1}C {2} {3}' -f $d.TempC, $deg, $dot, $h.Word
-        $script:DriveHeatText.Foreground = Get-Brush $script:HeatColours[$h.Level]
+    # How long it has been running, and how much has been written to it: the two figures that say
+    # whether "4% used" is a new drive or a hard-worked one.
+    $lines = @()
+    if ($d.PowerOnHours) { $lines += 'Switched on for about {0:N0} hours' -f $d.PowerOnHours }
+    if ($d.BytesWritten) { $lines += '{0} written to it so far' -f (Format-QpBytes $d.BytesWritten) }
+    if ($lines.Count) {
+        $script:DriveHeatText.Text = $lines -join [Environment]::NewLine
+        $script:DriveHeatText.Foreground = Get-Brush '#66706F'
+        $script:DriveHeatText.FontWeight = 'Normal'
         $script:DriveHeatText.Visibility = 'Visible'
     } else {
         $script:DriveHeatText.Visibility = 'Collapsed'
     }
     $tip = "$($d.Name). 'Healthy' is Windows' own verdict on the drive."
     if ($null -ne $d.WearPct) { $tip += ' Rated life is what the maker promises for writing data; under 100% is within that.' }
-    if ($d.PowerOnHours) { $tip += " Switched on for about {0:N0} hours in total." -f $d.PowerOnHours }
+    if ($d.FromDrive) { $tip += ' These figures come from the drive itself rather than from Windows, which on many PCs reports the same made-up numbers for ever.' }
     $c.Border.ToolTip = $tip
 }
 
@@ -2418,8 +2552,10 @@ function Draw-Sparkline($Canvas, $Values, [string]$Colour, [double]$Max = 100) {
     $fillPoints.Add((New-Object System.Windows.Point($points[$points.Count - 1].X, $bottom)))
     $fillPoints.Add((New-Object System.Windows.Point($points[0].X, $bottom)))
     $area.Points = $fillPoints
+    # Kept faint. The bar above is the headline; a wash any stronger reads as a second, louder bar,
+    # which is what a memory tile sitting at three-quarters full used to look like.
     $wash = (Get-Brush $Colour).Clone()
-    $wash.Opacity = 0.14
+    $wash.Opacity = 0.10
     $area.Fill = $wash
     [void]$Canvas.Children.Add($area)
     $line = New-Object System.Windows.Shapes.Polyline
@@ -2449,16 +2585,16 @@ function Update-Sparklines($r) {
         Cpu = $r.CpuUsage
         Gpu = $(if ($gpu) { $gpu.Usage } else { $null })
         Mem = $(if ($r.MemTotal -gt 0 -and $null -ne $r.MemUsed) { 100 * $r.MemUsed / $r.MemTotal } else { $null })
-        Vram = $(if ($gpu -and $gpu.DedicatedTotal -gt 0) { 100 * $gpu.DedicatedUsed / $gpu.DedicatedTotal } else { $null })
+        Disk = $r.DiskBusyPct
     })
     while ($script:LiveHistory.Count -gt $script:LiveHistoryMax) { $script:LiveHistory.RemoveAt(0) }
     $h = @($script:LiveHistory)
     Draw-Sparkline $script:TileCpu.Spark    @($h | ForEach-Object { $_.Cpu })  $script:TileCpu.SparkColour
     Draw-Sparkline $script:TileGpu.Spark    @($h | ForEach-Object { $_.Gpu })  $script:TileGpu.SparkColour
     Draw-Sparkline $script:TileMemory.Spark @($h | ForEach-Object { $_.Mem })  $script:TileMemory.SparkColour
-    Draw-Sparkline $script:TileVram.Spark   @($h | ForEach-Object { $_.Vram }) $script:TileVram.SparkColour
-    foreach ($t in $script:TileCpu, $script:TileGpu, $script:TileMemory, $script:TileVram) {
-        Set-MoreInfo $t.Spark ('The last {0} readings, about two minutes. The line is quiet on purpose - the number above it is the thing to read.' -f $h.Count)
+    Draw-Sparkline $script:TileDisk.Spark   @($h | ForEach-Object { $_.Disk }) $script:TileDisk.SparkColour
+    foreach ($t in $script:TileCpu, $script:TileGpu, $script:TileMemory, $script:TileDisk) {
+        Set-MoreInfo $t.Spark ('The last {0} readings, about two minutes, on the same nought-to-a-hundred scale as the bar above. The line is quiet on purpose - the number is the thing to read.' -f $h.Count)
     }
 }
 
@@ -2560,24 +2696,11 @@ function Draw-SessionTimeline($Panel, $Watch) {
     [void]$Panel.Children.Add($legend)
 }
 
-function Update-LiveExtra($r) {
-    <#
-        The three numbers that explain a slow PC when the tiles all look fine: what Windows has promised
-        out of memory, how much of its speed the processor is being allowed, and how busy the disk is.
-        Whatever this PC doesn't report is simply left out.
-    #>
-    if (-not $r) { return }
-    $bits = @()
-    if ($null -ne $r.CommitPct) { $bits += 'Memory promised to programs: {0}%' -f $r.CommitPct }
-    if ($null -ne $r.SpeedPct) {
-        $speed = 'Processor speed: {0}%' -f $r.SpeedPct
-        if ($r.SpeedMhz) { $speed += ' ({0:N1} GHz)' -f ($r.SpeedMhz / 1000) }
-        $bits += $speed
-    }
-    if ($null -ne $r.DiskBusyPct) { $bits += 'Disk busy: {0}%' -f $r.DiskBusyPct }
-    $script:LiveExtra.Text = $bits -join '     '
-    $script:LiveExtra.Visibility = if ($bits.Count) { 'Visible' } else { 'Collapsed' }
-}
+# The three numbers that used to run along the bottom of the panel - promised memory, processor speed
+# and disk busy - are no longer a line of their own. Each has gone to the tile it belongs to: promised
+# memory decides the memory tile's word, disk busy is now a tile in its own right, and processor speed
+# is only ever mentioned when something is actually holding the processor back, which is the only
+# moment it tells you anything. Three bare percentages in a row told nobody anything at all.
 
 function Update-SteadyCard($r) {
     <#
@@ -2729,22 +2852,38 @@ function Save-SessionReport {
 }
 
 function Update-LiveTiles($r) {
-    <# Paints one reading onto the four tiles. Anything the PC doesn't share says so plainly. #>
-    if (-not $r) { return }
-    Update-LiveExtra $r
-    Update-Sparklines $r
-    $deg = [char]0x00B0
+    <#
+        Paints one reading onto the verdict, the four tiles and the busiest row.
 
+        Each tile answers one question and says how it stands in words. Anything this PC doesn't share
+        is shown as "not shared", never as a zero - a zero looks like an answer.
+    #>
+    if (-not $r) { return }
+    Update-Sparklines $r
+    Show-BusyStrip $r
+    $deg = [char]0x00B0
+    $dot = [char]0x00B7
+
+    $v = Get-QpLiveVerdict -Reading $r
+    $script:VerdictText.Text = $v.Text
+    $script:VerdictText.Foreground = Get-Brush $(if ($v.Level -eq 'ok' -or $v.Level -eq 'none') { '#0F1B1C' } else { $script:HeatColours[$v.Level] })
+    $script:VerdictDot.Fill = Get-Brush $script:HeatColours[$v.Level]
+    $script:VerdictWhy.Text = $v.Why
+    $script:VerdictWhy.Visibility = if ($v.Why) { 'Visible' } else { 'Collapsed' }
+
+    # PROCESSOR - how hard it is working, and how warm it got doing it.
     $t = $script:TileCpu
-    if ($null -ne $r.CpuUsage) { $t.Value.Text = '{0:N0}%' -f $r.CpuUsage; Set-MeterFill $t ($r.CpuUsage / 100) } else { $t.Value.Text = '-' }
+    if ($null -ne $r.CpuUsage) { $t.Value.Text = '{0:N0}%' -f $r.CpuUsage; Set-MeterFill $t ($r.CpuUsage / 100) } else { $t.Value.Text = 'not shared'; Set-MeterFill $t 0 }
+    Set-TileMark $t 0.8
     $t.Caption.Text = Get-ShortName $r.CpuName
-    Set-TopText $t $r.CpuTop
     Update-BatteryCard $r.Battery
     $zone = if ($r.CpuTempSource) { " ($($r.CpuTempSource))" } else { '' }
     Set-HeatText $t.Heat $r.CpuTempC $null ([bool]$r.CpuTempStuck) ("From Windows' own thermal sensor$zone. On some PCs that is the processor itself, on others a sensor close to it, so treat it as a guide. Laptops often run hot when busy - it's only a worry if it stays very hot while the PC is doing nothing.")
+    Set-TileState $t (Get-QpHeatWord -Celsius $(if ($r.CpuTempStuck) { $null } else { $r.CpuTempC })).Level
     # Windows holding the processor back to cool it: the moment a game suddenly stutters for no reason.
+    # The only thing allowed to break the tiles' shape, because it is the only one worth stopping for.
     if ($r.CpuThrottled) {
-        $t.Extra.Text = 'slowing down to cool off - running at {0:N0}%' -f $r.CpuLimitPct
+        $t.Extra.Text = 'Held back to cool off - running at {0:N0}% of its speed' -f $r.CpuLimitPct
         $t.Extra.Foreground = Get-Brush $script:HeatColours.warn
         $t.Extra.FontWeight = 'SemiBold'
         $t.Extra.ToolTip = 'Windows is holding the processor back to shed heat, so things can feel slower until it cools. Common on laptops during games. Clear vents and a hard, flat surface help. Slowing down done inside the chip itself is not visible to Windows, so this cannot catch every case.'
@@ -2753,48 +2892,69 @@ function Update-LiveTiles($r) {
         $t.Extra.Visibility = 'Collapsed'
     }
 
+    # GRAPHICS - the same two questions, plus what its own memory is doing, which used to be a tile of
+    # its own and almost never had anything to say.
     $gpus = @($r.Gpus)
     $g = $gpus | Select-Object -First 1
     $t = $script:TileGpu
     if ($g) {
         $t.Value.Text = '{0:N0}%' -f $g.Usage
         Set-MeterFill $t ($g.Usage / 100)
+        Set-TileMark $t 0.8
         $t.Caption.Text = Get-ShortName $g.Name
-        Set-TopText $t $g.Top
         $tip = if ($g.TempMaxC) { "From the graphics driver - the same reading Task Manager shows. The driver says this card is built for up to {0:N0}{1}C." -f $g.TempMaxC, $deg } else { 'From the graphics driver - the same reading Task Manager shows.' }
         if ($null -eq $g.TempC -and -not $g.Discrete) { $tip = 'Built-in graphics share the processor''s cooling, so the driver doesn''t report its own temperature.' }
         elseif ($null -eq $g.TempC) { $tip = 'The driver isn''t sharing a temperature right now. On laptops the graphics card often sleeps when it isn''t needed.' }
         Set-HeatText $t.Heat $g.TempC $g.TempMaxC $false $tip
+        Set-TileState $t (Get-QpHeatWord -Celsius $g.TempC -MaxC $g.TempMaxC).Level
+        $bits = @()
+        if ($g.Discrete -and $g.DedicatedTotal -gt 0) { $bits += 'Video memory {0:N0}% of {1}' -f (100 * $g.DedicatedUsed / $g.DedicatedTotal), (Format-QpBytes $g.DedicatedTotal) }
+        elseif ($g.SharedTotal -gt 0) { $bits += 'Video memory {0:N0}%, borrowed from memory' -f (100 * $g.SharedUsed / $g.SharedTotal) }
         # Gaming laptops have two: say how busy the other one is, quietly.
         $other = $gpus | Select-Object -Skip 1 -First 1
-        if ($other) { $t.Extra.Text = 'also {0}: {1:N0}%' -f (Get-ShortName $other.Name), $other.Usage; $t.Extra.Visibility = 'Visible' } else { $t.Extra.Visibility = 'Collapsed' }
+        if ($other) { $bits += 'Also {0}: {1:N0}%' -f (Get-ShortName $other.Name), $other.Usage }
+        $t.Extra.Text = $bits -join "`n"
+        $t.Extra.Foreground = Get-Brush '#66706F'; $t.Extra.FontWeight = 'Normal'
+        $t.Extra.Visibility = if ($bits.Count) { 'Visible' } else { 'Collapsed' }
     } else {
-        $t.Value.Text = '-'
-        $t.Caption.Text = 'not shared by this PC'
+        $t.Value.Text = 'not shared'
+        $t.Caption.Text = 'This PC keeps no graphics figures.'
         $t.Heat.Text = ''
-        $t.Top.Visibility = 'Collapsed'
+        $t.Extra.Visibility = 'Collapsed'
+        Set-MeterFill $t 0; Set-TileMark $t $null
     }
 
-    if ($null -ne $r.MemUsed) { Set-MemoryTile $r.MemUsed $r.MemTotal }
+    if ($null -ne $r.MemUsed) { Set-MemoryTile $r.MemUsed $r.MemTotal $r.CommitPct }
 
-    $t = $script:TileVram
-    if ($g -and $g.Discrete -and $g.DedicatedTotal -gt 0) {
-        $t.Value.Text = '{0:N0}%' -f (100 * $g.DedicatedUsed / $g.DedicatedTotal)
-        $t.Caption.Text = '{0} of {1}' -f (Format-QpBytes $g.DedicatedUsed), (Format-QpBytes $g.DedicatedTotal)
-        $t.Heat.Text = 'on the graphics card'
-        $t.Heat.Foreground = Get-Brush '#4B5B5C'; $t.Heat.FontWeight = 'Normal'
-        Set-MeterFill $t ($g.DedicatedUsed / $g.DedicatedTotal)
-    } elseif ($g -and $g.SharedTotal -gt 0) {
-        $t.Value.Text = '{0:N0}%' -f (100 * $g.SharedUsed / $g.SharedTotal)
-        $t.Caption.Text = '{0} of {1}' -f (Format-QpBytes $g.SharedUsed), (Format-QpBytes $g.SharedTotal)
-        $t.Heat.Text = 'borrowed from memory'
-        $t.Heat.Foreground = Get-Brush '#4B5B5C'; $t.Heat.FontWeight = 'Normal'
-        Set-MeterFill $t ($g.SharedUsed / $g.SharedTotal)
+    # THE DRIVE - how busy it is, and how warm. A drive flat out while the processor idles is what
+    # "slow" almost always turns out to be, and it had no tile at all before.
+    $t = $script:TileDisk
+    if ($null -ne $r.DiskBusyPct) {
+        $t.Value.Text = '{0:N0}%' -f $r.DiskBusyPct
+        Set-MeterFill $t ($r.DiskBusyPct / 100)
+        Set-TileMark $t 0.9
+        $t.Caption.Text = 'of the time reading or writing'
     } else {
-        $t.Value.Text = '-'
-        $t.Caption.Text = 'not shared by this PC'
-        $t.Heat.Text = ''
+        $t.Value.Text = 'not shared'
+        $t.Caption.Text = 'This PC keeps no figure for it.'
+        Set-MeterFill $t 0; Set-TileMark $t $null
     }
+    $d = $script:DriveLast
+    if ($d -and $null -ne $d.TempC) {
+        $h = Get-QpHeatWord -Celsius $d.TempC -Kind Drive
+        $t.Heat.Text = '{0}{1}C {2} {3}' -f $d.TempC, $deg, $dot, $h.Word
+        Set-TileState $t $h.Level
+        $t.Heat.ToolTip = $(if ($d.FromDrive) { 'Asked of the drive itself, so it moves with what the drive is doing.' } else { "Windows' own figure for this drive. Some storage drivers report the same number whatever is happening, so treat it as a guide." })
+    } elseif (-not $script:DriveRead) {
+        $t.Heat.Text = 'asking the drive...'
+        Set-TileState $t 'none'
+    } else {
+        $t.Heat.Text = 'temperature not shared'
+        Set-TileState $t 'none'
+    }
+    # Which drive it is stays on the card below, where its make and model can be read without wrapping
+    # a tile to three lines and knocking the row out of line.
+    $t.Extra.Visibility = 'Collapsed'
 }
 
 function Show-MeterGains([int64]$SpaceFreed, [int64]$MemoryFreed) {
@@ -3764,7 +3924,7 @@ function Test-SessionCard {
             CpuTempSource = 'TZ'; CpuTempStuck = $false; CpuLimitPct = $(if ($throttled) { 61 } else { 100 }); CpuName = 'Test processor'
             CommitPct = $commit; CommitUsed = [double]24GB; CommitLimit = [double]27GB; MemUsed = [double]$mem; MemTotal = [double]16GB
             DiskBusyPct = 26; DiskQueue = 0.8; SpeedMhz = 2400
-            CpuTop = @([pscustomobject]@{ Name = $top; Percent = $cpu }); Gpus = @(); Battery = $null
+            CpuTop = @([pscustomobject]@{ Name = $top; Pct = $cpu }); Gpus = @(); Battery = $null
         }
     }
     $script:SessionWatch = New-QpSessionWatch -IntervalSeconds 10 -Now $t0
@@ -3777,7 +3937,6 @@ function Test-SessionCard {
     $raised = @(Update-QpSessionAlerts -Watch $script:SessionWatch -Reading $hot -FreePct 4)
     $again = @(Update-QpSessionAlerts -Watch $script:SessionWatch -Reading $hot -FreePct 4)
     Show-SessionAlerts $raised
-    Update-LiveExtra (New-Sample 40 20 60 $false 100 45 4GB 'A game')
     Update-SessionCard
     $head = [string]$script:SessionHead.Text
     $lines = @(foreach ($child in $script:SessionLines.Children) { if ($child -is [System.Windows.Controls.TextBlock]) { $child.Text } }) -join ' | '
@@ -3796,10 +3955,9 @@ function Test-SessionCard {
     $html = New-QpSessionReportHtml -Watch $script:SessionLastWatch
     $script:SessionWatch = $null; $script:SessionLast = $null; $script:SessionLastWatch = $null
     Update-SessionCard
-    '{0}; very hot: {1}; held back: {2}; gap owned up to: {3}; busiest: {4}; extras: {5}; stops: {6}; alerts: {7}; said once: {8}; report: {9}; timeline: {10}' -f
+    '{0}; very hot: {1}; held back: {2}; gap owned up to: {3}; busiest: {4}; stops: {5}; alerts: {6}; said once: {7}; report: {8}; timeline: {9}' -f
         $button, [bool]($head -match 'It ran very hot for'), [bool]($lines -match 'Held back to cool off for \d+ seconds, once'),
         [bool]($lines -match 'One stretch went unwatched'), [bool]($lines -match 'Busiest: A game'),
-        [bool]($script:LiveExtra.Text -match 'Memory promised to programs: 45%.*Processor speed: 100%.*Disk busy: 26%'),
         [bool]($after -eq 'Watch this session'),
         (@($raised | ForEach-Object { $_.Id }) -join ','), ($again.Count -eq 0),
         ('{0} offered, {1} characters, {2} scripts' -f $canSave, $html.Length, [regex]::Matches($html, '<script').Count),
@@ -3825,6 +3983,53 @@ function Test-SteadyCard {
         [bool]($scored -match 'stopped without warning 2 times'), [bool]($scored -match 'Awake for 3 hours'),
         [bool]($blank -match "Not scored .* hasn't kept a record")
 }
+function Test-LiveTiles {
+    <#
+        The live panel, drawn twice into the real window.
+
+        First a PC in trouble - hot, held back, nearly out of memory, with a game on top - which has to
+        reach the one verdict that matters most rather than the biggest number. Then a PC that shares
+        almost nothing, which has to say "not shared" in every empty place instead of drawing a zero,
+        because a zero looks like an answer.
+    #>
+    $busy = [pscustomobject]@{
+        CpuName = 'Test processor'; CpuUsage = 96; CpuTempC = 97; CpuTempStuck = $false; CpuTempSource = 'TZ'
+        CpuThrottled = $true; CpuLimitPct = 61; SpeedPct = 61; SpeedMhz = 1400
+        CpuTop = @([pscustomobject]@{ Name = 'A game'; Pct = 74 }, [pscustomobject]@{ Name = 'Windows Explorer'; Pct = 6 })
+        MemUsed = [double]14GB; MemTotal = [double]16GB; CommitPct = 93; CommitUsed = [double]25GB; CommitLimit = [double]27GB
+        DiskBusyPct = 44; DiskQueue = 1.2; Battery = $null
+        Gpus = @([pscustomobject]@{ Name = 'Test card'; Usage = 88; TempC = 71; TempMaxC = 95; Discrete = $true
+                DedicatedUsed = [double]6GB; DedicatedTotal = [double]8GB; SharedUsed = 0; SharedTotal = 0
+                Top = @([pscustomobject]@{ Name = 'A game'; Pct = 88 }) })
+    }
+    Update-DriveCard ([pscustomobject]@{ Name = 'Test SSD'; Media = 'SSD'; Health = 'Healthy'; WearPct = 4
+            TempC = 47; WarnAtC = 87; PowerOnHours = 861; BytesWritten = [int64]9TB; FromDrive = $true })
+    Update-LiveTiles $busy
+    $hot = '{0} | {1} | {2} | {3} | {4} | {5}' -f $script:VerdictText.Text, $script:TileCpu.Value.Text, $script:TileCpu.Extra.Text,
+        $script:TileMemory.Heat.Text, $script:TileDisk.Heat.Text, $script:TileGpu.Extra.Text
+    # The card below the tiles: the slow story, which is where the drive's hours and writing live.
+    $card = '{0} | {1} | {2}' -f $script:DriveCard.Value.Text, $script:DriveCard.Caption.Text, $script:DriveHeatText.Text
+    # The busiest row: one line per program, and a game busy on both chips counted once, at its loudest.
+    $rows = @(foreach ($row in $script:BusyRows.Children) { (@(foreach ($c in $row.Children) { if ($c -is [System.Windows.Controls.TextBlock]) { $c.Text } }) -join ' ') })
+    $merged = '{0} rows: {1}' -f $rows.Count, ($rows -join ' / ')
+
+    $bare = [pscustomobject]@{
+        CpuName = 'Test processor'; CpuUsage = 4; CpuTempC = $null; CpuTempStuck = $false; CpuThrottled = $false
+        CpuTop = @(); MemUsed = [double]4GB; MemTotal = [double]16GB; CommitPct = $null
+        DiskBusyPct = $null; Gpus = @(); Battery = $null
+    }
+    Update-DriveCard $null
+    Update-LiveTiles $bare
+    $quiet = '{0} | {1} | {2} | {3}' -f $script:VerdictText.Text, $script:TileGpu.Value.Text, $script:TileDisk.Value.Text, $script:TileMemory.Heat.Text
+    'verdict worst first: {0}; held back named: {1}; memory word: {2}; drive heat: {3}; video memory folded in: {4}; {5}; drive life: {6}; calm: {7}; nothing invented: {8}' -f
+        [bool]($hot -match 'held back to cool off'), [bool]($hot -match 'running at 61%'),
+        [bool]($hot -match 'nearly full'), [bool]($hot -match '47.C'), [bool]($hot -match 'Video memory 75%'),
+        $merged,
+        [bool](($card -match '4% of its rated life used') -and ($card -match '861 hours') -and ($card -match 'written to it')),
+        [bool]($quiet -match 'calm'),
+        [bool](($quiet -match 'not shared') -and ($quiet -notmatch '\| 0%'))
+}
+
 function Test-Badge {
     # The taskbar badge draws and clears again.
     Update-TaskbarBadge ([pscustomobject]@{ Count = 3 })
@@ -3862,13 +4067,17 @@ if ($SelfTest) {
         $ui.Tabs.SelectedIndex = $SnapshotTab
         if ($SnapshotTab -eq ($ui.Tabs.Items.Count - 1)) { $script:PrivacyExpander.IsExpanded = $true }
         if ([string]$ui.Tabs.SelectedItem.Tag -eq 'health') {
-            # A real reading for the picture: load is measured between two moments, a second apart.
+            # Real readings for the picture. The slow ones are read first, so the tiles have the drive's
+            # temperature to show, and then several live ones a second apart, so the trends have a shape
+            # rather than being a single dot.
             $monitor = New-QpLiveMonitor
-            Start-Sleep -Milliseconds 1000
             $script:BatteryHealth = Get-QpBatteryHealth
-            Update-LiveTiles (Get-QpLiveReading -Monitor $monitor)
             Update-DriveCard (Get-QpDriveHealth)
             Update-SteadyCard (Get-QpReliability)
+            foreach ($i in 1..8) {
+                Start-Sleep -Milliseconds 1000
+                Update-LiveTiles (Get-QpLiveReading -Monitor $monitor)
+            }
         }
         Update-Buttons
         $root = $window.Content
@@ -3892,6 +4101,7 @@ if ($SelfTest) {
     'sign-in costs: ' + (Test-SignInCosts)
     'add-ons: ' + (Test-AddonList)
     'easy wins: ' + (Test-SpaceWins)
+    'live tiles: ' + (Test-LiveTiles)
     'session: ' + (Test-SessionCard)
     'holding up: ' + (Test-SteadyCard)
     return

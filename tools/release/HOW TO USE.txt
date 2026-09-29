@@ -22,9 +22,14 @@ Developed by KomodoWorks.com  |  free  |  open source  |  collects nothing
 
 
 ALSO IN THE APP
-   Health     How hard your PC is working, how warm it is, which programs
-              are busiest, and how the battery and drive are holding up.
-              Each figure carries the last two minutes under it.
+   Health     Opens with one line telling you how your PC is doing, so you
+              aren't left to work it out from a screen of numbers. Under it,
+              matching tiles for the processor, graphics, memory and drive -
+              each with its figure, how warm it is in plain words, and the
+              last two minutes drawn underneath. Then one list of whatever
+              is keeping your PC busiest, and how the battery and drive are
+              holding up. The drive's heat and wear come from the drive
+              itself, because Windows' own figures for it are often invented.
               "Watch this session" keeps an eye on it while you work and
               tells you afterwards how hot it got, when it was held back
               to cool off, and how far memory went. It speaks up once if

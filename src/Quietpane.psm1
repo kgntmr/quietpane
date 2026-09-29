@@ -19,7 +19,7 @@
       * No network requests, no telemetry, no data collection. Everything stays on this PC.
 #>
 
-$script:AppVersion  = '1.19.0'
+$script:AppVersion  = '1.20.0'
 $script:Brand       = @{ Name = 'KomodoWorks'; Url = 'https://www.komodoworks.com'; Email = 'info@komodoworks.com'; Repo = 'https://github.com/kgntmr/quietpane' }
 $script:AssetsRoot  = Join-Path (Split-Path $PSScriptRoot -Parent) 'assets'
 $script:LogSink     = $null
@@ -486,6 +486,116 @@ function Initialize-QpGpuSensors {
     catch { return $false }   # e.g. a locked-down PC that doesn't allow it: usage still works, heat just isn't shown
 }
 
+# Asking the drive itself, because Windows' own answer is often a made-up one. Get-StorageReliabilityCounter
+# returns whatever the storage driver felt like saying, and on a good many PCs - this one included - that
+# is a flat 60 C that never moves however hard the disk is worked, with no wear and no hours at all. The
+# drive knows all three perfectly well, so the questions below are put to the drive: the temperature Windows
+# exposes for any device that reports one, and, on an NVMe drive, its own health log, which carries how much
+# of its rated life is gone, how long it has been powered on and how much has been written to it. Read-only,
+# opened with no access rights at all, so it needs no administrator and cannot alter a byte.
+
+$script:DriveSensorSource = @'
+using System;
+using System.Runtime.InteropServices;
+
+public static class QuietpaneDriveSensors {
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    static extern IntPtr CreateFileW(string name, uint access, uint share, IntPtr sec, uint disp, uint flags, IntPtr tmpl);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool DeviceIoControl(IntPtr h, uint code, IntPtr inBuf, uint inSize, IntPtr outBuf, uint outSize, out uint ret, IntPtr ov);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool CloseHandle(IntPtr h);
+
+    const uint IOCTL_STORAGE_QUERY_PROPERTY = 0x002D1400;
+    const int TEMPERATURE_PROPERTY = 52;        // StorageDeviceTemperatureProperty
+    const int PROTOCOL_PROPERTY = 50;           // StorageDeviceProtocolSpecificProperty
+    const int PROTOCOL_NVME = 3, NVME_LOG_PAGE = 2, NVME_HEALTH_LOG = 2;
+
+    public class Reading {
+        public bool HasTemperature;
+        public int TemperatureC;
+        public int WarnAtC;          // the drive's own "too warm" mark, 0 when it doesn't say
+        public bool HasLife;
+        public int LifeUsedPct;      // share of its rated writing life used up
+        public long PowerOnHours;
+        public long BytesWritten;
+    }
+
+    public static Reading Read(int driveNumber) {
+        var r = new Reading();
+        IntPtr h = CreateFileW(@"\\.\PhysicalDrive" + driveNumber, 0, 3, IntPtr.Zero, 3, 0, IntPtr.Zero);
+        if (h == (IntPtr)(-1)) return r;
+        try {
+            ReadTemperature(h, r);
+            ReadNvmeHealth(h, r);
+        } catch { } finally { CloseHandle(h); }
+        return r;
+    }
+
+    // Every drive whose driver reports a sensor at all, NVMe or not.
+    static void ReadTemperature(IntPtr h, Reading r) {
+        int size = 512;
+        IntPtr buf = Marshal.AllocHGlobal(size);
+        try {
+            Zero(buf, size);
+            Marshal.WriteInt32(buf, 0, TEMPERATURE_PROPERTY);
+            Marshal.WriteInt32(buf, 4, 0);                    // PropertyStandardQuery
+            uint ret;
+            if (!DeviceIoControl(h, IOCTL_STORAGE_QUERY_PROPERTY, buf, (uint)size, buf, (uint)size, out ret, IntPtr.Zero)) return;
+            int count = (ushort)Marshal.ReadInt16(buf, 12);
+            if (count < 1) return;
+            short temp = Marshal.ReadInt16(buf, 24 + 2);      // first sensor: the drive as a whole
+            short over = Marshal.ReadInt16(buf, 24 + 4);
+            if (temp <= -100 || temp > 200) return;           // a sensor that isn't really there
+            r.HasTemperature = true;
+            r.TemperatureC = temp;
+            if (over > 0 && over < 200) r.WarnAtC = over;
+        } catch { } finally { Marshal.FreeHGlobal(buf); }
+    }
+
+    // NVMe only: log page 02h, the drive's own health record.
+    static void ReadNvmeHealth(IntPtr h, Reading r) {
+        int head = 8 + 40, size = head + 512;
+        IntPtr buf = Marshal.AllocHGlobal(size);
+        try {
+            Zero(buf, size);
+            Marshal.WriteInt32(buf, 0, PROTOCOL_PROPERTY);
+            Marshal.WriteInt32(buf, 4, 0);
+            Marshal.WriteInt32(buf, 8, PROTOCOL_NVME);
+            Marshal.WriteInt32(buf, 12, NVME_LOG_PAGE);
+            Marshal.WriteInt32(buf, 16, NVME_HEALTH_LOG);
+            Marshal.WriteInt32(buf, 20, 0);
+            Marshal.WriteInt32(buf, 24, 40);                  // where the log sits, counted from here
+            Marshal.WriteInt32(buf, 28, 512);
+            uint ret;
+            if (!DeviceIoControl(h, IOCTL_STORAGE_QUERY_PROPERTY, buf, (uint)size, buf, (uint)size, out ret, IntPtr.Zero)) return;
+            int kelvin = Marshal.ReadByte(buf, head + 1) | (Marshal.ReadByte(buf, head + 2) << 8);
+            if (!r.HasTemperature && kelvin > 200 && kelvin < 400) { r.HasTemperature = true; r.TemperatureC = kelvin - 273; }
+            int used = Marshal.ReadByte(buf, head + 5);
+            long hours = Low64(buf, head + 128);
+            long units = Low64(buf, head + 48);               // written in 512,000-byte units
+            if (used <= 100) { r.HasLife = true; r.LifeUsedPct = used; }
+            if (hours > 0 && hours < 2000000) r.PowerOnHours = hours;
+            if (units > 0 && units < 100000000000L) r.BytesWritten = units * 512000L;
+        } catch { } finally { Marshal.FreeHGlobal(buf); }
+    }
+
+    static long Low64(IntPtr buf, int at) {
+        long v = 0;
+        for (int i = 7; i >= 0; i--) v = (v << 8) | Marshal.ReadByte(buf, at + i);
+        return v;
+    }
+    static void Zero(IntPtr buf, int size) { for (int i = 0; i < size; i++) Marshal.WriteByte(buf, i, 0); }
+}
+'@
+
+function Initialize-QpDriveSensors {
+    <# Makes the questions above available. Returns $false, quietly, where a PC won't allow it. #>
+    if ('QuietpaneDriveSensors' -as [type]) { return $true }
+    try { Add-Type -TypeDefinition $script:DriveSensorSource -Language CSharp -ErrorAction Stop; return $true }
+    catch { return $false }
+}
+
 function New-QpCounter {
     <#
         One of Windows' own performance counters, asked for by its English name.
@@ -867,6 +977,64 @@ function Get-QpHeatWord {
     [pscustomobject]@{ Word = $word; Level = $level }
 }
 
+function Get-QpLiveVerdict {
+    <#
+        One sentence for the whole tab.
+
+        Twelve numbers on a screen ask the reader to work out which one matters, and most people
+        reasonably decline. This does that work first: it looks at everything a reading holds, picks the
+        single thing most worth knowing, and says it in a sentence. The tiles underneath then answer
+        "where does that come from", rather than being the only thing on offer.
+
+        Order is by what actually spoils an afternoon, not by which number is biggest: being held back
+        to cool off beats being very hot, which beats running out of memory, which beats simply being
+        busy. A PC with nothing wrong is told so plainly - silence reads as a fault.
+    #>
+    param($Reading)
+    if (-not $Reading) { return [pscustomobject]@{ Text = 'Having a look...'; Level = 'none'; Why = '' } }
+    $r = $Reading
+    $gpu = @($r.Gpus) | Select-Object -First 1
+    $busy = @(@($r.CpuUsage, $(if ($gpu) { $gpu.Usage } else { $null })) | Where-Object { $null -ne $_ } | ForEach-Object { [double]$_ })
+    $busiest = if ($busy.Count) { ($busy | Measure-Object -Maximum).Maximum } else { $null }
+    $memPct = if ($r.MemTotal -gt 0 -and $null -ne $r.MemUsed) { 100 * [double]$r.MemUsed / [double]$r.MemTotal } else { $null }
+    $tight = @(@($memPct, $r.CommitPct) | Where-Object { $null -ne $_ } | ForEach-Object { [double]$_ })
+    $fullest = if ($tight.Count) { ($tight | Measure-Object -Maximum).Maximum } else { $null }
+    $chips = @()
+    if ($null -ne $r.CpuTempC -and -not $r.CpuTempStuck) { $chips += (Get-QpHeatWord -Celsius $r.CpuTempC) }
+    if ($gpu -and $null -ne $gpu.TempC) { $chips += (Get-QpHeatWord -Celsius $gpu.TempC -MaxC $gpu.TempMaxC) }
+    $veryHot = @($chips | Where-Object { $_.Level -eq 'high' }).Count -gt 0
+    $hot = @($chips | Where-Object { $_.Level -eq 'warn' }).Count -gt 0
+
+    if ($r.CpuThrottled) {
+        return [pscustomobject]@{ Level = 'high'; Text = 'Your PC is being held back to cool off.'
+            Why = 'Things will feel slower until it cools. Clearing the vents and sitting it on something hard and flat is what helps.' }
+    }
+    if ($veryHot) {
+        return [pscustomobject]@{ Level = 'high'; Text = 'Your PC is running very hot.'
+            Why = 'Normal for a laptop in the middle of a game. Worth a look if it stays this hot while nothing much is happening.' }
+    }
+    if ($null -ne $fullest -and $fullest -ge 90) {
+        return [pscustomobject]@{ Level = 'high'; Text = 'Your PC has nearly run out of memory.'
+            Why = 'This, rather than heat, is what usually makes a PC crawl. Closing what you are not using gives it room.' }
+    }
+    if ($null -ne $r.DiskBusyPct -and [double]$r.DiskBusyPct -ge 90 -and $null -ne $busiest -and $busiest -lt 50) {
+        return [pscustomobject]@{ Level = 'warn'; Text = 'Your PC is waiting on its drive.'
+            Why = 'The processor is idle while the drive is flat out, which is what "slow" usually turns out to be. It often settles once Windows finishes what it started.' }
+    }
+    if ($null -ne $busiest -and $busiest -ge 80) {
+        $text = if ($hot) { 'Your PC is working hard, and running warm with it.' } else { 'Your PC is working hard.' }
+        return [pscustomobject]@{ Level = 'warn'; Text = $text; Why = 'Nothing is wrong - this is what a busy PC looks like.' }
+    }
+    if ($null -ne $fullest -and $fullest -ge 80) {
+        return [pscustomobject]@{ Level = 'warn'; Text = 'Your PC is getting short of memory.'; Why = 'Still fine, but it is the number to watch if things start to drag.' }
+    }
+    if ($hot) { return [pscustomobject]@{ Level = 'ok'; Text = 'Your PC is running warm, and otherwise calm.'; Why = 'Warm is ordinary. Only "very hot" is worth acting on.' } }
+    if ($null -eq $busiest) { return [pscustomobject]@{ Level = 'none'; Text = 'Having a look...'; Why = '' } }
+    # Half of a PC in use is not "calm", and saying so would make the calm ones mean nothing.
+    if ($busiest -ge 50) { return [pscustomobject]@{ Level = 'ok'; Text = 'Your PC is busy, and coping.'; Why = 'Plenty in hand. Nothing here needs anything from you.' } }
+    [pscustomobject]@{ Level = 'ok'; Text = 'Your PC is calm.'; Why = 'Nothing here needs anything from you.' }
+}
+
 # ---------------------------------------------------------------- what a session cost
 #
 # The tiles say what is happening this second. A session record is the same readings remembered: the
@@ -1221,25 +1389,53 @@ function Get-QpBatteryHealth {
 
 function Get-QpDriveHealth {
     <#
-        The drive Windows runs from: Windows' own verdict on it, plus wear and temperature where the drive
-        shares them (those need administrator rights, which Quietpane has). Read-only; $null if unknown.
+        The drive Windows runs from: Windows' verdict on it, plus its heat, its wear and its hours.
+
+        The drive is asked first and Windows second, because Windows' own answer is often invented. Where
+        the storage driver makes a figure up, it tends to make up the same one for ever: a temperature that
+        reads exactly 60 C at three in the morning and under a heavy copy alike, a wear of nothing, and no
+        hours. Asked directly, the same drive gives a temperature that moves with what it is doing, the real
+        share of its writing life that is gone, and how long it has been switched on. Whatever neither can
+        answer comes back $null, and is shown as "not shared" rather than as a number.
     #>
     try {
         $letter = ($env:SystemDrive, 'C:')[[int][string]::IsNullOrEmpty($env:SystemDrive)].TrimEnd(':')
         $num = (Get-Partition -DriveLetter $letter -ErrorAction Stop).DiskNumber
         $disk = Get-PhysicalDisk -ErrorAction Stop | Where-Object { "$($_.DeviceId)" -eq "$num" } | Select-Object -First 1
         if (-not $disk) { return $null }
-        $rel = $null
-        try { $rel = $disk | Get-StorageReliabilityCounter -ErrorAction Stop } catch { }
-        $temp = if ($rel -and [int]$rel.Temperature -gt 0) { [int]$rel.Temperature } else { $null }
-        $wear = if ($rel -and $null -ne $rel.Wear -and "$($rel.Wear)" -ne '') { [int]$rel.Wear } else { $null }
+
+        $temp = $null; $warnAt = $null; $wear = $null; $hours = $null; $written = $null; $fromDrive = $false
+        if (Initialize-QpDriveSensors) {
+            try {
+                $d = [QuietpaneDriveSensors]::Read([int]$num)
+                if ($d.HasTemperature) { $temp = [int]$d.TemperatureC; $fromDrive = $true }
+                if ($d.WarnAtC -gt 0) { $warnAt = [int]$d.WarnAtC }
+                if ($d.HasLife) { $wear = [int]$d.LifeUsedPct; $fromDrive = $true }
+                if ($d.PowerOnHours -gt 0) { $hours = [int64]$d.PowerOnHours }
+                if ($d.BytesWritten -gt 0) { $written = [int64]$d.BytesWritten }
+            } catch { }
+        }
+
+        # Only where the drive itself said nothing. This needs administrator rights, which Quietpane has.
+        if ($null -eq $temp -or $null -eq $wear -or $null -eq $hours) {
+            $rel = $null
+            try { $rel = $disk | Get-StorageReliabilityCounter -ErrorAction Stop } catch { }
+            if ($rel) {
+                if ($null -eq $temp -and [int]$rel.Temperature -gt 0) { $temp = [int]$rel.Temperature }
+                if ($null -eq $wear -and $null -ne $rel.Wear -and "$($rel.Wear)" -ne '') { $wear = [int]$rel.Wear }
+                if ($null -eq $hours -and [int]$rel.PowerOnHours -gt 0) { $hours = [int64]$rel.PowerOnHours }
+            }
+        }
         [pscustomobject]@{
             Name = [string]$disk.FriendlyName
             Media = $(switch ([string]$disk.MediaType) { 'SSD' { 'SSD' } 'HDD' { 'hard drive' } default { 'drive' } })
             Health = [string]$disk.HealthStatus          # Healthy, Warning or Unhealthy - Windows' own verdict
             WearPct = $wear                              # share of its rated life used up; SSDs only
             TempC = $temp
-            PowerOnHours = $(if ($rel -and [int]$rel.PowerOnHours -gt 0) { [int]$rel.PowerOnHours } else { $null })
+            WarnAtC = $warnAt                            # the drive's own "too warm" mark, $null when it doesn't say
+            PowerOnHours = $hours
+            BytesWritten = $written
+            FromDrive = $fromDrive                       # $true when the drive answered for itself
         }
     } catch { return $null }
 }
@@ -5571,7 +5767,7 @@ $($script:ReportCss)
 
 Export-ModuleMember -Function Get-QpInfo, Set-QpLogSink, Write-QpLog, Test-QpAdmin, Get-QpCatalog, Format-QpBytes,
     Set-QpProgressSink, Write-QpProgress, Set-QpCancelCheck, Test-QpCancelled, New-QpScanSummary,
-    Get-QpState, Get-QpSystemUsage, Get-QpTotals, New-QpLiveMonitor, Get-QpLiveReading, Get-QpHeatWord, Get-QpProgramName,
+    Get-QpState, Get-QpSystemUsage, Get-QpTotals, New-QpLiveMonitor, Get-QpLiveReading, Get-QpHeatWord, Get-QpLiveVerdict, Get-QpProgramName,
     New-QpCounter, New-QpCounterGroup,
     New-QpSessionWatch, Add-QpSessionSample, Stop-QpSessionWatch, Get-QpSessionSummary, Format-QpSpan,
     Update-QpSessionAlerts, Get-QpReliability, New-QpSessionReportHtml, Save-QpSessionReport, Get-QpSessionBands,

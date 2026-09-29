@@ -193,6 +193,17 @@ These need eyes, not assertions:
   and the Undo tab puts it back.
 - **Dark mode.** Open a saved report with Windows set to dark mode; the chart and severity colours
   should still be readable.
+- **The drive's own figures, on a drive that is not this one.** The Health tab asks the drive itself
+  for its temperature, its wear and its hours, and falls back to Windows only where the drive will not
+  answer. It has been proved on one NVMe drive, where Windows insisted on a flat 60 C whatever was
+  happening and the drive gave a temperature that rose from 45 C to 48 C under a heavy write and fell
+  back again. Worth repeating on: a SATA SSD, a spinning hard drive, and a USB or card-reader drive,
+  where the right answer may well be "not shared" - which is fine, as long as it says so instead of
+  showing a zero or an invented number.
+- **A tile with nothing behind it.** On a desktop with no separate graphics card, or a PC with the
+  disk counters switched off, every empty tile must read "not shared" rather than 0%.
+- **The verdict under real load.** Start something heavy and watch the sentence at the top of the
+  Health tab follow it: calm, then working hard, then held back to cool off, and back again.
 
 ## 4. What is deliberately not tested
 

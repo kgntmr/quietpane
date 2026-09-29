@@ -1055,6 +1055,85 @@ Test-Case 'drive health uses Windows'' own verdict, and never throws' {
 Test-Case 'drives have their own, cooler idea of hot' {
     (Get-QpHeatWord 55 -Kind Drive).Word -eq 'warm' -and (Get-QpHeatWord 72 -Kind Drive).Word -eq 'very hot' -and (Get-QpHeatWord 72).Word -eq 'warm'
 }
+Test-Case 'the drive is asked about itself, and answers something possible' {
+    # Windows' own storage figures are invented on a good many PCs - a temperature stuck at exactly 60
+    # whatever is happening, no wear and no hours. Where the drive can be asked directly it is, and what
+    # it says has to be within the bounds of physics. A PC that will not allow the question says nothing.
+    $d = Get-QpDriveHealth
+    if (-not $d -or -not $d.FromDrive) { return $true }
+    ($null -eq $d.TempC -or ($d.TempC -gt 0 -and $d.TempC -lt 120)) -and
+    ($null -eq $d.WearPct -or ($d.WearPct -ge 0 -and $d.WearPct -le 100)) -and
+    ($null -eq $d.PowerOnHours -or $d.PowerOnHours -gt 0) -and
+    ($null -eq $d.WarnAtC -or ($d.WarnAtC -gt 30 -and $d.WarnAtC -lt 150))
+}
+Test-Case 'asking the drive twice does not change it' {
+    # Read-only, and opened with no access rights at all: two reads a moment apart must agree on the
+    # things that cannot move, whatever the temperature has done in between.
+    $a = Get-QpDriveHealth; $b = Get-QpDriveHealth
+    ($null -eq $a -and $null -eq $b) -or ($a.Name -eq $b.Name -and $a.WearPct -eq $b.WearPct -and $a.Health -eq $b.Health)
+}
+
+Section 'One sentence for the whole tab'
+function New-VerdictReading {
+    param([double]$Cpu = 10, $TempC = 45, [bool]$Throttled = $false, $CommitPct = 40, $MemUsed = 4GB,
+        $DiskBusy = 5, $GpuTempC = $null, $GpuUsage = 10)
+    [pscustomobject]@{
+        CpuUsage = $Cpu; CpuTempC = $TempC; CpuTempStuck = $false; CpuThrottled = $Throttled; CpuLimitPct = $(if ($Throttled) { 61 } else { 100 })
+        MemUsed = [double]$MemUsed; MemTotal = [double]16GB; CommitPct = $CommitPct; DiskBusyPct = $DiskBusy
+        Gpus = @([pscustomobject]@{ Name = 'Test card'; Usage = $GpuUsage; TempC = $GpuTempC; TempMaxC = 95 })
+    }
+}
+Test-Case 'a PC with nothing wrong is told so, not left silent' {
+    $v = Get-QpLiveVerdict -Reading (New-VerdictReading)
+    $v.Level -eq 'ok' -and $v.Text -match 'calm' -and $v.Why
+}
+Test-Case 'being held back to cool off outranks everything else' {
+    # Hot, nearly out of memory and held back all at once: the one that spoils the afternoon wins.
+    $v = Get-QpLiveVerdict -Reading (New-VerdictReading -Cpu 99 -TempC 97 -Throttled $true -CommitPct 95)
+    $v.Level -eq 'high' -and $v.Text -match 'held back to cool off'
+}
+Test-Case 'running out of memory beats merely being busy' {
+    $v = Get-QpLiveVerdict -Reading (New-VerdictReading -Cpu 95 -CommitPct 94)
+    $v.Level -eq 'high' -and $v.Text -match 'run out of memory'
+}
+Test-Case 'promised memory counts even when the chips look half empty' {
+    # The case the old tab could not tell you about: memory at 25%, and the PC crawling anyway.
+    $v = Get-QpLiveVerdict -Reading (New-VerdictReading -MemUsed 4GB -CommitPct 93)
+    $v.Level -eq 'high' -and $v.Text -match 'run out of memory'
+}
+Test-Case 'a drive flat out while the processor idles is named as such' {
+    $v = Get-QpLiveVerdict -Reading (New-VerdictReading -Cpu 4 -GpuUsage 2 -DiskBusy 97)
+    $v.Level -eq 'warn' -and $v.Text -match 'waiting on its drive'
+}
+Test-Case 'a busy PC is told it is busy, and that nothing is wrong' {
+    $v = Get-QpLiveVerdict -Reading (New-VerdictReading -Cpu 88)
+    $v.Level -eq 'warn' -and $v.Text -match 'working hard' -and $v.Why -match 'Nothing is wrong'
+}
+Test-Case 'the graphics card being very hot counts as much as the processor' {
+    $v = Get-QpLiveVerdict -Reading (New-VerdictReading -Cpu 40 -TempC 50 -GpuTempC 92)
+    $v.Level -eq 'high' -and $v.Text -match 'very hot'
+}
+Test-Case 'a sensor that has stopped moving is not treated as a reading' {
+    $r = New-VerdictReading -TempC 97
+    $r.CpuTempStuck = $true
+    (Get-QpLiveVerdict -Reading $r).Text -notmatch 'very hot'
+}
+Test-Case 'half a PC in use is not called calm' {
+    # If "calm" covered everything under four-fifths it would stop meaning anything at all.
+    $mid = Get-QpLiveVerdict -Reading (New-VerdictReading -Cpu 65)
+    $idle = Get-QpLiveVerdict -Reading (New-VerdictReading -Cpu 8)
+    $mid.Level -eq 'ok' -and $mid.Text -match 'busy, and coping' -and $idle.Text -match 'calm'
+}
+Test-Case 'a PC that shares nothing gets no invented verdict' {
+    $bare = [pscustomobject]@{ CpuUsage = $null; CpuTempC = $null; CpuThrottled = $false; MemUsed = $null; MemTotal = 0
+        CommitPct = $null; DiskBusyPct = $null; Gpus = @() }
+    $v = Get-QpLiveVerdict -Reading $bare
+    $v.Level -eq 'none' -and $v.Text -notmatch '\d'
+}
+Test-Case 'no reading at all still comes back with something to show' {
+    $v = Get-QpLiveVerdict -Reading $null
+    $v -and $v.Text -and $v.Level -eq 'none'
+}
 
 Section 'What came back since last time'
 $notePath = Join-Path $env:TEMP ('qp-note-' + [guid]::NewGuid().ToString('N') + '.json')
@@ -1762,7 +1841,13 @@ Test-Case 'every privacy setting has a plain title and a short line, with the fu
     $longTitles.Count -eq 0 -and $longShorts.Count -eq 0 -and $jargon.Count -eq 0
 }
 Test-Case 'the session card names the worst of it, counts the minutes and owns up to the gap' {
-    $cardsOut -match 'session: Stop watching; very hot: True; held back: True; gap owned up to: True; busiest: True; extras: True; stops: True; alerts: memory,drive; said once: True; report: Visible offered, \d{4,} characters, 0 scripts; timeline: 96 columns, 92 a gap, 3 held back, 4 legend words'
+    $cardsOut -match 'session: Stop watching; very hot: True; held back: True; gap owned up to: True; busiest: True; stops: True; alerts: memory,drive; said once: True; report: Visible offered, \d{4,} characters, 0 scripts; timeline: 96 columns, 92 a gap, 3 held back, 4 legend words'
+}
+Test-Case 'the live tiles rank what matters, merge the busy list and never draw an invented zero' {
+    # The whole Health panel drawn into the real window twice: a PC in trouble, then one that shares
+    # almost nothing. A game busy on both the processor and the graphics card is one program, listed
+    # once at its loudest, rather than the same name in four columns as it used to be.
+    $cardsOut -match 'live tiles: verdict worst first: True; held back named: True; memory word: True; drive heat: True; video memory folded in: True; 2 rows: A game 88% of the graphics card / Windows Explorer 6% of the processor; drive life: True; calm: True; nothing invented: True'
 }
 Test-Case 'the steadiness card shows Windows'' score, or says plainly that there isn''t one' {
     $cardsOut -match 'holding up: score: True; crashes named: True; sudden stops: True; awake: True; unscored says so: True'
