@@ -205,6 +205,13 @@ These need eyes, not assertions:
 - **The verdict under real load.** Start something heavy and watch the sentence at the top of the
   Health tab follow it: calm, then working hard, then held back to cool off, and back again.
 
+- **Light and dark, for real.** The self-test switches the window's colours both ways and fakes
+  what Windows says, but only a person can flip the real setting. With Quietpane open and Appearance
+  on *Match Windows*, change Settings > Personalisation > Colours > *Choose your mode* between Light
+  and Dark: within about a second the window follows, and so does its title bar. Then pick *Light*
+  under Appearance and flip Windows again - Quietpane must stay light. Close and reopen: the choice
+  is remembered. Windows' own controls (tick boxes, scroll bars) keep Windows' look in both themes.
+
 ## 4. What is deliberately not tested
 
 - Live ransomware, remote access tools, stealers or loaders. Never, in any environment.

@@ -18,6 +18,7 @@
         .\Quietpane.ps1 -SelfTest                build the window without showing it (used for testing)
         .\Quietpane.ps1 -SelfTest -Snapshot x.png -SnapshotTab 1
                                                  also render the window to an image (used for screenshots)
+        .\Quietpane.ps1 -SelfTest -Theme Dark    build it in the dark colours (the self-test is light unless told)
 
     Privacy: this app collects nothing and makes no network connections. See PRIVACY.md.
 #>
@@ -27,7 +28,8 @@ param(
     [switch]$Watch,
     [switch]$SelfTest,
     [string]$Snapshot,
-    [int]$SnapshotTab = 0
+    [int]$SnapshotTab = 0,
+    [ValidateSet('', 'Light', 'Dark')][string]$Theme = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -112,12 +114,15 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
 # this PC. First: this app's own name, so the taskbar groups it on its own and shows the KomodoWorks
 # emblem instead of PowerShell's icon. Second: that the window can draw at the screen's real
 # resolution - without it Windows stretches the window on a scaled display, which looks blurry and
-# can push the buttons off the bottom of a laptop screen.
+# can push the buttons off the bottom of a laptop screen. The third line is used once the window
+# exists: it asks Windows for a dark title bar when the window is dark, so a white strip is not left
+# across the top of it.
 if (-not $SelfTest) {
     try {
         Add-Type -Namespace Quietpane -Name Shell -MemberDefinition @'
 [DllImport("shell32.dll", CharSet = CharSet.Unicode)] public static extern int SetCurrentProcessExplicitAppUserModelID(string appId);
 [DllImport("user32.dll")] public static extern int SetProcessDPIAware();
+[DllImport("dwmapi.dll")] public static extern int DwmSetWindowAttribute(IntPtr hwnd, int attribute, ref int value, int size);
 '@
         [void][Quietpane.Shell]::SetCurrentProcessExplicitAppUserModelID($info.AppId)
         [void][Quietpane.Shell]::SetProcessDPIAware()
@@ -128,11 +133,187 @@ if (-not $SelfTest) {
 # secondary #1FA187 / readable #117A68, error #A83232. Muted text is #66706F, the lightest grey that
 # still passes WCAG AA (4.5:1) on the cream background. Headings Fraunces, body Sora
 # (falls back to Georgia / Segoe UI when those fonts are not installed - no web fonts are downloaded).
+
+# ------------------------------------------------------------------ light and dark
+#
+# Every colour in the window is asked for by its light-mode hex - '#FFFDF8' for a card, '#0F1B1C' for
+# text - and always has been. That hex is now a name as well as a colour: this table says what each
+# one becomes in the dark, and Get-Brush hands out ONE shared brush per name. Every card holds the same
+# card brush, so switching theme is a matter of recolouring a few dozen brushes in place, and WPF
+# repaints everything that uses them. Nothing is rebuilt and nothing has to be found first.
+#
+# The light values are exactly the colours the window always had, so light mode is unchanged. The
+# dark values follow the scan report's own dark mode, so the window and the report match. Text colours
+# were checked for 4.5:1 against every dark surface they sit on; chart colours were put through the
+# palette checker for a dark background rather than chosen by eye.
+#
+# A few names are not hexes. A colour used for two jobs cannot always do both in the dark: the house
+# teal is text AND a bar, and dark text wants to be light while a bar wants to be quieter. So bars ask
+# for 'bar.ok' and 'bar.amber', and the held-back row asks for 'held' (in the light it shares the
+# Critical red) - same colours in the light, their own colours in the dark.
+$script:Palette = [ordered]@{
+    # surfaces
+    '#FAF6EC' = @{ Light = '#FAF6EC'; Dark = '#132122' }   # window
+    '#FFFDF8' = @{ Light = '#FFFDF8'; Dark = '#1A2B2C' }   # cards
+    '#E6DFCC' = @{ Light = '#E6DFCC'; Dark = '#2C4243' }   # lines and borders
+    '#EDE6D5' = @{ Light = '#EDE6D5'; Dark = '#2A3D3E' }   # the empty part of a bar
+    '#EFE7D3' = @{ Light = '#EFE7D3'; Dark = '#243738' }   # hover
+    '#E6DCC3' = @{ Light = '#E6DCC3'; Dark = '#2F4546' }   # pressed
+    '#FFF4DC' = @{ Light = '#FFF4DC'; Dark = '#2E2710' }   # the warm "came back" note
+    '#EAF5F1' = @{ Light = '#EAF5F1'; Dark = '#133A33' }   # the mint "all done" note
+    # text
+    '#0F1B1C' = @{ Light = '#0F1B1C'; Dark = '#F2EEE3' }
+    '#4B5B5C' = @{ Light = '#4B5B5C'; Dark = '#B8C4C2' }
+    '#66706F' = @{ Light = '#66706F'; Dark = '#97A3A1' }
+    '#8C9694' = @{ Light = '#8C9694'; Dark = '#7E8B89' }   # trend lines and the notch on a bar
+    '#B9C0BE' = @{ Light = '#B9C0BE'; Dark = '#5A6867' }   # an empty legend key
+    # meaning: good, watch, serious - brighter in the dark so they still read on it
+    '#117A68' = @{ Light = '#117A68'; Dark = '#3DC2A5' }
+    '#1FA187' = @{ Light = '#1FA187'; Dark = '#1E9C82' }
+    '#9A6700' = @{ Light = '#9A6700'; Dark = '#E8B04A' }
+    '#A83232' = @{ Light = '#A83232'; Dark = '#FF8A80' }
+    '#7B1D1D' = @{ Light = '#7B1D1D'; Dark = '#FF6F6F' }
+    '#6E695C' = @{ Light = '#6E695C'; Dark = '#A9A393' }
+    '#A02020' = @{ Light = '#A02020'; Dark = '#D85550' }
+    # bars: their own names, because a bar and a line of text want different things in the dark
+    'bar.ok'    = @{ Light = '#117A68'; Dark = '#1E9C82' }
+    'bar.amber' = @{ Light = '#FFB627'; Dark = '#B8892C' }
+    'held'      = @{ Light = '#7B1D1D'; Dark = '#D85550' }
+    # a session's heat: one hue getting stronger, which in the dark means brighter, not darker
+    '#CFAB60' = @{ Light = '#CFAB60'; Dark = '#7A5E22' }
+    '#AB7409' = @{ Light = '#AB7409'; Dark = '#C08A1E' }
+    '#5E3A03' = @{ Light = '#5E3A03'; Dark = '#F2C26B' }
+    # the same in both: the KomodoWorks amber, and the header and footer bands, which are dark anyway
+    '#FFB627' = @{ Light = '#FFB627'; Dark = '#FFB627' }
+    '#FFC75A' = @{ Light = '#FFC75A'; Dark = '#FFC75A' }
+    '#F0A416' = @{ Light = '#F0A416'; Dark = '#F0A416' }
+    '#C9C2B0' = @{ Light = '#C9C2B0'; Dark = '#C9C2B0' }
+    '#8FA3A0' = @{ Light = '#8FA3A0'; Dark = '#8FA3A0' }
+}
+# Not $script:Theme: the -Theme parameter lives at script scope too, and would be the same variable.
+$script:ActiveTheme = 'Light'
+$script:BrushCache = @{}
+$script:AppearanceFile = Join-Path $info.DataRoot 'appearance.txt'
+
+function Get-Brush([string]$Hex) {
+    <# The one shared brush for this colour name, in the current theme's colour. #>
+    $key = $Hex.ToUpperInvariant()
+    if ($key -notmatch '^#') { $key = $Hex.ToLowerInvariant() }
+    $b = $script:BrushCache[$key]
+    if ($b) { return $b }
+    $entry = $script:Palette[$key]
+    if (-not $entry) {
+        # A colour with no dark partner would stay light on a dark window. The self-test refuses it,
+        # so it is caught before anyone sees it; a real run draws it as it always was.
+        if ($SelfTest) { throw "Colour $Hex has no entry in the light/dark palette." }
+        return (New-Object System.Windows.Media.BrushConverter).ConvertFromString($Hex)
+    }
+    $b = New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.ColorConverter]::ConvertFromString($entry[$script:ActiveTheme]))
+    $script:BrushCache[$key] = $b
+    return $b
+}
+
+function Get-WindowsTheme {
+    <# What Windows is set to for apps. Read-only; a PC that says nothing is light, as Windows is by default. #>
+    try {
+        $v = Get-ItemPropertyValue 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize' 'AppsUseLightTheme' -ErrorAction Stop
+        if ([int]$v -eq 0) { return 'Dark' }
+    } catch { }
+    return 'Light'
+}
+
+function Get-AppearanceChoice {
+    <# 'System' unless someone chose Light or Dark in About. #>
+    try {
+        if (Test-Path $script:AppearanceFile) {
+            $v = ([IO.File]::ReadAllText($script:AppearanceFile)).Trim()
+            if ($v -in 'Light', 'Dark') { return $v }
+        }
+    } catch { }
+    return 'System'
+}
+
+function Resolve-Theme {
+    $choice = Get-AppearanceChoice
+    if ($choice -eq 'System') { return (Get-WindowsTheme) }
+    return $choice
+}
+
+function Set-TitleBarTheme {
+    <# A dark title bar on a dark window. Windows 10 before 20H1 knew the setting as 19, later ones as 20. #>
+    if (-not ('Quietpane.Shell' -as [type]) -or -not $window) { return }
+    try {
+        $hwnd = (New-Object System.Windows.Interop.WindowInteropHelper $window).Handle
+        if ($hwnd -eq [IntPtr]::Zero) { return }
+        $on = [int]($script:ActiveTheme -eq 'Dark')
+        if ([Quietpane.Shell]::DwmSetWindowAttribute($hwnd, 20, [ref]$on, 4) -ne 0) {
+            [void][Quietpane.Shell]::DwmSetWindowAttribute($hwnd, 19, [ref]$on, 4)
+        }
+    } catch { }
+}
+
+function Set-WindowColours {
+    <#
+        The colours the window's own styles ask for by name (Qp_FFFDF8 and so on). These are fresh brushes
+        each time rather than the shared ones: WPF freezes a brush once a style has used it, and a frozen
+        brush cannot be recoloured. Replacing the entry instead is just as live - everything that asked
+        for it by name picks up the new one.
+    #>
+    if (-not $window) { return }
+    foreach ($key in @($script:Palette.Keys)) {
+        if ($key -match '^#([0-9A-F]{6})$') {
+            $c = [System.Windows.Media.ColorConverter]::ConvertFromString($script:Palette[$key][$script:ActiveTheme])
+            $window.Resources['Qp_' + $Matches[1]] = [System.Windows.Media.Brush](New-Object System.Windows.Media.SolidColorBrush $c)
+        }
+    }
+}
+
+function Set-Theme([ValidateSet('Light', 'Dark')][string]$Name) {
+    <# Recolours every shared brush in place, and the window's own styles. Everything follows, straight away. #>
+    $script:ActiveTheme = $Name
+    foreach ($key in @($script:BrushCache.Keys)) {
+        $entry = $script:Palette[$key]
+        $b = $script:BrushCache[$key]
+        if ($entry -and -not $b.IsFrozen) { $b.Color = [System.Windows.Media.ColorConverter]::ConvertFromString($entry[$Name]) }
+    }
+    Set-WindowColours
+    Set-TitleBarTheme
+}
+
+function Set-AppearanceChoice([ValidateSet('System', 'Light', 'Dark')][string]$Choice) {
+    <# The choice in About: remembered as one word, and applied straight away. #>
+    $script:AppearanceChoice = $Choice
+    try {
+        New-Item -ItemType Directory -Path $info.DataRoot -Force | Out-Null
+        [IO.File]::WriteAllText($script:AppearanceFile, $Choice)
+    } catch { }
+    Set-Theme (Resolve-Theme)
+}
+
+function Sync-ThemeWithWindows {
+    <#
+        Following Windows' light or dark setting while the window is open, called from the window's own
+        clock. Asked that way rather than through Windows' change notification, because the notification
+        arrives on a thread PowerShell cannot safely run on; one registry read a second, on the window's
+        own thread, costs nothing and cannot crash. Does nothing when Light or Dark was chosen in About.
+    #>
+    if ($script:AppearanceChoice -ne 'System') { return }
+    if (((Get-Date) - $script:ThemeCheckedAt).TotalSeconds -lt 1) { return }
+    $script:ThemeCheckedAt = Get-Date
+    $wanted = Get-WindowsTheme
+    if ($wanted -ne $script:ActiveTheme) { Set-Theme $wanted }
+}
+
+$script:AppearanceChoice = Get-AppearanceChoice
+$script:ThemeCheckedAt = [datetime]::MinValue
+# The self-test is light unless it is asked for dark, so what it measures does not depend on the PC.
+if ($Theme) { $script:ActiveTheme = $Theme; $script:AppearanceChoice = $Theme } elseif ($SelfTest) { $script:AppearanceChoice = 'Light' } else { $script:ActiveTheme = Resolve-Theme }
+
 [xml]$xaml = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Quietpane - by KomodoWorks" Width="1100" Height="780" MinWidth="760" MinHeight="480"
-        WindowStartupLocation="CenterScreen" Background="#FAF6EC" FontFamily="Sora, Segoe UI" Foreground="#0F1B1C">
+        WindowStartupLocation="CenterScreen" Background="{DynamicResource Qp_FAF6EC}" FontFamily="Sora, Segoe UI" Foreground="{DynamicResource Qp_0F1B1C}">
   <Window.Resources>
     <SolidColorBrush x:Key="Anchor" Color="#0F1B1C"/>
     <SolidColorBrush x:Key="Accent" Color="#FFB627"/>
@@ -145,7 +326,7 @@ if (-not $SelfTest) {
       <Setter Property="Control.Template">
         <Setter.Value>
           <ControlTemplate>
-            <Rectangle Margin="-4" Stroke="#117A68" StrokeThickness="2.5" RadiusX="3" RadiusY="3" SnapsToDevicePixels="True"/>
+            <Rectangle Margin="-4" Stroke="{DynamicResource Qp_117A68}" StrokeThickness="2.5" RadiusX="3" RadiusY="3" SnapsToDevicePixels="True"/>
           </ControlTemplate>
         </Setter.Value>
       </Setter>
@@ -154,7 +335,7 @@ if (-not $SelfTest) {
       <Setter Property="Control.Template">
         <Setter.Value>
           <ControlTemplate>
-            <Rectangle Margin="2" Stroke="#117A68" StrokeThickness="2.5" SnapsToDevicePixels="True"/>
+            <Rectangle Margin="2" Stroke="{DynamicResource Qp_117A68}" StrokeThickness="2.5" SnapsToDevicePixels="True"/>
           </ControlTemplate>
         </Setter.Value>
       </Setter>
@@ -167,9 +348,9 @@ if (-not $SelfTest) {
     </Style>
 
     <Style TargetType="Button">
-      <Setter Property="Foreground" Value="#0F1B1C"/>
-      <Setter Property="Background" Value="#FFFDF8"/>
-      <Setter Property="BorderBrush" Value="#0F1B1C"/>
+      <Setter Property="Foreground" Value="{DynamicResource Qp_0F1B1C}"/>
+      <Setter Property="Background" Value="{DynamicResource Qp_FFFDF8}"/>
+      <Setter Property="BorderBrush" Value="{DynamicResource Qp_0F1B1C}"/>
       <Setter Property="BorderThickness" Value="1.5"/>
       <Setter Property="Padding" Value="14,7"/>
       <Setter Property="Cursor" Value="Hand"/>
@@ -185,8 +366,8 @@ if (-not $SelfTest) {
         </Setter.Value>
       </Setter>
       <Style.Triggers>
-        <Trigger Property="IsMouseOver" Value="True"><Setter Property="Background" Value="#EFE7D3"/></Trigger>
-        <Trigger Property="IsPressed" Value="True"><Setter Property="Background" Value="#E6DCC3"/></Trigger>
+        <Trigger Property="IsMouseOver" Value="True"><Setter Property="Background" Value="{DynamicResource Qp_EFE7D3}"/></Trigger>
+        <Trigger Property="IsPressed" Value="True"><Setter Property="Background" Value="{DynamicResource Qp_E6DCC3}"/></Trigger>
         <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.45"/></Trigger>
       </Style.Triggers>
     </Style>
@@ -194,6 +375,7 @@ if (-not $SelfTest) {
     <Style x:Key="Primary" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
       <Setter Property="Background" Value="#FFB627"/>
       <Setter Property="BorderBrush" Value="#FFB627"/>
+      <Setter Property="Foreground" Value="#0F1B1C"/>
       <Setter Property="FontWeight" Value="SemiBold"/>
       <Style.Triggers>
         <Trigger Property="IsMouseOver" Value="True"><Setter Property="Background" Value="#FFC75A"/></Trigger>
@@ -202,7 +384,7 @@ if (-not $SelfTest) {
     </Style>
 
     <Style TargetType="TabItem">
-      <Setter Property="Foreground" Value="#4B5B5C"/>
+      <Setter Property="Foreground" Value="{DynamicResource Qp_4B5B5C}"/>
       <Setter Property="Cursor" Value="Hand"/>
       <Setter Property="FocusVisualStyle" Value="{StaticResource FocusRing}"/>
       <Setter Property="Template">
@@ -213,12 +395,12 @@ if (-not $SelfTest) {
             </Border>
             <ControlTemplate.Triggers>
               <Trigger Property="IsSelected" Value="True">
-                <Setter TargetName="Bd" Property="BorderBrush" Value="#117A68"/>
-                <Setter Property="Foreground" Value="#0F1B1C"/>
+                <Setter TargetName="Bd" Property="BorderBrush" Value="{DynamicResource Qp_117A68}"/>
+                <Setter Property="Foreground" Value="{DynamicResource Qp_0F1B1C}"/>
                 <Setter Property="FontWeight" Value="SemiBold"/>
               </Trigger>
               <Trigger Property="IsMouseOver" Value="True">
-                <Setter TargetName="Bd" Property="Background" Value="#EFE7D3"/>
+                <Setter TargetName="Bd" Property="Background" Value="{DynamicResource Qp_EFE7D3}"/>
               </Trigger>
             </ControlTemplate.Triggers>
           </ControlTemplate>
@@ -274,15 +456,15 @@ if (-not $SelfTest) {
     </Border>
 
     <!-- Action bar -->
-    <Border DockPanel.Dock="Bottom" Background="#FFFDF8" BorderBrush="#E6DFCC" BorderThickness="0,1,0,0" Padding="16,10">
+    <Border DockPanel.Dock="Bottom" Background="{DynamicResource Qp_FFFDF8}" BorderBrush="{DynamicResource Qp_E6DFCC}" BorderThickness="0,1,0,0" Padding="16,10">
       <Grid>
         <Grid.ColumnDefinitions>
           <ColumnDefinition Width="*"/>
           <ColumnDefinition Width="Auto"/>
         </Grid.ColumnDefinitions>
-        <TextBlock x:Name="StatusLine" VerticalAlignment="Center" Foreground="#4B5B5C" TextTrimming="CharacterEllipsis"
+        <TextBlock x:Name="StatusLine" VerticalAlignment="Center" Foreground="{DynamicResource Qp_4B5B5C}" TextTrimming="CharacterEllipsis"
                    AutomationProperties.LiveSetting="Polite">
-          <Run x:Name="Status" Text="Starting..."/><Run Text="    "/><Hyperlink x:Name="LinkDetails" Foreground="#117A68">Show details</Hyperlink>
+          <Run x:Name="Status" Text="Starting..."/><Run Text="    "/><Hyperlink x:Name="LinkDetails" Foreground="{DynamicResource Qp_117A68}">Show details</Hyperlink>
         </TextBlock>
         <StackPanel x:Name="AdvancedButtons" Grid.Column="1" Orientation="Horizontal">
           <Button x:Name="BtnRecommended" Content="Select recommended" Margin="0,0,8,0"/>
@@ -300,7 +482,7 @@ if (-not $SelfTest) {
         <RowDefinition Height="6"/>
         <RowDefinition x:Name="LogRow" Height="0"/>
       </Grid.RowDefinitions>
-      <TabControl x:Name="Tabs" Margin="14,12,14,4" Padding="0" Background="#FFFDF8" BorderBrush="#E6DFCC" BorderThickness="1"/>
+      <TabControl x:Name="Tabs" Margin="14,12,14,4" Padding="0" Background="{DynamicResource Qp_FFFDF8}" BorderBrush="{DynamicResource Qp_E6DFCC}" BorderThickness="1"/>
       <GridSplitter x:Name="LogSplitter" Grid.Row="1" HorizontalAlignment="Stretch" Background="Transparent" Visibility="Collapsed"/>
       <TextBox x:Name="LogBox" Grid.Row="2" Margin="14,0,14,12" IsReadOnly="True" FontFamily="Consolas" FontSize="12"
                AutomationProperties.Name="Details: what Quietpane has done"
@@ -312,6 +494,11 @@ if (-not $SelfTest) {
 '@
 
 $window = [Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader $xaml))
+# The window's own styles ask for their colours by name; give them those names now. (The cast inside
+# matters: the resource list takes any object, and without it PowerShell stores its own wrapper around
+# the brush, which WPF then refuses as a colour.)
+Set-WindowColours
+$window.Add_SourceInitialized({ Set-TitleBarTheme })
 
 # Fit the screen it actually opens on. On a small or scaled laptop display a fixed size would push
 # the buttons along the bottom out of sight.
@@ -359,9 +546,7 @@ try {
 # log too. Background jobs have their own log line, set up in Start-Work.
 Set-QpLogSink { param($line) try { $ui.LogBox.AppendText($line + [Environment]::NewLine) } catch { } }
 
-$brushConv = New-Object System.Windows.Media.BrushConverter
 $thickConv = New-Object System.Windows.ThicknessConverter
-function Get-Brush([string]$Hex) { $brushConv.ConvertFromString($Hex) }
 function Get-Thick([string]$Value) { $thickConv.ConvertFromString($Value) }
 
 function Get-Bitmap([string]$Path) {
@@ -561,7 +746,7 @@ function New-Meter([string]$Title, [string]$FillColour) {
 # the colour-blindness separation it asks for (deutan 9.8, normal 25.5) and every text colour clears
 # 4.5:1 on this background. The house green is a little grey for a chart colour by that checker's
 # reckoning, and it stays anyway - it is the product's own colour, and no tile depends on it alone.
-$script:BarColours = @{ ok = '#117A68'; high = '#A02020' }
+$script:BarColours = @{ ok = 'bar.ok'; high = '#A02020' }
 #
 # Live tiles: how hard the PC is working right now, and how warm it is.
 #
@@ -635,7 +820,7 @@ function New-LiveTile([string]$Title) {
 }
 
 $meters = New-Object System.Windows.Controls.WrapPanel
-$script:MeterSpace = New-Meter 'SPACE ON THIS PC' '#117A68'
+$script:MeterSpace = New-Meter 'SPACE ON THIS PC' 'bar.ok'
 [void]$meters.Children.Add($script:MeterSpace.Border)
 
 $script:LivePanel = New-Object System.Windows.Controls.Border
@@ -748,17 +933,17 @@ $script:LivePanel.Margin = Get-Thick '0,4,0,12'
 [void]$healthPanel.Children.Add($script:LivePanel)
 $healthCards = New-Object System.Windows.Controls.WrapPanel
 # Laptops only: charge, plugged in or not, and how much the battery holds compared with when it was new.
-$script:BatteryCard = New-Meter 'BATTERY' '#FFB627'
+$script:BatteryCard = New-Meter 'BATTERY' 'bar.amber'
 $script:BatteryHealthText = New-Text '' 12.5 'Normal' '#0F1B1C' '0,6,0,0'
 [void]$script:BatteryCard.Border.Child.Children.Add($script:BatteryHealthText)
 $script:BatteryCard.Border.Visibility = 'Collapsed'
 # The drive Windows runs from: Windows' own verdict, how much of its rated life is used, and its heat.
-$script:DriveCard = New-Meter 'THE DRIVE WINDOWS IS ON' '#117A68'
+$script:DriveCard = New-Meter 'THE DRIVE WINDOWS IS ON' 'bar.ok'
 $script:DriveHeatText = New-Text '' 12.5 'SemiBold' '#117A68' '0,6,0,0'
 [void]$script:DriveCard.Border.Child.Children.Add($script:DriveHeatText)
 $script:DriveCard.Value.Text = 'Having a look...'
 # Windows keeps its own record of how steady this PC has been. Almost nobody ever opens it.
-$script:SteadyCard = New-Meter 'HOW IT HAS BEEN HOLDING UP' '#117A68'
+$script:SteadyCard = New-Meter 'HOW IT HAS BEEN HOLDING UP' 'bar.ok'
 $script:SteadyLines = New-Object System.Windows.Controls.StackPanel
 $script:SteadyLines.Margin = Get-Thick '0,6,0,0'
 [void]$script:SteadyCard.Border.Child.Children.Add($script:SteadyLines)
@@ -1108,6 +1293,31 @@ Set-MoreInfo $placeNote 'The copy lives in Program Files. To keep Quietpane on t
 Set-MoreInfo $btnShortcut 'To keep Quietpane on the taskbar afterwards, right-click it in the Start menu and choose "Pin to taskbar".'
 [void]$aboutPanel.Children.Add($placeNote)
 
+# Light or dark: follows Windows unless someone would rather it didn't. Applies the moment it is picked.
+$appearRow = New-Object System.Windows.Controls.StackPanel
+$appearRow.Orientation = 'Horizontal'
+$appearRow.Margin = Get-Thick '0,14,0,0'
+$appearLabel = New-Text 'Appearance' 13.5 'SemiBold' '#0F1B1C' '0,0,14,0'
+$appearLabel.VerticalAlignment = 'Center'
+[void]$appearRow.Children.Add($appearLabel)
+$script:AppearButtons = @{}
+foreach ($opt in @(@('System', 'Match Windows'), @('Light', 'Light'), @('Dark', 'Dark'))) {
+    $rb = New-Object System.Windows.Controls.RadioButton
+    $rb.GroupName = 'Appearance'
+    $rb.Content = New-Text $opt[1] 13 'Normal' '#0F1B1C' '2,0,0,0'
+    $rb.Margin = Get-Thick '0,0,16,0'
+    $rb.VerticalContentAlignment = 'Center'
+    $rb.Tag = $opt[0]
+    $rb.FocusVisualStyle = $window.FindResource('FocusRing')
+    [System.Windows.Automation.AutomationProperties]::SetName($rb, 'Appearance: ' + $opt[1])
+    $rb.IsChecked = ($script:AppearanceChoice -eq $opt[0])
+    $rb.Add_Checked({ param($s) if ($s.Tag -ne $script:AppearanceChoice) { Set-AppearanceChoice $s.Tag } })
+    $script:AppearButtons[$opt[0]] = $rb
+    [void]$appearRow.Children.Add($rb)
+}
+Set-MoreInfo $appearLabel 'Match Windows follows Settings > Personalisation > Colours, and changes with it while Quietpane is open. Light or Dark stays put whatever Windows does.'
+[void]$aboutPanel.Children.Add($appearRow)
+
 function Get-DocText([string]$File) {
     $p = Join-Path $PSScriptRoot $File
     if (-not (Test-Path $p)) { return "$File was not found next to the app. It is available in the GitHub repository." }
@@ -1406,6 +1616,7 @@ $timer.Interval = [TimeSpan]::FromMilliseconds(150)
 # internet list. Otherwise it slows right down, so a Quietpane that is just sitting there costs nothing.
 function Set-TimerQuick { if ($timer.Interval.TotalMilliseconds -ne 150) { $timer.Interval = [TimeSpan]::FromMilliseconds(150) } }
 $timer.Add_Tick({
+    Sync-ThemeWithWindows
     $line = $null
     $got = $false
     while ($script:Sync.Queue.TryDequeue([ref]$line)) { $ui.LogBox.AppendText($line + [Environment]::NewLine); $got = $true }
@@ -2611,7 +2822,7 @@ $script:SessionBandColours = @{
 $script:SessionBandHeights = @{ quiet = 8; hot = 15; veryhot = 22; gap = 0 }
 # Being held back to cool off is a different measurement, so it gets its own thin row underneath
 # rather than pretending to be a fourth level of heat.
-$script:SessionHeldColour = '#7B1D1D'
+$script:SessionHeldColour = 'held'
 
 function Draw-SessionTimeline($Panel, $Watch) {
     <#
@@ -4030,6 +4241,44 @@ function Test-LiveTiles {
         [bool](($quiet -match 'not shared') -and ($quiet -notmatch '\| 0%'))
 }
 
+function Test-Theme {
+    <#
+        Light and dark, switched live in the real window, and back again. The window's own background (from
+        its XAML), a line of text built in code, and a tile's bar must all follow - because they all hold
+        the same shared brushes - and every colour written anywhere in this file must have a dark partner.
+    #>
+    $was = $script:ActiveTheme
+    $ink = $script:VerdictText.Foreground; $bar = $script:TileCpu.Fill.Background
+    $shared = [object]::ReferenceEquals($ink, (Get-Brush '#0F1B1C')) -and [object]::ReferenceEquals($bar, (Get-Brush 'bar.ok'))
+    $want = { param($k, $t) '#FF' + $script:Palette[$k][$t].Substring(1) }
+    Set-Theme 'Dark'
+    # The window background comes from its XAML by name, so it is read afresh rather than held.
+    $dark = ("$($window.Background.Color)" -eq (& $want '#FAF6EC' 'Dark')) -and ("$($ink.Color)" -eq (& $want '#0F1B1C' 'Dark')) -and
+        ("$($bar.Color)" -eq (& $want 'bar.ok' 'Dark'))
+    Set-Theme 'Light'
+    $light = ("$($window.Background.Color)" -eq '#FFFAF6EC') -and ("$($ink.Color)" -eq '#FF0F1B1C') -and ("$($bar.Color)" -eq '#FF117A68')
+    # Following Windows: what Windows says is faked here, so this proves the logic without changing
+    # anybody's settings. Match Windows follows it; a fixed choice ignores it.
+    $wasChoice = $script:AppearanceChoice
+    Set-Item function:script:Get-WindowsTheme { 'Dark' }
+    $script:AppearanceChoice = 'System'; $script:ThemeCheckedAt = [datetime]::MinValue
+    Sync-ThemeWithWindows
+    $follows = ($script:ActiveTheme -eq 'Dark')
+    Set-Theme 'Light'; $script:AppearanceChoice = 'Light'; $script:ThemeCheckedAt = [datetime]::MinValue
+    Sync-ThemeWithWindows
+    $holds = ($script:ActiveTheme -eq 'Light')
+    $script:AppearanceChoice = $wasChoice
+    Set-Theme $was
+    $lines = @(Get-Content -LiteralPath $PSCommandPath | Where-Object { $_ -notmatch '= @\{ Light = ' })
+    $used = @($lines | ForEach-Object { [regex]::Matches($_, '#[0-9A-Fa-f]{6}\b') | ForEach-Object { $_.Value.ToUpperInvariant() } } | Sort-Object -Unique)
+    $missing = @($used | Where-Object { -not $script:Palette.Contains($_) })
+    # A shared brush that something froze would quietly stop following the theme. There must be none.
+    $frozen = @($script:BrushCache.Keys | Where-Object { $script:BrushCache[$_].IsFrozen })
+    'live switch: {0}; back to light: {1}; shared: {2}; follows Windows: {7}; a fixed choice holds: {8}; frozen: {3}; every colour has a dark partner: {4} ({5} colours{6})' -f $dark, $light, $shared,
+        $(if ($frozen.Count) { $frozen -join ',' } else { 'none' }),
+        ($missing.Count -eq 0), $used.Count, $(if ($missing.Count) { ', missing ' + ($missing -join ',') } else { '' }), $follows, $holds
+}
+
 function Test-Badge {
     # The taskbar badge draws and clears again.
     Update-TaskbarBadge ([pscustomobject]@{ Count = 3 })
@@ -4104,6 +4353,7 @@ if ($SelfTest) {
     'live tiles: ' + (Test-LiveTiles)
     'session: ' + (Test-SessionCard)
     'holding up: ' + (Test-SteadyCard)
+    'theme: ' + (Test-Theme)
     return
 }
 
