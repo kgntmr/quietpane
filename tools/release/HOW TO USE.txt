@@ -56,6 +56,8 @@ ALSO IN THE APP
               keep working even if you move or delete this folder.
               Another tick box has it tell you - with a small badge on
               its taskbar icon - if Windows switches things back on.
+              Quietpane follows Windows' light or dark setting; under
+              Appearance you can fix it to Light or Dark instead.
    Undo       Changed your mind? Everything recorded can be put back.
               Cleaned-up files are in your Recycle Bin.
 

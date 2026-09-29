@@ -1778,10 +1778,12 @@ Test-Case 'the icon is the KomodoWorks emblem, on a see-through background' {
     # corner clear, dark square in the KomodoWorks anchor colour, teal square peeking out bottom-right
     (Get-Px 0 0).EndsWith(',0') -and (Get-Px 40 40) -eq '15,27,28,255' -and (Get-Px 240 240) -eq '23,155,131,255'
 }
-Test-Case 'the window''s calls into Windows only name the app and ask for a sharp picture' {
+Test-Case 'the window''s calls into Windows only name the app, ask for a sharp picture and colour its title bar' {
+    # A fixed list on purpose: anything new the window asks Windows to do has to be added here by hand.
+    # The third is DwmSetWindowAttribute, used only to give a dark window a dark title bar.
     $src = Get-Content (Join-Path $root 'Quietpane.ps1') -Raw
     $calls = @([regex]::Matches($src, 'DllImport\("(\w+)\.dll"[^\]]*\)\]\s*public static extern int (\w+)') | ForEach-Object { '{0}!{1}' -f $_.Groups[1].Value, $_.Groups[2].Value })
-    ($calls -join ';') -eq 'shell32!SetCurrentProcessExplicitAppUserModelID;user32!SetProcessDPIAware'
+    ($calls -join ';') -eq 'shell32!SetCurrentProcessExplicitAppUserModelID;user32!SetProcessDPIAware;dwmapi!DwmSetWindowAttribute'
 }
 
 Section 'What signing in costs'
@@ -1849,6 +1851,11 @@ Test-Case 'the live tiles rank what matters, merge the busy list and never draw 
     # once at its loudest, rather than the same name in four columns as it used to be.
     $cardsOut -match 'live tiles: verdict worst first: True; held back named: True; memory word: True; drive heat: True; video memory folded in: True; 2 rows: A game 88% of the graphics card / Windows Explorer 6% of the processor; drive life: True; calm: True; nothing invented: True'
 }
+Test-Case 'light and dark switch live in the real window, and every colour has a dark partner' {
+    # The window is built light, switched to dark and back; a card background from the XAML, a line of
+    # text and a bar built in code must all follow, and no shared brush may have been frozen along the way.
+    $cardsOut -match 'theme: live switch: True; back to light: True; shared: True; follows Windows: True; a fixed choice holds: True; frozen: none; every colour has a dark partner: True'
+}
 Test-Case 'the steadiness card shows Windows'' score, or says plainly that there isn''t one' {
     $cardsOut -match 'holding up: score: True; crashes named: True; sudden stops: True; awake: True; unscored says so: True'
 }
@@ -1904,6 +1911,32 @@ Test-Case 'all text is dark enough to read (WCAG AA, 4.5 to 1)' {
     $badges = @([regex]::Match($src, 'SevColours = \[ordered\]@\{([^}]+)\}').Groups[1].Value -split ';' | ForEach-Object { if ($_ -match "'(#[0-9A-Fa-f]{6})'") { $matches[1] } })
     $weakBadges = @($badges | Where-Object { (Get-Contrast '#FFFDF8' $_) -lt 4.5 })
     $onCream.Count -gt 3 -and $badges.Count -eq 5 -and $tooLight.Count -eq 0 -and $weakBadges.Count -eq 0
+}
+Test-Case 'in the dark as well: every text colour and every badge still reads (WCAG AA, 4.5 to 1)' {
+    # The same text colours as above, turned into their dark partners, on both dark surfaces - the window
+    # and the cards - plus the heat words, and the severity badges the other way round (dark text on a
+    # bright badge). And every colour the window uses must have a dark partner at all, or it would stay
+    # light on a dark window.
+    function Get-Lum([string]$Hex) {
+        $c = @(1, 3, 5 | ForEach-Object { [Convert]::ToInt32($Hex.Substring($_, 2), 16) / 255.0 } |
+            ForEach-Object { if ($_ -le 0.03928) { $_ / 12.92 } else { [math]::Pow(($_ + 0.055) / 1.055, 2.4) } })
+        0.2126 * $c[0] + 0.7152 * $c[1] + 0.0722 * $c[2]
+    }
+    function Get-Contrast([string]$A, [string]$B) { $x = Get-Lum $A; $y = Get-Lum $B; ([math]::Max($x, $y) + 0.05) / ([math]::Min($x, $y) + 0.05) }
+    $src = Get-Content (Join-Path $root 'Quietpane.ps1') -Raw
+    $dark = @{}
+    foreach ($m in [regex]::Matches($src, "'([^']+)' = @\{ Light = '(#[0-9A-F]{6})'; Dark = '(#[0-9A-F]{6})' \}")) { $dark[$m.Groups[1].Value.ToUpperInvariant()] = $m.Groups[3].Value }
+    $window = $dark['#FAF6EC']; $card = $dark['#FFFDF8']
+    $text = @([regex]::Matches($src, "New-Text [^\r\n]*?'(#[0-9A-Fa-f]{6})'") | ForEach-Object { $_.Groups[1].Value.ToUpperInvariant() } | Where-Object { $_ -ne '#FFFDF8' })
+    $heat = @([regex]::Match($src, 'HeatColours = @\{([^}]+)\}').Groups[1].Value -split ';' | ForEach-Object { if ($_ -match "'(#[0-9A-Fa-f]{6})'") { $matches[1].ToUpperInvariant() } })
+    $all = @($text + $heat | Sort-Object -Unique)
+    $weak = @(foreach ($c in $all) { foreach ($s in $window, $card) { if (-not $dark[$c] -or (Get-Contrast $dark[$c] $s) -lt 4.5) { '{0} on {1}' -f $c, $s } } })
+    $badges = @([regex]::Match($src, 'SevColours = \[ordered\]@\{([^}]+)\}').Groups[1].Value -split ';' | ForEach-Object { if ($_ -match "'(#[0-9A-Fa-f]{6})'") { $matches[1] } })
+    $weakBadges = @($badges | Where-Object { (Get-Contrast $card $dark[$_.ToUpperInvariant()]) -lt 4.5 })
+    $used = @($src -split "`n" | Where-Object { $_ -notmatch '= @\{ Light = ' } | ForEach-Object { [regex]::Matches($_, '#[0-9A-Fa-f]{6}\b') | ForEach-Object { $_.Value.ToUpperInvariant() } } | Sort-Object -Unique)
+    $orphans = @($used | Where-Object { -not $dark.ContainsKey($_) })
+    if ($weak.Count -or $weakBadges.Count -or $orphans.Count) { Write-Host ('        weak: {0} | badges: {1} | no dark partner: {2}' -f ($weak -join ', '), ($weakBadges -join ', '), ($orphans -join ', ')) }
+    $window -and $card -and $all.Count -gt 5 -and $badges.Count -eq 5 -and $weak.Count -eq 0 -and $weakBadges.Count -eq 0 -and $orphans.Count -eq 0
 }
 Test-Case 'the choice dialog closes with Esc and starts on the safest choice' {
     $src = Get-Content (Join-Path $root 'Quietpane.ps1') -Raw
