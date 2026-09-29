@@ -6,7 +6,7 @@
 
 <p align="center">
   <b>See what your PC is telling on you, and switch it off.</b><br>
-  Every browser add-on and what it is allowed to read. Which apps used your camera and microphone, and when. What is talking to the internet right now. Then the tracking, the bloat and the wasted space.<br>
+  Your browser add-ons, and what each one is allowed to read. Which apps used your camera and microphone, and when. What is talking to the internet right now. Then the tracking, the bloat and the wasted space.<br>
   Everything happens on your PC, and nothing leaves it.<br><br>
   Developed by <a href="https://www.komodoworks.com"><b>KomodoWorks.com</b></a> &middot; Free &amp; open source (MIT) &middot; Windows 10 / 11
 </p>
@@ -16,7 +16,7 @@
 </p>
 
 <p align="center">
-  <sub><b>No <code>.exe</code>, no installer, no compiled anything.</b> Quietpane is plain-text PowerShell, so you can read every line before you run it - and you should, with anything that asks for administrator rights. <a href="#verify-it-yourself">How to check it in four steps</a>.</sub>
+  <sub><b>No <code>.exe</code>, no installer, no precompiled binary.</b> Quietpane is readable PowerShell plus a few short C# blocks that PowerShell compiles on your PC as it runs, so you can read every line before you run it - and you should, with anything that asks for administrator rights. <a href="#verify-it-yourself">How to check it in four steps</a>.</sub>
 </p>
 
 <p align="center"><img src="docs/screenshot-home.png" width="820" alt="Quietpane home screen: cards showing what could be better, and one button that does it"></p>
@@ -27,7 +27,7 @@
 2. **Unzip it:** right-click **Quietpane.zip** → **Extract All** → **Extract**. It can't start from inside the ZIP.
 3. In the new folder, double-click **Start Quietpane**, then press **Quiet my PC now**.
 
-It shows what it will do before doing anything, takes about a minute, and **Undo everything** puts it all back. You need Windows 10 or 11 and an administrator account. Nothing is installed.
+It shows what it will do before doing anything, and takes about a minute. **Undo everything** puts every setting back; cleared files wait in your Recycle Bin, and any pre-installed app it removed can be reinstalled from the Microsoft Store. You need Windows 10 or 11 and an administrator account. Nothing is installed.
 
 Quietpane isn't [digitally signed](#code-signing-policy) yet, so Windows asks a few questions first:
 
@@ -37,7 +37,7 @@ Quietpane isn't [digitally signed](#code-signing-policy) yet, so Windows asks a 
 | "Do you want to run this file?" | **Run** |
 | "Do you want to allow this app to make changes?" | **Yes** |
 
-**You should be suspicious of that**, and of anything else that asks for administrator rights. A signing certificate has been [applied for](#code-signing-policy); until it comes through, the honest answer is that a signature only tells you who published something, not what it does. Quietpane offers you the stronger thing instead: there is no `.exe` and nothing compiled, so you can read the whole app before running it, and [check in about a minute](#verify-it-yourself) that it makes no network connections at all.
+**You should be suspicious of that**, and of anything else that asks for administrator rights. A signing certificate has been [applied for](#code-signing-policy); until it comes through, the honest answer is that a signature only tells you who published something, not what it does. Quietpane offers you the stronger thing instead: there is no `.exe` and no precompiled binary - even its few C# blocks ship as source and are compiled on your PC as it runs - so you can read the whole app before running it, and [check in about a minute](#verify-it-yourself) that it makes no network connections at all.
 
 **Want to look before you leap?** Double-click **Safety scan only**. It changes nothing on your PC - it only looks and tells you what it found.
 
@@ -52,7 +52,7 @@ Quietpane isn't [digitally signed](#code-signing-policy) yet, so Windows asks a 
 - **Owns up when something goes wrong.** If a part of your PC can't be read, that part says so and the rest still works. If Undo can't put something back, it says how many and keeps the restore point so you can try again. One job runs at a time, only one copy of the app opens at once, and an error never takes the window down with it.
 - **Says less, means more.** Every screen is one plain line per thing, in everyday words. The detail behind it is one hover or one Tab away, and the full running commentary is always in **Show details** at the bottom. An automated test keeps the window from filling up with words again.
 - **Works for everyone.** Everything can be done with a keyboard alone, with a clear outline showing where you are; every control has a name screen readers such as Narrator can say, and the status line is read out as it changes. All text meets the WCAG AA contrast standard, and the automated tests fail if a control ever loses its name or a colour gets too faint to read.
-- **Hides nothing.** Plain-text PowerShell you can read, plus four short C# blocks (the graphics driver's temperature, the drive's own temperature and wear, adding up folder sizes, and making the Start-menu shortcut) and two lines that give the app its own taskbar icon and a sharp window. No installer and no `.exe`: it runs from the folder you unzip, and only copies itself to Program Files if you ask for shortcuts or to start it when you sign in.
+- **Hides nothing.** Plain-text PowerShell you can read, plus four short C# blocks (the graphics driver's temperature, the drive's own temperature and wear, adding up folder sizes, and making the Start-menu shortcut) and two one-line C# declarations that give the app its own taskbar icon and a sharp window - all shipped as source, and compiled on your PC by PowerShell as it runs. No installer and no `.exe`: it runs from the folder you unzip, and only copies itself to Program Files if you ask for shortcuts or to start it when you sign in.
 
 ## A look around
 
@@ -80,7 +80,7 @@ Quietpane isn't [digitally signed](#code-signing-policy) yet, so Windows asks a 
 
 ## What's inside
 
-**Home.** Cards show what could be better, and **Quiet my PC now** applies the recommended items that aren't done yet, all in one restore point, so **Undo everything** really does undo everything. It never uninstalls a program on its own. If a Windows update switches things back on, Home says what came back and offers to switch exactly those off again - and if you like, Quietpane can check for that as you sign in and put a small badge on its taskbar icon, so you don't have to remember to look. Only things that are really on again count: a setting your PC no longer has, or a brand app you uninstalled, is never reported as "back".
+**Home.** Cards show what could be better, and **Quiet my PC now** applies the recommended items that aren't done yet, all in one restore point, so **Undo everything** puts every setting back in one go - cleared files wait in your Recycle Bin, and removed apps can be reinstalled from the Microsoft Store. It never runs a desktop program's uninstaller. If a Windows update switches things back on, Home says what came back and offers to switch exactly those off again - and if you like, Quietpane can check for that as you sign in and put a small badge on its taskbar icon, so you don't have to remember to look. Only things that are really on again count: a setting your PC no longer has, or a brand app you uninstalled, is never reported as "back".
 
 **Health.** It opens with **one sentence** saying how your PC is doing - "Your PC is calm", or "Your PC is being held back to cool off" - because a screen of a dozen numbers leaves you to work out which one matters. Underneath, four tiles built to exactly the same pattern, so they can be compared at a glance rather than read one at a time: the **processor**, the **graphics card**, **memory** and **the drive**, each with its figure, a bar carrying a mark where that reading stops being ordinary, a temperature in plain words, and **the last two minutes** drawn beneath it so a spike that has already passed is still there to see. Then one list of the **busiest programs**, merged across the processor and the graphics card, instead of the same few names repeated under every tile.
 
@@ -121,7 +121,7 @@ Then: which apps used your camera, microphone and location, and when, as Windows
 
 ## Verify it yourself
 
-1. **Read it.** The app is `Quietpane.ps1` (the window), `src/Quietpane.psm1` (the engine) and `src/catalog/*.psd1` (the lists of settings, apps, folders and brands). The non-PowerShell code is four short C# blocks in the engine, all of them readable in `src/Quietpane.psm1`: one asks the graphics driver three read-only questions (list the adapters, ask each one, close it), one asks the drive about its own temperature and wear (it opens the drive with **no read or write rights at all** - only enough to ask it about itself - so it cannot alter a byte, and closes it again), one adds up folder sizes for "Where your space went" (it reads names and sizes and opens nothing), and one makes the Start-menu shortcut through Windows' own shortcut object. The window adds two lines of its own: one names the app to Windows, so the taskbar shows its icon instead of PowerShell's, and one asks Windows to draw the window at your screen's real resolution.
+1. **Read it.** The app is `Quietpane.ps1` (the window), `src/Quietpane.psm1` (the engine) and `src/catalog/*.psd1` (the lists of settings, apps, folders and brands). The non-PowerShell code is four short C# blocks in the engine, all of them readable in `src/Quietpane.psm1`: one asks the graphics driver three read-only questions (list the adapters, ask each one, close it), one asks the drive about its own temperature and wear (it opens the drive with **no read or write rights at all** - only enough to ask it about itself - so it cannot alter a byte, and closes it again), one adds up folder sizes for "Where your space went" (it reads names and sizes and opens nothing), and one makes the Start-menu shortcut through Windows' own shortcut object. The window adds two one-line C# declarations of its own: one names the app to Windows, so the taskbar shows its icon instead of PowerShell's, and one asks Windows to draw the window at your screen's real resolution. PowerShell compiles all of these on your PC with `Add-Type` the first time each is needed; no compiled file ships in the ZIP.
 2. **Search for network code.** In the folder, run:
    ```powershell
    Select-String -Path .\Quietpane.ps1, .\src\Quietpane.psm1 -Pattern 'Invoke-WebRequest|Invoke-RestMethod|WebClient|HttpClient|BitsTransfer|TcpClient|curl|wget|DownloadString'
@@ -139,7 +139,7 @@ That's a fair question to lead with - it's a category full of scams, and several
 Because the things it changes are system settings - services, scheduled tasks, machine-wide registry values. Anything that could change those without administrator rights would be a Windows security flaw. Use **Safety scan only** if you'd rather it just looked, and read [what it deliberately doesn't do](#what-it-deliberately-doesnt-do) before you give it anything.
 
 **Windows says "Unknown publisher". Should I be worried?**
-You should be careful with any unsigned app that wants administrator rights, including this one. A certificate has been [applied for](#code-signing-policy). Until it arrives, the thing worth knowing is that Quietpane has no `.exe` and nothing compiled - you can read the entire app, and confirm in a minute that it never connects to anything. Anyone offering you a Quietpane `.exe` or a "cracked" version is offering you something else; see the [Security Policy](SECURITY.md#getting-a-genuine-copy).
+You should be careful with any unsigned app that wants administrator rights, including this one. A certificate has been [applied for](#code-signing-policy). Until it arrives, the thing worth knowing is that Quietpane ships no `.exe` and no precompiled binary - its few C# blocks are source, compiled on your PC as it runs - so you can read the entire app, and confirm in a minute that it never connects to anything. Anyone offering you a Quietpane `.exe` or a "cracked" version is offering you something else; see the [Security Policy](SECURITY.md#getting-a-genuine-copy).
 
 **Another program says my SSD is at 60 °C and Quietpane says something different.**
 Quietpane is probably right, and the tool that says 60 is probably reading Windows. On a good many PCs the storage driver reports a made-up temperature that never moves whatever the drive is doing - 60 °C at three in the morning and in the middle of a heavy copy alike - along with no wear and no hours. Quietpane asks the drive itself first and only falls back to Windows if the drive won't answer. Watch the number while you copy a large folder: a real one climbs and then falls again.
