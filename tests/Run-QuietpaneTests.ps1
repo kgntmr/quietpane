@@ -1861,7 +1861,7 @@ Test-Case 'the Health list shows what the PC shares, and leaves out or says "not
 }
 Test-Case 'a switch in Settings shows on only once the change is made, and a failed change leaves it where it was' {
     # Flipped the way a screen reader flips it, against a pretend sign-in task: nothing on this PC is touched.
-    $cardsOut -match 'switches: starts off: True; on only once done: True; not shown early: True; watch follows: True; a failed switch-off stays on: True; a failed switch-on stays off: True; unit: True'
+    $cardsOut -match 'switches: greyed until known: True; starts off: True; on only once done: True; not shown early: True; watch follows: True; a failed switch-off stays on: True; a failed switch-on stays off: True; unit: True'
 }
 Test-Case 'each list tab opens with a short summary of what is below it' {
     $cardsOut -match 'at a glance: apps: True; leftovers: True; drive: True; restore points: True; brands: True'

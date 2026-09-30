@@ -1589,6 +1589,10 @@ $tempRow = New-SettingRow 'Temperatures' 'On the Health tab and in session repor
 
 # Starting when you sign in, and checking once as it does. Both take effect the moment they are flipped.
 $script:SignInBox = New-Switch 'Start Quietpane when I sign in'
+# Greyed out until Windows has said whether it is on, so it never shows "off" for a setting that is on.
+$script:SignInBox.IsEnabled = $false
+$script:SignInBox.ToolTip = 'Checking whether this is on...'
+[System.Windows.Controls.ToolTipService]::SetShowOnDisabled($script:SignInBox, $true)
 $signInRow = New-SettingRow 'Start Quietpane when I sign in' 'It waits on the taskbar and does nothing until you click it.' $script:SignInBox
 [void]$aboutPanel.Children.Add($signInRow.Border)
 # Only makes sense with the one above, so it sits under it, indented, and waits until that is on.
@@ -1779,10 +1783,16 @@ function Update-PlaceControls {
         $task = Get-QpSignInTask
         $on = [bool]($task -and "$($task.State)" -ne 'Disabled')
         Set-SwitchQuietly $script:SignInBox $on
+        $script:SignInBox.IsEnabled = $true
+        $script:SignInBox.ToolTip = $null
         $script:WatchBox.IsEnabled = $on
         $script:WatchBox.ToolTip = $(if ($on) { $null } else { 'Switch on "Start Quietpane when I sign in" first.' })
         Set-SwitchQuietly $script:WatchBox ($on -and (Test-QpTaskWatches $task))
-    } catch { }
+    } catch {
+        # Windows would not say whether it is on, so the switch can't honestly show either way.
+        $script:SignInBox.IsEnabled = $false
+        $script:SignInBox.ToolTip = 'Quietpane could not read this setting from Task Scheduler.'
+    }
 }
 # Taken away while this copy is the one open: it goes to the Recycle Bin once the window closes.
 $script:RemoveCopyOnClose = $false
@@ -4866,8 +4876,10 @@ function Test-Switches {
         [pscustomobject]@{ Ok = $true; Note = 'Quietpane will no longer start when you sign in.'; Copy = $null } }
     $flip = { param($box) ([System.Windows.Automation.Peers.CheckBoxAutomationPeer]::new($box)).Toggle() }
     try {
+        $script:SignInBox.IsEnabled = $false   # as the window starts: nothing known yet
+        $greyedUntilKnown = -not $script:SignInBox.IsEnabled
         Update-PlaceControls
-        $startsOff = (-not $script:SignInBox.IsChecked) -and (-not $script:WatchBox.IsEnabled)
+        $startsOff = (-not $script:SignInBox.IsChecked) -and (-not $script:WatchBox.IsEnabled) -and $script:SignInBox.IsEnabled
         & $flip $script:SignInBox
         $on = [bool]$script:SignInBox.IsChecked -and $script:WatchBox.IsEnabled
         $notEarly = ($script:SeenDuring.Count -eq 1 -and $script:SeenDuring[0] -eq $false)
@@ -4889,8 +4901,8 @@ function Test-Switches {
         foreach ($n in $names) { Set-Item "function:script:$n" $real[$n] }
         $script:FakeTask = $null; $script:LastMessage = $null
     }
-    'starts off: {0}; on only once done: {1}; not shown early: {2}; watch follows: {3}; a failed switch-off stays on: {4}; a failed switch-on stays off: {5}; unit: {6}' -f
-        $startsOff, $on, $notEarly, $watching, $staysOn, $staysOff, ($f -and $c)
+    'greyed until known: {7}; starts off: {0}; on only once done: {1}; not shown early: {2}; watch follows: {3}; a failed switch-off stays on: {4}; a failed switch-on stays off: {5}; unit: {6}' -f
+        $startsOff, $on, $notEarly, $watching, $staysOn, $staysOff, ($f -and $c), $greyedUntilKnown
 }
 function Test-Glance {
     <#
@@ -5042,7 +5054,6 @@ if ($SelfTest) {
         $ui.LogBox.Text = "[12:00:00] STEP    Quietpane $($info.Version) - Developed by KomodoWorks.com`r`n[12:00:01] OK      Ready."
         $ui.Status.Text = 'Ready when you are.'
         $ui.Tabs.SelectedIndex = $SnapshotTab
-        if ($SnapshotTab -eq ($ui.Tabs.Items.Count - 1)) { $script:PrivacyExpander.IsExpanded = $true }
         if ([string]$ui.Tabs.SelectedItem.Tag -eq 'health') {
             # Real readings for the picture. The slow ones are read first, so the tiles have the drive's
             # temperature to show, and then several live ones a second apart, so the trends have a shape
@@ -5059,6 +5070,7 @@ if ($SelfTest) {
             }
         }
         Update-Buttons
+        Update-PlaceControls   # read-only: shows the sign-in switches as they really are
         if ($SnapshotWidth -gt 0) { $window.Width = $SnapshotWidth }
         Update-TabIcons $window.Width
         if ($SnapshotHeight -gt 0) { $window.Height = $SnapshotHeight }
