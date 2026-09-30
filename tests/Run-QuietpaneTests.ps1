@@ -962,7 +962,7 @@ Test-Case 'a session can be written up as a page, with nothing in it that was no
     $html = New-QpSessionReportHtml -Watch (Stop-QpSessionWatch $w -Now $sessionStart.AddMinutes(31)) -Now $sessionStart.AddMinutes(31)
     # The same promise the scan report makes: no scripts, and nothing fetched from the internet.
     [regex]::Matches($html, '<script').Count -eq 0 -and [regex]::Matches($html, 'src="http').Count -eq 0 -and
-    $html -match '97 C' -and $html -match 'hottest the processor got' -and
+    $html -match '97&#176;C' -and $html -match 'hottest the processor got' -and
     $html -match 'What it spoke up about' -and $html -match 'Windows has promised 95%' -and
     $html -match 'Where the time went' -and $html -match 'asleep, or Quietpane was busy' -and
     $html -match '<title>Quietpane session</title>'
@@ -1851,6 +1851,17 @@ Test-Case 'the live tiles rank what matters, merge the busy list and never draw 
     # once at its loudest, rather than the same name in four columns as it used to be.
     $cardsOut -match 'live tiles: verdict worst first: True; held back named: True; memory word: True; drive heat: True; video memory folded in: True; 2 rows: A game 88% of the graphics card / Windows Explorer 6% of the processor; drive life: True; calm: True; nothing invented: True'
 }
+Test-Case 'Health keeps two columns when there is room, and puts the list underneath when there is not' {
+    # At the usual width and at the narrowest the window allows: nothing cut off, the tabs on one row.
+    $cardsOut -match 'health layout: 1100: side by side, fits True, tabs on one row True; 760: list underneath, fits True, tabs on one row True'
+}
+Test-Case 'the Health list shows what the PC shares, and leaves out or says "not shared" for what it does not' {
+    # Made-up PCs drawn into the real window: everything shared, nothing shared, offline, and Fahrenheit.
+    $cardsOut -match 'health facts: cores: True; memory: True; clocks: True; fan stopped: True; no clock or fan noise: True; network: True; not connected: True; network not shared: True; power plan: True; fans not shared: True; this pc: True; drive speeds: True; fahrenheit: True'
+}
+Test-Case 'the live tiles cope with two graphics cards, built-in graphics, no battery and a silent drive' {
+    $cardsOut -match 'two cards: True; built-in graphics quiet: True; no battery box: True; drive temperature not shared: True'
+}
 Test-Case 'light and dark switch live in the real window, and every colour has a dark partner' {
     # The window is built light, switched to dark and back; a card background from the XAML, a line of
     # text and a bar built in code must all follow, and no shared brush may have been frozen along the way.
@@ -1880,6 +1891,147 @@ Test-Case 'the window keeps its words down' {
     $total = ($counts.Values | Measure-Object -Sum).Sum
     # Room to grow, but not back to where it was (2,900 words, Privacy alone 1,340).
     $counts.Count -eq 9 -and $total -lt 2300 -and $counts['Privacy'] -lt 950 -and $counts['Home'] -lt 200 -and $counts['About'] -lt 210
+}
+
+Section 'What the PC is, and how fast it is going (2.0)'
+# Made-up PCs for the rules, and this PC for the real thing. Every rule is the same one: what Windows
+# does not say plainly is left empty - never a zero, never worked out from something else.
+function New-TestFacts {
+    param($Sticks = $null, $Arrays = $null, $System = $null, $Video = $null, [string]$PowerCfg = '')
+    if ($null -eq $Sticks) { $Sticks = @([pscustomobject]@{ Capacity = 8GB; SMBIOSMemoryType = 34; ConfiguredClockSpeed = 5200 }, [pscustomobject]@{ Capacity = 8GB; SMBIOSMemoryType = 34; ConfiguredClockSpeed = 5200 }) }
+    if ($null -eq $System) { $System = [pscustomobject]@{ Manufacturer = 'Micro-Star International Co., Ltd.'; Model = 'Cyborg 15 A13VF' } }
+    ConvertTo-QpSystemFacts -Processors @([pscustomobject]@{ NumberOfCores = 10; NumberOfLogicalProcessors = 16 }) -Sticks $Sticks -Arrays $Arrays `
+        -System $System -OS ([pscustomobject]@{ Caption = 'Microsoft Windows 11 Home' }) `
+        -WindowsKey ([pscustomobject]@{ ProductName = 'Windows 10 Home'; DisplayVersion = '25H2'; CurrentBuild = '26200'; UBR = 9457 }) `
+        -Video $Video -PowerCfg $PowerCfg
+}
+Test-Case 'the facts come through as Windows gives them, and Windows 11 is not called Windows 10' {
+    # The registry's ProductName still says "Windows 10" on Windows 11; the operating system record does not.
+    $f = New-TestFacts -Arrays @([pscustomobject]@{ Use = 3; MemoryDevices = 4 }) `
+        -Video @([pscustomobject]@{ CurrentHorizontalResolution = 1920; CurrentVerticalResolution = 1080; CurrentRefreshRate = 144 }) `
+        -PowerCfg 'Power Scheme GUID: 381b4222-f694-41f0-9685-ff5bb260df2e  (Balanced)'
+    $f.Cores -eq 10 -and $f.Threads -eq 16 -and $f.MemoryType -eq 'DDR5' -and $f.MemorySpeedMTs -eq 5200 -and
+    $f.MemorySticks -eq 2 -and $f.MemorySlots -eq 4 -and $f.Maker -eq 'Micro-Star International' -and $f.Model -eq 'Cyborg 15 A13VF' -and
+    $f.Windows -eq 'Windows 11 Home' -and $f.WindowsVersion -eq '25H2' -and $f.WindowsBuild -eq '26200.9457' -and
+    @($f.Screens) -join ';' -eq '1920 x 1080, 144 Hz' -and $f.PowerPlan -eq 'Balanced'
+}
+Test-Case 'memory slots come from the board, never worked out from the sticks' {
+    $none = New-TestFacts -Arrays @()
+    $wrong = New-TestFacts -Arrays @([pscustomobject]@{ Use = 3; MemoryDevices = 1 })          # fewer slots than sticks: contradicts itself
+    $flash = New-TestFacts -Arrays @([pscustomobject]@{ Use = 4; MemoryDevices = 8 })          # not system memory
+    $two = New-TestFacts -Arrays @([pscustomobject]@{ Use = 3; MemoryDevices = 2 }, [pscustomobject]@{ Use = 3; MemoryDevices = 2 })
+    $null -eq $none.MemorySlots -and $none.MemorySticks -eq 2 -and $null -eq $wrong.MemorySlots -and
+    $null -eq $flash.MemorySlots -and $two.MemorySlots -eq 4
+}
+Test-Case 'sticks that disagree give no type or speed, rather than one of them' {
+    $mixed = New-TestFacts -Sticks @([pscustomobject]@{ Capacity = 8GB; SMBIOSMemoryType = 34; ConfiguredClockSpeed = 4800 }, [pscustomobject]@{ Capacity = 8GB; SMBIOSMemoryType = 26; ConfiguredClockSpeed = 3200 })
+    $unknown = New-TestFacts -Sticks @([pscustomobject]@{ Capacity = 8GB; SMBIOSMemoryType = 0; ConfiguredClockSpeed = 0 })
+    $noSticks = New-TestFacts -Sticks @([pscustomobject]@{ Capacity = 0 })
+    $null -eq $mixed.MemoryType -and $null -eq $mixed.MemorySpeedMTs -and $mixed.MemorySticks -eq 2 -and
+    $null -eq $unknown.MemoryType -and $null -eq $unknown.MemorySpeedMTs -and
+    $null -eq $noSticks.MemorySticks -and $null -eq $noSticks.MemoryType
+}
+Test-Case 'placeholder maker names, missing screens and a default refresh rate are left out' {
+    $f = New-TestFacts -System ([pscustomobject]@{ Manufacturer = 'To Be Filled By O.E.M.'; Model = 'System Product Name' }) `
+        -Video @([pscustomobject]@{ CurrentHorizontalResolution = $null; CurrentVerticalResolution = $null; CurrentRefreshRate = $null },
+                 [pscustomobject]@{ CurrentHorizontalResolution = 2560; CurrentVerticalResolution = 1440; CurrentRefreshRate = 1 })
+    $null -eq $f.Maker -and $null -eq $f.Model -and @($f.Screens) -join ';' -eq '2560 x 1440' -and $null -eq $f.PowerPlan
+}
+Test-Case 'the power plan is named by Windows'' own plans, whatever language powercfg speaks' {
+    $de = ConvertFrom-QpPowerCfg 'GUID des Energieschemas: 381b4222-f694-41f0-9685-ff5bb260df2e  (Ausbalanciert)'
+    $own = ConvertFrom-QpPowerCfg 'Power Scheme GUID: 11111111-2222-3333-4444-555555555555  (Gaming boost)'
+    $de.Name -eq 'Balanced' -and $own.Name -eq 'Gaming boost' -and $null -eq (ConvertFrom-QpPowerCfg 'nothing useful here')
+}
+Test-Case 'this PC''s facts are read without a zero anywhere' {
+    $f = Get-QpSystemFacts
+    $numbers = @($f.Cores, $f.Threads, $f.MemorySpeedMTs, $f.MemorySticks, $f.MemorySlots)
+    @($numbers | Where-Object { $null -ne $_ -and $_ -le 0 }).Count -eq 0 -and $f.PSObject.Properties.Name -contains 'PowerPlan'
+}
+
+function New-TestCard($Desc, $Medium, [bool]$Hardware = $true, [bool]$Virtual = $false, [string]$Status = 'Up') {
+    [pscustomobject]@{ InterfaceDescription = $Desc; NdisPhysicalMedium = $Medium; HardwareInterface = $Hardware; Virtual = $Virtual; Status = $Status }
+}
+Test-Case 'only real Wi-Fi and wired cards are counted, so no traffic is counted twice' {
+    $cards = @(
+        (New-TestCard 'Intel(R) Wi-Fi 6E AX211 160MHz' 9),
+        (New-TestCard 'Realtek PCIe GbE Family Controller' 14 -Status 'Disconnected'),
+        (New-TestCard 'Hyper-V Virtual Ethernet Adapter' 0 $false),
+        (New-TestCard 'Hyper-V Virtual Ethernet Adapter #2' 14 $false $true),     # WSL's switch, on the same traffic
+        (New-TestCard 'TAP-Windows Adapter V9' 14 $true),                           # a VPN that claims to be hardware
+        (New-TestCard 'WireGuard Tunnel' 14 $true),
+        (New-TestCard 'Bluetooth Device (Personal Area Network)' 10),
+        (New-TestCard 'Microsoft Wi-Fi Direct Virtual Adapter' 9 $false),
+        (New-TestCard 'Intel(R) Ethernet I219-V #2' 14)                             # real, but the counters don't list it
+    )
+    $instances = @('Intel[R] Wi-Fi 6E AX211 160MHz', 'Realtek PCIe GbE Family Controller', 'Hyper-V Virtual Ethernet Adapter', 'Hyper-V Virtual Ethernet Adapter _2', 'TAP-Windows Adapter V9', 'WireGuard Tunnel')
+    $picked = @(Select-QpNetworkCards -Adapters $cards -Instances $instances)
+    $picked.Count -eq 2 -and ($picked | Where-Object Kind -eq 'Wi-Fi').Instance -eq 'Intel[R] Wi-Fi 6E AX211 160MHz' -and
+    ($picked | Where-Object Kind -eq 'Wired').Up -eq $false -and (ConvertTo-QpCounterInstance 'Intel(R) Ethernet I219-V #2') -eq 'Intel[R] Ethernet I219-V _2'
+}
+Test-Case 'network speed adds up connected cards of a kind, and says nothing it was not told' {
+    $fake = { param($v) $o = [pscustomobject]@{ V = $v }; $o | Add-Member -MemberType ScriptMethod -Name NextValue -Value { $this.V }; $o }
+    $m = [pscustomobject]@{ NetAt = (Get-Date); Net = @(
+        [pscustomobject]@{ Kind = 'Wi-Fi'; Instance = 'a'; Up = $true; Received = (& $fake 1000); Sent = (& $fake 10) },
+        [pscustomobject]@{ Kind = 'Wi-Fi'; Instance = 'b'; Up = $true; Received = (& $fake 500); Sent = (& $fake 5) },
+        [pscustomobject]@{ Kind = 'Wired'; Instance = 'c'; Up = $false; Received = (& $fake 99999); Sent = (& $fake 99999) }) }
+    $r = @(Get-QpNetRates -Monitor $m)
+    $m.Net = @(); $none = Get-QpNetRates -Monitor $m
+    $m.Net = $null; $unknown = Get-QpNetRates -Monitor $m
+    $r.Count -eq 1 -and $r[0].Kind -eq 'Wi-Fi' -and $r[0].DownBps -eq 1500 -and $r[0].UpBps -eq 15 -and
+    $none -is [array] -and $none.Count -eq 0 -and $null -eq $unknown
+}
+Test-Case 'drive and network speeds are Windows'' per-second rates, never running totals' {
+    $m = New-QpLiveMonitor
+    $rates = @($m.DiskRead, $m.DiskWrite) + @($m.Net | ForEach-Object { $_.Received; $_.Sent }) | Where-Object { $_ }
+    $types = @($rates | ForEach-Object { [string]$_.CounterType } | Select-Object -Unique)
+    # A PC without the counters simply has none; one with them must have only per-second kinds.
+    @($types | Where-Object { $_ -notmatch '^RateOfCountsPerSecond(32|64)$' }).Count -eq 0
+}
+Test-Case 'a speed never rounds a trickle down to nothing, and nothing stays nothing' {
+    (Format-QpRate 541) -eq '541 B/s' -and (Format-QpRate 0) -eq '0 B/s' -and (Format-QpRate 2048) -eq '2.0 KB/s' -and
+    (Format-QpRate (15.8 * 1MB)) -eq '15.8 MB/s' -and $null -eq (Format-QpRate $null)
+}
+Test-Case 'the graphics clock, memory clock and fan come back as the driver said, or empty - never zero' {
+    $m = New-QpLiveMonitor
+    Start-Sleep -Milliseconds 300
+    $r = Get-QpLiveReading -Monitor $m
+    $bad = @($r.Gpus | Where-Object { ($null -ne $_.EngineClockMhz -and $_.EngineClockMhz -le 0) -or ($null -ne $_.MemoryClockMhz -and $_.MemoryClockMhz -le 0) -or ($null -ne $_.FanRpm -and $_.FanRpm -lt 0) })
+    $shape = @($r.Gpus | Where-Object { $_.PSObject.Properties.Name -notcontains 'EngineClockMhz' -or $_.PSObject.Properties.Name -notcontains 'FanRpm' })
+    $bad.Count -eq 0 -and $shape.Count -eq 0 -and ($null -eq $r.DiskReadBps -or $r.DiskReadBps -ge 0) -and
+    ($null -eq $r.Network -or $r.Network -is [array])
+}
+Test-Case 'the graphics driver is still only asked questions: no new native calls anywhere' {
+    # Every native call in the engine, by name. A new one - of any kind, from any DLL - fails this.
+    $src = Get-Content (Join-Path $root 'src\Quietpane.psm1') -Raw
+    $calls = @([regex]::Matches($src, 'DllImport\("([\w.]+)"[^\]]*\]\s*(?:public\s+|internal\s+|private\s+)?static\s+extern\s+\w+\s+(\w+)') | ForEach-Object { $_.Groups[1].Value.ToLower() + '!' + $_.Groups[2].Value } | Sort-Object)
+    ($calls -join ';') -eq 'gdi32.dll!D3DKMTCloseAdapter;gdi32.dll!D3DKMTEnumAdapters2;gdi32.dll!D3DKMTQueryAdapterInfo;kernel32.dll!CloseHandle;kernel32.dll!CreateFileW;kernel32.dll!DeviceIoControl' -and
+    [regex]::Matches($src, 'DllImport').Count -eq 6
+}
+Test-Case 'a temperature is written in the unit chosen, and thresholds stay in Celsius' {
+    $deg = [char]0x00B0
+    (Format-QpTemp 47 -Unit C) -eq "47${deg}C" -and (Format-QpTemp 47 -Unit F) -eq "117${deg}F" -and
+    (Format-QpTemp 100 -Unit F) -eq "212${deg}F" -and (Format-QpTemp 0 -Unit F) -eq "32${deg}F" -and
+    (Format-QpTemp -40 -Unit F) -eq "-40${deg}F" -and $null -eq (Format-QpTemp $null -Unit F) -and
+    (Get-QpHeatWord -Celsius 90).Level -eq 'warn'
+}
+Test-Case 'the unit is remembered in one small file, and anything odd in it means Celsius' {
+    $f = Join-Path $env:TEMP ('qp-unit-' + [guid]::NewGuid().ToString('N') + '\temperature.txt')
+    try {
+        $missing = Get-QpTempUnit -Path $f
+        $wrote = Set-QpTempUnit -Unit F -Path $f
+        $f1 = Get-QpTempUnit -Path $f
+        $content = [IO.File]::ReadAllText($f)
+        [IO.File]::WriteAllText($f, 'Kelvin please')
+        $odd = Get-QpTempUnit -Path $f
+        $missing -eq 'C' -and $wrote -eq $true -and $f1 -eq 'F' -and $content -eq 'F' -and $odd -eq 'C'
+    } finally { Remove-Item -LiteralPath (Split-Path $f) -Recurse -Force -ErrorAction SilentlyContinue }   # the test's own temporary folder
+}
+Test-Case 'a unit that cannot be saved says so, so Settings never shows a choice that did not stick' {
+    # A path under a file, which cannot be a folder: the write fails and the answer is $false.
+    $file = Join-Path $env:TEMP ('qp-unitfile-' + [guid]::NewGuid().ToString('N'))
+    [IO.File]::WriteAllText($file, 'x')
+    try { (Set-QpTempUnit -Unit F -Path (Join-Path $file 'temperature.txt')) -eq $false }
+    finally { Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue }   # the test's own temporary file
 }
 
 Section 'Updates, without a connection'

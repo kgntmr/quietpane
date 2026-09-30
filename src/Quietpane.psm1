@@ -219,6 +219,16 @@ function Format-QpBytes {
     return '{0:N0} KB' -f ($Bytes / 1KB)
 }
 
+function Format-QpRate {
+    <# A speed, per second: small ones in bytes, so a trickle never rounds down to a zero. $null stays $null. #>
+    param($BytesPerSecond)
+    if ($null -eq $BytesPerSecond -or "$BytesPerSecond" -eq '') { return $null }
+    $b = [math]::Max(0, [double]$BytesPerSecond)
+    if ($b -lt 1KB) { return '{0:N0} B/s' -f $b }
+    if ($b -lt 1MB) { return '{0:N1} KB/s' -f ($b / 1KB) }
+    return (Format-QpBytes $b) + '/s'
+}
+
 function Get-QpSize {
     param([string[]]$Paths)
     $sum = 0
@@ -409,6 +419,9 @@ public static class QuietpaneGpuSensors {
         public ulong MemoryBandwidth; public ulong PCIEBandwidth; public uint FanRPM; public uint Power; public uint Temperature; public byte PowerStateOverride; }
     [StructLayout(LayoutKind.Sequential)] struct PERFDATACAPS {
         public uint PhysicalAdapterIndex; public ulong MaxMemoryBandwidth; public ulong MaxPCIEBandwidth; public uint MaxFanRPM; public uint TemperatureMax; public uint TemperatureWarning; }
+    [StructLayout(LayoutKind.Sequential)] struct NODEPERFDATA {
+        public uint NodeOrdinal; public uint PhysicalAdapterIndex; public ulong Frequency; public ulong MaxFrequency; public ulong MaxFrequencyOC;
+        public uint Voltage; public uint VoltageMax; public uint VoltageMaxOC; public ulong MaxTransitionLatency; }
     [StructLayout(LayoutKind.Sequential)] struct SEGMENTSIZEINFO { public ulong DedicatedVideoMemorySize; public ulong DedicatedSystemMemorySize; public ulong SharedSystemMemorySize; }
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)] struct REGISTRYINFO {
         [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)] public string AdapterString;
@@ -417,7 +430,7 @@ public static class QuietpaneGpuSensors {
         [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)] public string ChipType; }
 
     // Question numbers from the Windows driver kit (KMTQUERYADAPTERINFOTYPE).
-    const int SEGMENT_SIZE = 3, REGISTRY_INFO = 8, PERF_DATA = 62, PERF_DATA_CAPS = 63;
+    const int SEGMENT_SIZE = 3, REGISTRY_INFO = 8, NODE_PERF_DATA = 61, PERF_DATA = 62, PERF_DATA_CAPS = 63;
 
     [DllImport("gdi32.dll")] static extern int D3DKMTEnumAdapters2(ref ENUMADAPTERS2 p);
     [DllImport("gdi32.dll")] static extern int D3DKMTQueryAdapterInfo(ref QUERYADAPTERINFO p);
@@ -430,6 +443,11 @@ public static class QuietpaneGpuSensors {
         public ulong SharedBytes;        // system memory it may borrow
         public double TemperatureC;      // 0 when the driver does not share one
         public double TemperatureMaxC;   // 0 when the driver does not say
+        public ulong MemoryClockHz;      // the video memory's clock; 0 when the driver does not say
+        public uint FanRpm;              // the card's own fan; only meaningful when MaxFanRpm is above 0
+        public uint MaxFanRpm;           // 0 when the driver does not report a fan at all
+        public ulong EngineClockHz;      // the clock of the engine with the highest top speed; 0 when not said
+        public ulong EngineMaxClockHz;
     }
 
     static bool Query<T>(uint handle, int type, ref T value) where T : struct {
@@ -466,9 +484,16 @@ public static class QuietpaneGpuSensors {
                     var seg = new SEGMENTSIZEINFO();
                     if (Query(a.hAdapter, SEGMENT_SIZE, ref seg)) { item.DedicatedBytes = seg.DedicatedVideoMemorySize; item.SharedBytes = seg.SharedSystemMemorySize; }
                     var perf = new PERFDATA();
-                    if (Query(a.hAdapter, PERF_DATA, ref perf)) item.TemperatureC = perf.Temperature / 10.0;
+                    if (Query(a.hAdapter, PERF_DATA, ref perf)) { item.TemperatureC = perf.Temperature / 10.0; item.MemoryClockHz = perf.MemoryFrequency; item.FanRpm = perf.FanRPM; }
                     var caps = new PERFDATACAPS();
-                    if (Query(a.hAdapter, PERF_DATA_CAPS, ref caps)) item.TemperatureMaxC = caps.TemperatureMax / 10.0;
+                    if (Query(a.hAdapter, PERF_DATA_CAPS, ref caps)) { item.TemperatureMaxC = caps.TemperatureMax / 10.0; item.MaxFanRpm = caps.MaxFanRPM; }
+                    // Each engine (3D, copy, video...) is asked its clock; the one with the highest top speed is the
+                    // graphics engine. On this project's NVIDIA laptop that matches NVIDIA's own graphics clock exactly.
+                    for (uint n = 0; n < 64; n++) {
+                        var node = new NODEPERFDATA { NodeOrdinal = n };
+                        if (!Query(a.hAdapter, NODE_PERF_DATA, ref node)) break;
+                        if (node.MaxFrequency > item.EngineMaxClockHz) { item.EngineMaxClockHz = node.MaxFrequency; item.EngineClockHz = node.Frequency; }
+                    }
                     result.Add(item);
                 } finally {
                     var c = new CLOSEADAPTER { hAdapter = a.hAdapter };
@@ -627,6 +652,187 @@ function New-QpCounterGroup {
     } catch { return $null } finally { [Threading.Thread]::CurrentThread.CurrentCulture = $was }
 }
 
+# ------------------------------------------------------------------ facts about this PC, read now and then
+# What the PC is, rather than what it is doing: its cores, its memory, its maker and model, Windows, its
+# screens and its power plan. All read-only, from Windows' own inventory (WMI) and powercfg. Anything
+# Windows does not say is left empty - never filled in from a guess.
+#
+# Fans: Windows' own fan class (Win32_Fan) carries a *desired* speed at most, never a measured one, and on
+# most PCs not even that. Showing it as a fan speed would be inventing a number, so it is not used.
+# Fan speed is shared by the graphics driver on some cards, and read there.
+
+$script:MemoryTypeNames = @{ 20 = 'DDR'; 21 = 'DDR2'; 24 = 'DDR3'; 26 = 'DDR4'; 27 = 'LPDDR'; 28 = 'LPDDR2'; 29 = 'LPDDR3'; 30 = 'LPDDR4'; 34 = 'DDR5'; 35 = 'LPDDR5' }
+$script:PowerPlanNames = @{
+    '381b4222-f694-41f0-9685-ff5bb260df2e' = 'Balanced'
+    '8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c' = 'High performance'
+    'a1841308-3541-4fab-bc81-f71556f20b4a' = 'Power saver'
+    'e9a42b02-d5df-448d-aa00-03f14749eb61' = 'Ultimate performance'
+}
+
+function ConvertFrom-QpPowerCfg {
+    <# The active power plan from powercfg /getactivescheme: Windows' own plans by name, any other by its own name. #>
+    param([string]$Text)
+    if ($Text -notmatch '([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\s*\(([^)]*)\)') { return $null }
+    $guid = $matches[1].ToLowerInvariant(); $own = $matches[2].Trim()
+    $name = if ($script:PowerPlanNames.ContainsKey($guid)) { $script:PowerPlanNames[$guid] } elseif ($own) { $own } else { $null }
+    if (-not $name) { return $null }
+    return [pscustomobject]@{ Guid = $guid; Name = $name }
+}
+
+function ConvertTo-QpSystemFacts {
+    <#
+        Turns what Windows said into the facts shown, leaving out anything missing, unclear or
+        contradictory. Kept apart from the reading so the rules can be tested with made-up PCs.
+    #>
+    param($Processors, $Sticks, $Arrays, $System, $OS, $WindowsKey, $Video, [string]$PowerCfg)
+    $num = { param($v) if ($null -ne $v -and "$v" -ne '' -and [double]$v -gt 0) { [double]$v } else { $null } }
+    $procs = @($Processors | Where-Object { $_ })
+    $cores = $null; $threads = $null
+    if ($procs.Count) {
+        $c = @($procs | ForEach-Object { & $num $_.NumberOfCores }); $l = @($procs | ForEach-Object { & $num $_.NumberOfLogicalProcessors })
+        if ($c -notcontains $null) { $cores = [int](($c | Measure-Object -Sum).Sum) }
+        if ($l -notcontains $null) { $threads = [int](($l | Measure-Object -Sum).Sum) }
+    }
+    # Memory: the type and the speed it is actually running at, only when every stick agrees.
+    $sticks = @($Sticks | Where-Object { $_ -and (& $num $_.Capacity) })
+    $memType = $null; $memSpeed = $null; $installed = $null; $slots = $null
+    if ($sticks.Count) {
+        $installed = $sticks.Count
+        $types = @($sticks | ForEach-Object { $script:MemoryTypeNames[[int]$_.SMBIOSMemoryType] } | Select-Object -Unique)
+        if ($types.Count -eq 1 -and $types[0]) { $memType = $types[0] }
+        $speeds = @($sticks | ForEach-Object { & $num $_.ConfiguredClockSpeed } | Select-Object -Unique)
+        if ($speeds.Count -eq 1 -and $null -ne $speeds[0]) { $memSpeed = [int]$speeds[0] }
+    }
+    # Slots come from the board's own count, never worked out from the sticks. Use 3 is system memory.
+    $boards = @($Arrays | Where-Object { $_ -and [int]$_.Use -eq 3 -and (& $num $_.MemoryDevices) })
+    if ($boards.Count) {
+        $slots = [int](($boards | ForEach-Object { [int]$_.MemoryDevices } | Measure-Object -Sum).Sum)
+        if ($null -ne $installed -and $slots -lt $installed) { $slots = $null }   # contradicts itself: say nothing
+    }
+    # Maker and model, unless the maker left the placeholder text in.
+    $placeholder = '(?i)^(to be filled by o\.?e\.?m\.?|system manufacturer|system product name|default string|not applicable|o\.?e\.?m\.?|none|unknown|x+)$'
+    $maker = $null; $model = $null
+    if ($System) {
+        $mk = ([string]$System.Manufacturer).Trim(); $md = ([string]$System.Model).Trim()
+        if ($mk -and $mk -notmatch $placeholder) { $maker = ($mk -replace '(?i),?\s+(co\.?,?\s*ltd\.?|inc\.?|corporation|corp\.?|ltd\.?|llc|gmbh)$', '').Trim() }
+        if ($md -and $md -notmatch $placeholder) { $model = $md }
+    }
+    # Windows: its own name for itself. The registry's ProductName still says "Windows 10" on Windows 11,
+    # so the name comes from the operating system record instead.
+    $windows = $null; $version = $null; $build = $null
+    if ($OS -and $OS.Caption) { $windows = ([string]$OS.Caption -replace '^Microsoft\s+', '').Trim() }
+    if ($WindowsKey) {
+        if ($WindowsKey.DisplayVersion) { $version = [string]$WindowsKey.DisplayVersion }
+        if ($WindowsKey.CurrentBuild) { $build = [string]$WindowsKey.CurrentBuild + $(if ($null -ne $WindowsKey.UBR) { '.' + $WindowsKey.UBR } else { '' }) }
+    }
+    # Screens: what each graphics card says it is showing right now. A refresh rate of 0 or 1 means
+    # "the default", which is not a number, so it is left off.
+    $screens = @(foreach ($v in @($Video | Where-Object { $_ })) {
+        $w = & $num $v.CurrentHorizontalResolution; $h = & $num $v.CurrentVerticalResolution
+        if (-not $w -or -not $h) { continue }
+        $hz = & $num $v.CurrentRefreshRate
+        if ($hz -and $hz -gt 1) { '{0} x {1}, {2} Hz' -f [int]$w, [int]$h, [int]$hz } else { '{0} x {1}' -f [int]$w, [int]$h }
+    })
+    $plan = ConvertFrom-QpPowerCfg $PowerCfg
+    [pscustomobject]@{
+        Cores = $cores; Threads = $threads
+        MemoryType = $memType; MemorySpeedMTs = $memSpeed; MemorySticks = $installed; MemorySlots = $slots
+        Maker = $maker; Model = $model
+        Windows = $windows; WindowsVersion = $version; WindowsBuild = $build
+        Screens = $screens
+        PowerPlan = $(if ($plan) { $plan.Name } else { $null })
+    }
+}
+
+function Get-QpSystemFacts {
+    <# Reads the facts above. Each part is asked on its own, so one that fails leaves only itself empty. Never throws. #>
+    $get = { param($class) try { @(Get-CimInstance -ClassName $class -ErrorAction Stop) } catch { @() } }
+    $key = $null
+    try { $key = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' -ErrorAction Stop } catch { }
+    $os = @(& $get 'Win32_OperatingSystem') | Select-Object -First 1
+    $power = ''
+    try { $power = (& powercfg.exe /getactivescheme 2>$null | Out-String) } catch { }
+    ConvertTo-QpSystemFacts -Processors (& $get 'Win32_Processor') -Sticks (& $get 'Win32_PhysicalMemory') -Arrays (& $get 'Win32_PhysicalMemoryArray') `
+        -System (@(& $get 'Win32_ComputerSystem') | Select-Object -First 1) -OS $os -WindowsKey $key -Video (& $get 'Win32_VideoController') -PowerCfg $power
+}
+# ------------------------------------------------------------------ network speed, from Windows' own counters
+# How fast this PC is sending and receiving, read from the counters Task Manager uses. Nothing is
+# connected to and nothing is looked up: it is Windows' own tally of bytes through each network card.
+#
+# Only real network cards count - the Wi-Fi or wired card the traffic actually goes through. Virtual
+# adapters (Hyper-V, WSL, VPNs, tunnels, Bluetooth) carry the same traffic a second time on its way
+# through, so counting them too would double it. Where it cannot be told which is which, a card is left
+# out rather than guessed at: a figure too low is better than one counted twice.
+
+function ConvertTo-QpCounterInstance([string]$Description) {
+    <# The name Windows' counters use for a network card: brackets and a few characters swapped. #>
+    return ($Description -replace '\(', '[' -replace '\)', ']' -replace '#', '_' -replace '/', '_' -replace '\\', '_')
+}
+
+function Select-QpNetworkCards {
+    <#
+        From Get-NetAdapter's list, the physical Wi-Fi and wired cards, and whether each is connected.
+        -Instances is the list of names the counters know; a card missing from it is left out.
+    #>
+    param($Adapters, [string[]]$Instances)
+    $kinds = @{ 9 = 'Wi-Fi'; 14 = 'Wired' }   # NdisPhysicalMedium: Native 802.11, and 802.3 Ethernet
+    foreach ($a in @($Adapters)) {
+        if (-not $a) { continue }
+        if (-not $a.HardwareInterface -or $a.Virtual) { continue }
+        $kind = $kinds[[int]$a.NdisPhysicalMedium]
+        if (-not $kind) { continue }
+        # Belt and braces: a few drivers of virtual cards claim to be hardware.
+        if ("$($a.InterfaceDescription)" -match '(?i)virtual|hyper-v|vpn|tap-windows|wireguard|tunnel|loopback|miniport|wsl|vmware|virtualbox') { continue }
+        $inst = ConvertTo-QpCounterInstance ([string]$a.InterfaceDescription)
+        if ($Instances -notcontains $inst) { continue }
+        [pscustomobject]@{ Kind = $kind; Description = [string]$a.InterfaceDescription; Instance = $inst; Up = ("$($a.Status)" -eq 'Up') }
+    }
+}
+
+function Update-QpNetMonitor {
+    <# Which network cards to count, asked again every minute, since Wi-Fi comes and goes. Never throws. #>
+    param([Parameter(Mandatory)]$Monitor)
+    $m = $Monitor
+    $m.NetAt = Get-Date
+    try {
+        $group = New-QpCounterGroup 'Network Interface'
+        if (-not $group) { $m.Net = $null; return }
+        $instances = @($group.GetInstanceNames())
+        $cards = @(Select-QpNetworkCards -Adapters @(Get-NetAdapter -ErrorAction Stop) -Instances $instances)
+        $old = @{}
+        foreach ($c in @($m.Net)) { if ($c) { $old[$c.Instance] = $c } }
+        $m.Net = @(foreach ($c in $cards) {
+            $prev = $old[$c.Instance]
+            $recv = if ($prev) { $prev.Received } else { New-QpCounter 'Network Interface' 'Bytes Received/sec' $c.Instance }
+            $sent = if ($prev) { $prev.Sent } else { New-QpCounter 'Network Interface' 'Bytes Sent/sec' $c.Instance }
+            if ($recv -and $sent) { [pscustomobject]@{ Kind = $c.Kind; Instance = $c.Instance; Up = $c.Up; Received = $recv; Sent = $sent } }
+        })
+    } catch { $m.Net = $null }
+}
+
+function Get-QpNetRates {
+    <#
+        Bytes a second, down and up, for Wi-Fi and for wired, over the connected cards of each kind.
+        $null when Windows won't say which cards are which; a kind with nothing connected is left out.
+    #>
+    param([Parameter(Mandatory)]$Monitor)
+    $m = $Monitor
+    # A monitor made before network speed was added (or by a test) simply has none to give.
+    if ($m.PSObject.Properties.Name -notcontains 'NetAt') { return $null }
+    if ($null -eq $m.NetAt -or ((Get-Date) - [datetime]$m.NetAt).TotalSeconds -ge 60) { Update-QpNetMonitor -Monitor $m }
+    if ($null -eq $m.Net) { return $null }
+    $out = @()
+    foreach ($kind in 'Wi-Fi', 'Wired') {
+        $cards = @($m.Net | Where-Object { $_.Kind -eq $kind -and $_.Up })
+        if (-not $cards.Count) { continue }
+        $down = [double]0; $up = [double]0; $ok = $false
+        foreach ($c in $cards) {
+            try { $down += [math]::Max(0, [double]$c.Received.NextValue()); $up += [math]::Max(0, [double]$c.Sent.NextValue()); $ok = $true } catch { }
+        }
+        if ($ok) { $out += [pscustomobject]@{ Kind = $kind; DownBps = $down; UpBps = $up } }
+    }
+    return ,$out
+}
 function New-QpLiveMonitor {
     <# Sets the readers up once, so every reading after that is cheap. Never throws. #>
     $m = [pscustomobject]@{
@@ -637,6 +843,7 @@ function New-QpLiveMonitor {
         ZoneSeen = New-Object System.Collections.Generic.List[double]
         Procs = $null; ProcPrev = $null; Names = @{}; Cores = [math]::Max(1, [Environment]::ProcessorCount)
         Power = $false; BatteryRate = $null
+        DiskRead = $null; DiskWrite = $null; Net = $null; NetAt = [datetime]::MinValue
     }
     # Task Manager's own processor figure first, the older one if this Windows doesn't have it.
     $m.Cpu = New-QpCounter 'Processor Information' '% Processor Utility' '_Total'
@@ -672,6 +879,11 @@ function New-QpLiveMonitor {
     $m.SpeedMhz = New-QpCounter 'Processor Information' 'Processor Frequency' '_Total'
     $m.DiskIdle = New-QpCounter 'PhysicalDisk' '% Idle Time' '_Total'
     $m.DiskQueue = New-QpCounter 'PhysicalDisk' 'Avg. Disk Queue Length' '_Total'
+    # How fast the drives are reading and writing. These are Windows' own per-second rates (primed above,
+    # so the first figure is already a rate), counted across all drives as the busy figure is.
+    $m.DiskRead = New-QpCounter 'PhysicalDisk' 'Disk Read Bytes/sec' '_Total'
+    $m.DiskWrite = New-QpCounter 'PhysicalDisk' 'Disk Write Bytes/sec' '_Total'
+    Update-QpNetMonitor -Monitor $m
     $m.Engines = New-QpCounterGroup 'GPU Engine'
     if ($m.Engines) { try { $m.EnginePrev = $m.Engines.ReadCategory() } catch { $m.Engines = $null } }
     $m.GpuMemory = New-QpCounterGroup 'GPU Adapter Memory'
@@ -795,6 +1007,10 @@ function Get-QpLiveReading {
         } catch { }
     }
     if ($m.DiskQueue) { try { $diskQueue = [math]::Round([double]$m.DiskQueue.NextValue(), 1) } catch { } }
+    $diskRead = $null; $diskWrite = $null
+    if ($m.DiskRead) { try { $diskRead = [math]::Max(0, [double]$m.DiskRead.NextValue()) } catch { } }
+    if ($m.DiskWrite) { try { $diskWrite = [math]::Max(0, [double]$m.DiskWrite.NextValue()) } catch { } }
+    $network = Get-QpNetRates -Monitor $m
 
     # Which programs are using the processor. Windows counts per core, so divide by cores to match
     # Task Manager. Programs are keyed by process id, then added up under their friendly name.
@@ -880,13 +1096,19 @@ function Get-QpLiveReading {
             DedicatedTotal = [double]$a.DedicatedBytes; DedicatedUsed = [double]$dedicated[$k]
             SharedTotal = [double]$a.SharedBytes; SharedUsed = [double]$shared[$k]
             Discrete = ([double]$a.DedicatedBytes -ge 512MB)
+            # Clocks and fan exactly as the driver gives them. A driver that says 0 has said nothing, so it
+            # is left empty - except a fan the driver says it has (a top speed above 0), which can truly stop.
+            EngineClockMhz = $(if ([double]$a.EngineClockHz -gt 0) { [math]::Round([double]$a.EngineClockHz / 1e6) } else { $null })
+            MemoryClockMhz = $(if ([double]$a.MemoryClockHz -gt 0) { [math]::Round([double]$a.MemoryClockHz / 1e6) } else { $null })
+            FanRpm = $(if ([double]$a.MaxFanRpm -gt 0 -or [double]$a.FanRpm -gt 0) { [int]$a.FanRpm } else { $null })
         }
     })
     if (-not $gpus.Count -and $busy.Count) {
         # The driver questions aren't available here: still show how busy graphics is, just without names.
         $gpus = @(foreach ($k in $busy.Keys) {
             [pscustomobject]@{ Name = 'Graphics'; Luid = $k; Usage = [math]::Round([math]::Min([double]100, [double]$busy[$k]), 1); TempC = $null; TempMaxC = $null
-                DedicatedTotal = 0; DedicatedUsed = [double]$dedicated[$k]; SharedTotal = 0; SharedUsed = [double]$shared[$k]; Discrete = ([double]$dedicated[$k] -gt 0) }
+                DedicatedTotal = 0; DedicatedUsed = [double]$dedicated[$k]; SharedTotal = 0; SharedUsed = [double]$shared[$k]; Discrete = ([double]$dedicated[$k] -gt 0)
+                EngineClockMhz = $null; MemoryClockMhz = $null; FanRpm = $null }
         })
     }
     # What's using each card, busiest first. Anything under 1% isn't worth a line.
@@ -954,6 +1176,8 @@ function Get-QpLiveReading {
         CommitUsed = $commitUsed; CommitLimit = $commitLimit; CommitPct = $commitPct
         SpeedPct = $speedPct; SpeedMhz = $speedMhz
         DiskBusyPct = $diskBusy; DiskQueue = $diskQueue
+        DiskReadBps = $diskRead; DiskWriteBps = $diskWrite
+        Network = $network
         Battery = $battery
         # The card with its own memory first: on a gaming laptop that's the one that matters.
         Gpus = @($gpus | Sort-Object @{ Expression = { $_.Discrete }; Descending = $true }, @{ Expression = { $_.DedicatedTotal }; Descending = $true })
@@ -977,6 +1201,51 @@ function Get-QpHeatWord {
         elseif ($c -ge $t.Comfortable) { 'comfortable', 'ok' }
         else { 'cool', 'ok' }
     [pscustomobject]@{ Word = $word; Level = $level }
+}
+
+# The unit temperatures are written in, chosen in Settings. Every reading and every threshold stays in
+# Celsius; only what is written on screen changes.
+$script:TempUnitFile = Join-Path $script:DataRoot 'temperature.txt'
+$script:TempUnit = $null
+
+function Get-QpTempUnit {
+    <# 'C', unless Fahrenheit was chosen in Settings. Read from temperature.txt once, then remembered. #>
+    param([string]$Path = $script:TempUnitFile)
+    if ($script:TempUnit -and $Path -eq $script:TempUnitFile) { return $script:TempUnit }
+    $unit = 'C'
+    try { if (Test-Path -LiteralPath $Path) { if (([IO.File]::ReadAllText($Path)).Trim() -eq 'F') { $unit = 'F' } } } catch { }
+    if ($Path -eq $script:TempUnitFile) { $script:TempUnit = $unit }
+    return $unit
+}
+
+function Set-QpTempUnit {
+    <#
+        Remembers the choice as one letter in temperature.txt, next to appearance.txt. Returns $true only
+        once it is written, so the Settings page never shows a choice that did not stick. -SessionOnly
+        changes it for this window alone and writes nothing (the self-test, which must change nothing).
+    #>
+    param([Parameter(Mandatory)][ValidateSet('C', 'F')][string]$Unit, [string]$Path = $script:TempUnitFile, [switch]$SessionOnly)
+    if ($SessionOnly) { $script:TempUnit = $Unit; return $true }
+    try {
+        $dir = Split-Path -Parent $Path
+        if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+        [IO.File]::WriteAllText($Path, $Unit)
+    } catch { return $false }
+    if ($Path -eq $script:TempUnitFile) { $script:TempUnit = $Unit }
+    return $true
+}
+
+function Format-QpTemp {
+    <#
+        One temperature, as it is written everywhere: "47?C", or "117?F" when Fahrenheit was chosen.
+        Nothing to show gives $null - never a made-up number.
+    #>
+    param($Celsius, [ValidateSet('', 'C', 'F')][string]$Unit = '')
+    if ($null -eq $Celsius -or "$Celsius" -eq '') { return $null }
+    if (-not $Unit) { $Unit = Get-QpTempUnit }
+    $deg = [char]0x00B0
+    if ($Unit -eq 'F') { return ('{0:N0}{1}F' -f ([double]$Celsius * 9 / 5 + 32), $deg) }
+    return ('{0:N0}{1}C' -f [double]$Celsius, $deg)
 }
 
 function Get-QpLiveVerdict {
@@ -1313,8 +1582,8 @@ function Get-QpSessionSummary {
     }
 
     $heat = @()
-    if ($null -ne $Watch.PeakCpuTempC) { $heat += 'the processor reached {0:N0} C' -f $Watch.PeakCpuTempC }
-    if ($null -ne $Watch.PeakGpuTempC) { $heat += 'graphics reached {0:N0} C' -f $Watch.PeakGpuTempC }
+    if ($null -ne $Watch.PeakCpuTempC) { $heat += 'the processor reached ' + (Format-QpTemp $Watch.PeakCpuTempC) }
+    if ($null -ne $Watch.PeakGpuTempC) { $heat += 'graphics reached ' + (Format-QpTemp $Watch.PeakGpuTempC) }
     if ($heat.Count) { [void]$lines.Add('At its hottest ' + ($heat -join ', ') + '.') }
     if ($Watch.VeryHotSeconds -ge 1) { [void]$lines.Add('Very hot for {0}.' -f (Format-QpSpan $Watch.VeryHotSeconds)) }
     elseif ($Watch.HotSeconds -ge 1) { [void]$lines.Add('Hot for {0}.' -f (Format-QpSpan $Watch.HotSeconds)) }
@@ -5743,8 +6012,8 @@ $(if ($logo) { '<img src="' + $logo + '" alt="">' })
 
     # The pills: only what this PC actually reported.
     $pills = New-Object System.Collections.ArrayList
-    if ($null -ne $Watch.PeakCpuTempC) { [void]$pills.Add(('{0:N0} C|hottest the processor got' -f $Watch.PeakCpuTempC)) }
-    if ($null -ne $Watch.PeakGpuTempC) { [void]$pills.Add(('{0:N0} C|hottest graphics got' -f $Watch.PeakGpuTempC)) }
+    if ($null -ne $Watch.PeakCpuTempC) { [void]$pills.Add(((Format-QpTemp $Watch.PeakCpuTempC) + '|hottest the processor got')) }
+    if ($null -ne $Watch.PeakGpuTempC) { [void]$pills.Add(((Format-QpTemp $Watch.PeakGpuTempC) + '|hottest graphics got')) }
     if ($null -ne $Watch.PeakCpu) { [void]$pills.Add(('{0:N0}%|busiest the processor got' -f $Watch.PeakCpu)) }
     if ($null -ne $Watch.PeakMemUsed) { [void]$pills.Add(('{0}|most memory in use' -f (Format-QpBytes $Watch.PeakMemUsed))) }
     if ($null -ne $Watch.PeakCommitPct) { [void]$pills.Add(('{0:N0}%|most memory promised' -f $Watch.PeakCommitPct)) }
@@ -5910,9 +6179,10 @@ $($script:ReportCss)
 
 #endregion
 
-Export-ModuleMember -Function Get-QpInfo, Set-QpLogSink, Write-QpLog, Test-QpAdmin, Get-QpCatalog, Format-QpBytes,
+Export-ModuleMember -Function Get-QpInfo, Set-QpLogSink, Write-QpLog, Test-QpAdmin, Get-QpCatalog, Format-QpBytes, Format-QpRate,
     Set-QpProgressSink, Write-QpProgress, Set-QpCancelCheck, Test-QpCancelled, New-QpScanSummary,
-    Get-QpState, Get-QpSystemUsage, Get-QpTotals, New-QpLiveMonitor, Get-QpLiveReading, Get-QpHeatWord, Get-QpLiveVerdict, Get-QpProgramName,
+    Get-QpState, Get-QpSystemUsage, Get-QpTotals, New-QpLiveMonitor, Get-QpLiveReading, Get-QpHeatWord, Get-QpTempUnit, Set-QpTempUnit, Format-QpTemp, Get-QpLiveVerdict, Get-QpSystemFacts, ConvertTo-QpSystemFacts, ConvertFrom-QpPowerCfg,
+    Select-QpNetworkCards, ConvertTo-QpCounterInstance, Get-QpNetRates, Get-QpProgramName,
     New-QpCounter, New-QpCounterGroup,
     New-QpSessionWatch, Add-QpSessionSample, Stop-QpSessionWatch, Get-QpSessionSummary, Format-QpSpan,
     Update-QpSessionAlerts, Get-QpReliability, New-QpSessionReportHtml, Save-QpSessionReport, Get-QpSessionBands,
