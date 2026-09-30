@@ -980,6 +980,36 @@ function New-SettingRow([string]$Label, [string]$Note, $Control) {
     return [pscustomobject]@{ Border = $row; Label = $name; Note = $noteBlock; Control = $Control }
 }
 
+# At a glance: the top of each list tab, one short box summing up the sections below it - a count, and
+# a bar where "how much of it" is the point. Filled in by the same code that fills the sections.
+$script:GlanceBoxes = @{}
+$script:Glance = @{}
+$script:GlanceOrder = @{
+    privacy = 'addons', 'devices', 'settings'
+    vendors = 'brands', 'open'
+    apps    = 'startup', 'remove'
+    cleanup = 'drive', 'leftovers'
+    undo    = 'points', 'newest'
+}
+function New-GlanceBox([string]$Tab) {
+    $box = New-DetailsBox 'At a glance'
+    $box.Border.Margin = Get-Thick '0,4,0,12'
+    $script:GlanceBoxes[$Tab] = $box
+    $script:Glance[$Tab] = @{}
+    return $box.Border
+}
+function Set-Glance([string]$Tab, [string]$Key, [string]$Label, $Value, $Ratio = $null, [string]$Tone = '', [string]$Tip = '') {
+    <# One line of a tab's summary, then the box drawn again in its set order. A value of $null leaves the line out. #>
+    if (-not $script:GlanceBoxes.ContainsKey($Tab)) { return }
+    $script:Glance[$Tab][$Key] = [pscustomobject]@{ Label = $Label; Value = $Value; Ratio = $Ratio; Tone = $Tone; Tip = $Tip }
+    $box = $script:GlanceBoxes[$Tab]
+    Clear-DetailsBox $box
+    foreach ($k in $script:GlanceOrder[$Tab]) {
+        $g = $script:Glance[$Tab][$k]
+        if ($g) { [void](Add-DetailRow $box $g.Label $g.Value -Ratio $g.Ratio -Tone $g.Tone -Tip $g.Tip) }
+    }
+}
+
 $script:Options = @{}
 foreach ($k in 'privacy', 'devices', 'extensions', 'vendors', 'apps', 'startup', 'cleanup') { $script:Options[$k] = New-Object System.Collections.ArrayList }
 
@@ -991,18 +1021,25 @@ function Add-Option {
     param($Panel, [string]$Key, [string]$Id, [string]$Title, [string]$Description, [bool]$Recommended, [string]$Short = '')
     $cb = New-Object System.Windows.Controls.CheckBox
     $cb.Tag = $Id
-    $cb.Margin = Get-Thick '0,10,0,0'
     $cb.VerticalContentAlignment = 'Center'
     $label = New-Text $Title 13.5 'SemiBold' '#0F1B1C' '2,0,0,0'
     $cb.Content = $label
     # Keep the Apply button's count honest as things are ticked and unticked.
     $cb.Add_Checked({ Update-TickCount })
     $cb.Add_Unchecked({ Update-TickCount })
-    [void]$Panel.Children.Add($cb)
+    # One row per choice, with a hairline under it, so a long list reads as a list rather than a page.
+    $row = New-Object System.Windows.Controls.Border
+    $row.Padding = Get-Thick '0,8,0,8'
+    $row.BorderBrush = Get-Brush '#E6DFCC'
+    $row.BorderThickness = Get-Thick '0,0,0,1'
+    $rowStack = New-Object System.Windows.Controls.StackPanel
+    [void]$rowStack.Children.Add($cb)
+    $row.Child = $rowStack
+    [void]$Panel.Children.Add($row)
     $shown = if ($Short) { $Short } else { $Description }
     if ($shown) {
-        $desc = New-Text $shown 12.5 'Normal' '#4B5B5C' '22,2,0,0'
-        [void]$Panel.Children.Add($desc)
+        $desc = New-Text $shown 12.5 'Normal' '#66706F' '22,2,0,0'
+        [void]$rowStack.Children.Add($desc)
         if ($Short -and $Description -and $Description -ne $Short) { Set-MoreInfo $cb $Description; Set-MoreInfo $desc $Description }
     }
     [void]$script:Options[$Key].Add([pscustomobject]@{ Id = $Id; CheckBox = $cb; Recommended = $Recommended; Label = $label; Title = $Title; Status = 'Unknown' })
@@ -1357,6 +1394,7 @@ function New-Section([string]$Header) {
     return [pscustomobject]@{ Expander = $ex; Content = $sp }
 }
 $privacyPanel = New-TabPage 'Privacy' 'privacy' ('What your PC shares, and the tracking and ads you can switch off. Security and Windows Update are never touched.')
+[void]$privacyPanel.Children.Add((New-GlanceBox 'privacy'))
 
 # Add-ons see more of your browsing than anything else on this PC, so they come first.
 $script:AddonSection = New-Section 'Your browser add-ons'
@@ -1407,6 +1445,7 @@ $vendorPanel = New-TabPage 'Telemetry' 'vendors' ('')
 $vendorIntroText = New-Text 'Background extras from the companies that made your PC, and what they report. Drivers are never touched, and the apps still work.' 13.5 'Normal' '#4B5B5C' '0,0,0,12'
 Set-MoreInfo $vendorIntroText 'The laptop maker, the graphics chip, the processor: most PCs arrive with helpers from each, and many quietly report home. Only what is actually on this PC is listed.'
 [void]$vendorPanel.Children.Add($vendorIntroText)
+[void]$vendorPanel.Children.Add((New-GlanceBox 'vendors'))
 $script:VendorIntro = New-Text 'Having a look at what came with this PC...' 13 'SemiBold' '#0F1B1C' '0,0,0,6'
 [void]$vendorPanel.Children.Add($script:VendorIntro)
 $script:VendorList = New-Object System.Windows.Controls.StackPanel
@@ -1414,6 +1453,7 @@ $script:VendorList = New-Object System.Windows.Controls.StackPanel
 
 # 4. Apps - what starts when you sign in, and apps you could remove
 $appsPanel = New-TabPage 'Apps' 'apps' ('What starts when you sign in, and apps you never asked for. Tick, then Preview or Apply.')
+[void]$appsPanel.Children.Add((New-GlanceBox 'apps'))
 
 $script:StartupSection = New-Section 'Starts when you sign in'
 $script:StartupSection.Expander.IsExpanded = $true
@@ -1441,6 +1481,7 @@ $script:AppsList = New-Object System.Windows.Controls.StackPanel
 
 # 5. Clean-up
 $cleanupPanel = New-TabPage 'Free up space' 'cleanup' ('Leftovers nobody needs, like temporary files and old installers. They go to your Recycle Bin. Close your browsers first.')
+[void]$cleanupPanel.Children.Add((New-GlanceBox 'cleanup'))
 $script:CleanupList = New-Object System.Windows.Controls.StackPanel
 [void]$script:CleanupList.Children.Add((New-Text 'Measuring sizes...' 13 'Normal' '#4B5B5C'))
 [void]$cleanupPanel.Children.Add($script:CleanupList)
@@ -1487,6 +1528,7 @@ foreach ($e in $script:SpaceWinsHead, $script:SpaceWinsNote, $script:SpaceCrumb,
 # 6. Undo
 $undoPanel = New-TabPage 'Undo' 'undo' ('Every change is saved as a restore point. Pick one to put it back.')
 Set-MoreInfo $undoPanel.Children[0] 'Settings go back exactly as they were. Cleaned-up files are waiting in your Recycle Bin, and removed apps come back from the Microsoft Store.'
+[void]$undoPanel.Children.Add((New-GlanceBox 'undo'))
 $script:UndoList = New-Object System.Windows.Controls.ListBox
 $script:UndoList.MinHeight = 160
 [System.Windows.Automation.AutomationProperties]::SetName($script:UndoList, 'Restore points, newest first')
@@ -2083,6 +2125,9 @@ function Update-FromState($state) {
         try { & $Body } catch { $ui.LogBox.AppendText(('[{0}] WARN    Could not show {1}: {2}' -f (Get-Date -Format 'HH:mm:ss'), $What, $_.Exception.Message) + [Environment]::NewLine) }
     }
     foreach ($o in $script:Options['privacy']) { Set-OptionStatus $o ([string]$state.Privacy[$o.Id]) }
+    $privAll = @($script:Options['privacy'] | Where-Object { $_.Status -ne 'NotApplicable' })
+    $privOff = @($privAll | Where-Object { $_.Status -eq 'Applied' })
+    if ($privAll.Count) { Set-Glance 'privacy' 'settings' 'Settings already switched off' ('{0} of {1}' -f $privOff.Count, $privAll.Count) -Ratio ($privOff.Count / $privAll.Count) -Tip 'The tracking, ads and suggestions below that are already off on this PC. The bar is how many.' }
     Show-Part 'the brand extras' { Update-VendorTab @($state.Vendors) }
     Show-Part 'what starts at sign-in' { Update-StartupList @($state.Startup | Where-Object { $_ }) $state.SignIn }
     Show-Part 'camera, microphone and location use' { Update-DeviceList @($state.Devices | Where-Object { $_ }) }
@@ -2094,10 +2139,13 @@ function Update-FromState($state) {
     $script:Options['apps'].Clear()
     $apps = @($state.Apps | Where-Object { $_ })
     $script:RemoveSection.Expander.Header = New-Text ('Apps you could remove   ({0} found)' -f $apps.Count) 14.5 'SemiBold' '#117A68' '0' 'Fraunces, Georgia'
+    Set-Glance 'apps' 'remove' 'Apps you could remove' $(if ($apps.Count) { '{0} found' -f $apps.Count } else { 'none found' }) -Tone $(if ($apps.Count) { 'warn' } else { 'good' })
     if ($apps.Count -eq 0) { [void]$script:AppsList.Children.Add((New-Text 'No known bloat apps found on this PC.' 13 'SemiBold' '#117A68')) }
     foreach ($a in $apps) { Add-Option -Panel $script:AppsList -Key 'apps' -Id $a.Name -Title $a.Title -Short $a.Description -Description ('{0}  (Windows calls it {1}.)' -f $a.Description, $a.Name) -Recommended ([bool]$a.Recommended) }
     $script:CleanupList.Children.Clear()
     $script:Options['cleanup'].Clear()
+    $leftover = [double](@($state.Cleanup | Where-Object { $_ } | ForEach-Object { [double]$_.SizeBytes }) | Measure-Object -Sum).Sum
+    Set-Glance 'cleanup' 'leftovers' 'Leftovers you could clear' $(if ($leftover -gt 0) { Format-QpBytes $leftover } else { 'none - already tidy' }) -Tip 'Temporary files, crash dumps and old installers, listed below. They go to your Recycle Bin.'
     foreach ($c in @($state.Cleanup | Where-Object { $_ })) {
         $title = '{0}   ({1})' -f $c.Title, (Format-QpBytes $c.SizeBytes)
         Add-Option -Panel $script:CleanupList -Key 'cleanup' -Id $c.Id -Title $title -Description $c.Description -Recommended ([bool]$c.Recommended)
@@ -2231,7 +2279,10 @@ function Update-StartupList($items, $signIn) {
     $off    = @($items | Where-Object { -not $_.On -and -not $_.Keep } | Sort-Object Name)
     $kept   = @($items | Where-Object { $_.Keep })
     $locked = @($items | Where-Object { $_.Locked -and $_.On -and -not $_.Keep })
-    $script:StartupSection.Expander.Header = New-Text ('Starts when you sign in   ({0} on, {1} off)' -f ($on.Count + @($kept | Where-Object On).Count + $locked.Count), ($off.Count + @($kept | Where-Object { -not $_.On }).Count)) 14.5 'SemiBold' '#117A68' '0' 'Fraunces, Georgia'
+    $startOn = $on.Count + @($kept | Where-Object On).Count + $locked.Count
+    $startOff = $off.Count + @($kept | Where-Object { -not $_.On }).Count
+    $script:StartupSection.Expander.Header = New-Text ('Starts when you sign in   ({0} on, {1} off)' -f $startOn, $startOff) 14.5 'SemiBold' '#117A68' '0' 'Fraunces, Georgia'
+    Set-Glance 'apps' 'startup' 'Start when you sign in' ('{0} on, {1} off' -f $startOn, $startOff) -Ratio $(if ($startOn + $startOff) { $startOn / ($startOn + $startOff) } else { $null }) -Tip 'The bar is how many of them still start when you sign in.'
     if (-not $on.Count) { [void]$script:StartupList.Children.Add((New-Text 'Nothing extra starts when you sign in.' 13 'SemiBold' '#117A68' '0,8,0,0')) }
     else {
         # What this is costing you, measured: memory in use now, and Windows' own timing where it has one.
@@ -2294,6 +2345,7 @@ function Update-AddonList($addons) {
            elseif ($wide.Count) { '{0}, {1} read every site' -f $yours.Count, $wide.Count }
            else { '{0}, none reads every site' -f $yours.Count }
     $script:AddonSection.Expander.Header = New-Text ("Your browser add-ons   ($sum)") 14.5 'SemiBold' $(if ($wide.Count) { '#9A6700' } else { '#117A68' }) '0' 'Fraunces, Georgia'
+    Set-Glance 'privacy' 'addons' 'Browser add-ons' $sum -Tone $(if ($wide.Count) { 'warn' } else { '' }) -Tip 'An add-on that reads every site you visit sees more of your browsing than anything else on this PC.'
     if (-not $all.Count) {
         [void]$script:AddonList.Children.Add((New-Text 'No browser that Quietpane knows about is installed here.' 13 'Normal' '#4B5B5C' '0,6,0,0'))
         return
@@ -2394,6 +2446,7 @@ function Update-DeviceList($devices) {
     }
     $sum = if ($live.Count) { ($live -join ' and ') + ' in use right now' } elseif ($users.Count -eq 1) { '1 app has used them' } else { "$($users.Count) apps have used them" }
     $script:DeviceSection.Expander.Header = New-Text ("Who used your camera, microphone and location   ($sum)") 14.5 'SemiBold' $(if ($live.Count) { '#9A6700' } else { '#117A68' }) '0' 'Fraunces, Georgia'
+    Set-Glance 'privacy' 'devices' 'Camera, microphone and location' $sum -Tone $(if ($live.Count) { 'warn' } else { '' })
 }
 
 function Update-NetList($c) {
@@ -2800,10 +2853,14 @@ function Update-VendorTab($vendors) {
     $vendors = @($vendors | Where-Object { $_ })
     if ($vendors.Count -eq 0) {
         $script:VendorIntro.Text = 'Nothing to do here - no brand software that Quietpane recognises.'
+        Set-Glance 'vendors' 'brands' 'Brand software found' 'none that Quietpane knows'
+        Set-Glance 'vendors' 'open' 'Still switched on' 'nothing'
         return
     }
     $open = (@($vendors | ForEach-Object { $_.Open }) | Measure-Object -Sum).Sum
     $names = ($vendors | ForEach-Object { $_.Name }) -join ', '
+    Set-Glance 'vendors' 'brands' 'Brand software found' $names
+    Set-Glance 'vendors' 'open' 'Still switched on' $(if ($open -gt 0) { '{0} background extras' -f $open } else { 'nothing' }) -Tone $(if ($open -gt 0) { 'warn' } else { '' })
     $script:VendorIntro.Text = if ($open -gt 0) {
         'Found software from {0}. There are {1} background thing(s) still switched on.' -f $names, $open
     } else {
@@ -2905,6 +2962,7 @@ function Update-Meters {
     if ($u.DiskTotal -gt 0) {
         $script:MeterSpace.Value.Text = '{0} free' -f (Format-QpBytes $u.DiskFree)
         $script:MeterSpace.Caption.Text = 'of {0} on drive {1} - {2}% full' -f (Format-QpBytes $u.DiskTotal), $u.Drive, [int](100 * $u.DiskUsed / $u.DiskTotal)
+        Set-Glance 'cleanup' 'drive' ('Drive {0}' -f $u.Drive) ('{0} free of {1}' -f (Format-QpBytes $u.DiskFree), (Format-QpBytes $u.DiskTotal)) -Ratio ($u.DiskUsed / $u.DiskTotal) -Tone $(if ($u.DiskFree / $u.DiskTotal -lt 0.1) { 'warn' } else { '' }) -Tip 'The bar is how full the drive is.'
         Set-MeterFill $script:MeterSpace ($u.DiskUsed / $u.DiskTotal)
     }
     if ($u.MemTotal -gt 0) { Set-MemoryTile $u.MemUsed $u.MemTotal }
@@ -3183,7 +3241,7 @@ function Update-HealthDetails {
     $s = $script:SpaceLast
     if ($s -and $s.Total -gt 0) {
         $freeRatio = $s.Free / $s.Total
-        [void](Add-DetailRow $b 'Free space' ('{0} of {1}' -f (Format-QpBytes $s.Free), (Format-QpBytes $s.Total)) -Ratio (1 - $freeRatio) -Tone $(if ($freeRatio -lt 0.05) { 'high' } elseif ($freeRatio -lt 0.1) { 'warn' } else { '' }) -Tip 'The bar is how full the drive is.')
+        [void](Add-DetailRow $b 'Space' ('{0} free of {1}' -f (Format-QpBytes $s.Free), (Format-QpBytes $s.Total)) -Ratio (1 - $freeRatio) -Tone $(if ($freeRatio -lt 0.05) { 'high' } elseif ($freeRatio -lt 0.1) { 'warn' } else { '' }) -Tip 'The bar is how full the drive is.')
     }
 
     # Battery - laptops only. A desktop, or a battery that says nothing, has no box at all.
@@ -3618,6 +3676,10 @@ function Update-UndoList($points) {
         [void]$script:UndoList.Items.Add($li)
     }
     if ($script:UndoList.Items.Count -eq 0) { [void]$script:UndoList.Items.Add('No restore points yet.') }
+    $pts = @($points | Where-Object { $_ })
+    Set-Glance 'undo' 'points' 'Restore points' $(if ($pts.Count) { '{0}' -f $pts.Count } else { 'none yet' }) -Tip 'Every change Quietpane makes is saved as one first.'
+    # Restore points come newest first.
+    if ($pts.Count) { Set-Glance 'undo' 'newest' 'Newest' (Format-RestoreName $pts[0].Name) }
 }
 
 function Update-StateAfterChange {
@@ -4479,6 +4541,17 @@ function Test-FindingCards {
         $script:FindingsPanel.Children.Clear()
     }
 }
+function Get-ListTexts($Panel) {
+    <# Every line of words in a list, in order - the rows' names and notes included - for the self-test to read. #>
+    $out = New-Object System.Collections.ArrayList
+    function Walk($el) {
+        if ($el -is [System.Windows.Controls.CheckBox] -and $el.Content -is [System.Windows.Controls.TextBlock]) { [void]$out.Add($el.Content.Text); return }
+        if ($el -is [System.Windows.Controls.TextBlock]) { [void]$out.Add($el.Text); return }
+        foreach ($c in [System.Windows.LogicalTreeHelper]::GetChildren($el)) { if ($c -is [System.Windows.DependencyObject]) { Walk $c } }
+    }
+    foreach ($c in $Panel.Children) { Walk $c }
+    return @($out)
+}
 function Test-SignInCosts {
     <#
         Three startup programs with known costs: one Windows timed, one heavy, one not running. The
@@ -4500,9 +4573,7 @@ function Test-SignInCosts {
     }
     Update-StartupList $items $signIn
     $order = @($script:Options['startup'] | ForEach-Object { $_.Title }) -join ','
-    $text = @()
-    foreach ($child in $script:StartupList.Children) { if ($child -is [System.Windows.Controls.TextBlock]) { $text += $child.Text } }
-    $all = $text -join ' | '
+    $all = (Get-ListTexts $script:StartupList) -join ' | '
     $result = '{0}; total line: {1}; restart line: {2}; windows timing: {3}; copies: {4}' -f $order,
         [bool]($all -match 'using 580\.0 MB right now'), [bool]($all -match 'timed your last restart at 35\.5 seconds'),
         [bool]($all -match 'Windows timed it at 3.2 seconds'), [bool]($all -match 'in 2 copies')
@@ -4532,12 +4603,7 @@ function Test-AddonList {
     )
     Update-AddonList $addons
     $order = @($script:Options['extensions'] | ForEach-Object { ($_.Title -split '   ')[0] }) -join ','
-    $text = @()
-    foreach ($child in $script:AddonList.Children) {
-        if ($child -is [System.Windows.Controls.TextBlock]) { $text += $child.Text }
-        elseif ($child -is [System.Windows.Controls.CheckBox] -and $child.Content -is [System.Windows.Controls.TextBlock]) { $text += $child.Content.Text }
-    }
-    $all = ($text -join ' | ') + ' | ' + [string]$script:AddonSection.Expander.Header.Text
+    $all = ((Get-ListTexts $script:AddonList) -join ' | ') + ' | ' + [string]$script:AddonSection.Expander.Header.Text
     $result = '{0}; reads every site: {1}; count: {2}; parts summed up: {3}; firefox: {4}' -f $order,
         [bool]($all -match 'Reads and changes everything on every site you visit'), [bool]($all -match '3, 2 read every site'),
         [bool]($all -match '1 more are part of the browsers themselves'), [bool]($all -match 'switch this off in Firefox itself')
@@ -4826,6 +4892,27 @@ function Test-Switches {
     'starts off: {0}; on only once done: {1}; not shown early: {2}; watch follows: {3}; a failed switch-off stays on: {4}; a failed switch-on stays off: {5}; unit: {6}' -f
         $startsOff, $on, $notEarly, $watching, $staysOn, $staysOff, ($f -and $c)
 }
+function Test-Glance {
+    <#
+        The "At a glance" boxes, filled from a made-up PC: a leftover to clear, a restore point, an app
+        that starts at sign-in and nothing else. Each box sums up its tab; a box with nothing says so.
+    #>
+    Update-FromState @{
+        Privacy = @{}; Vendors = @(); Apps = @(); Devices = @(); Addons = @(); Problems = @()
+        Startup = @([pscustomobject]@{ Id = 'a'; Name = 'Chat app'; On = $true; Keep = $false; Locked = $false; Publisher = 'Test'; Command = 'a.exe'; Note = ''; Missing = $false; Everyone = $false },
+                    [pscustomobject]@{ Id = 'b'; Name = 'Old helper'; On = $false; Keep = $false; Locked = $false; Publisher = 'Test'; Command = 'b.exe'; Note = ''; Missing = $false; Everyone = $false })
+        Cleanup = @([pscustomobject]@{ Id = 'temp'; Title = 'Temporary files'; Description = 'Left behind by programs.'; SizeBytes = [int64]5MB; Recommended = $true })
+        Restore = @([pscustomobject]@{ Name = '20260930-101500-one-click'; Path = 'C:\nowhere'; Changes = 3; Undone = $false })
+    }
+    $g = @{}
+    foreach ($k in 'apps', 'cleanup', 'undo', 'vendors') { $g[$k] = Get-DetailsText $script:GlanceBoxes[$k] }
+    'apps: {0}; leftovers: {1}; drive: {2}; restore points: {3}; brands: {4}' -f
+        [bool](($g.apps -match 'Start when you sign in: 1 on, 1 off') -and ($g.apps -match 'Apps you could remove: none found')),
+        [bool]($g.cleanup -match 'Leftovers you could clear: 5\.0 MB'), [bool]($g.cleanup -match 'Drive [A-Z]:: .+ free of '),
+        [bool](($g.undo -match 'Restore points: 1') -and ($g.undo -match 'Newest: .*Quiet my PC now')),
+        [bool](($g.vendors -match 'Brand software found: none that Quietpane knows') -and ($g.vendors -match 'Still switched on: nothing'))
+}
+
 function Test-HealthLayout {
     <#
         The two columns at the window's usual width and at its narrowest: side by side when there is
@@ -5000,6 +5087,7 @@ if ($SelfTest) {
     'health layout: ' + (Test-HealthLayout)
     'health facts: ' + (Test-HealthFacts)
     'switches: ' + (Test-Switches)
+    'at a glance: ' + (Test-Glance)
     'session: ' + (Test-SessionCard)
     'holding up: ' + (Test-SteadyCard)
     'theme: ' + (Test-Theme)

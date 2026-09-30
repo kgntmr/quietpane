@@ -1863,6 +1863,9 @@ Test-Case 'a switch in Settings shows on only once the change is made, and a fai
     # Flipped the way a screen reader flips it, against a pretend sign-in task: nothing on this PC is touched.
     $cardsOut -match 'switches: starts off: True; on only once done: True; not shown early: True; watch follows: True; a failed switch-off stays on: True; a failed switch-on stays off: True; unit: True'
 }
+Test-Case 'each list tab opens with a short summary of what is below it' {
+    $cardsOut -match 'at a glance: apps: True; leftovers: True; drive: True; restore points: True; brands: True'
+}
 Test-Case 'the live tiles cope with two graphics cards, built-in graphics, no battery and a silent drive' {
     $cardsOut -match 'two cards: True; built-in graphics quiet: True; no battery box: True; drive temperature not shared: True'
 }
