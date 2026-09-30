@@ -295,6 +295,19 @@ tests cover the rules; these need real Windows prompts, real accounts, or a tool
   beginning with `C:\ProgramData\Quietpane`. Go through first start, every tab, Settings, a report, a
   user-only Apply and its Undo, the Undo tab with its two shielded buttons, a `-Watch` run, a `-Scan`
   run, and a shielded click answered **No**. Expected: **0 events**. Anything else blocks the release.
+  - *Filter on the path, not only the prefix:* use **Path contains** `ProgramData\Quietpane` plus the
+    8.3 short spellings on that PC (`dir /x C:\` and `dir /x C:\ProgramData` show them, for example
+    `PROGRA~3` and `QUIETP~1`), keep System in the capture, and tick **Drop Filtered Events** so a long
+    scan stays small. Note each Quietpane process's PID and its *Elevated* column as it starts.
+  - *Prove the filter works:* from an administrator PowerShell, run
+    `Test-Path C:\ProgramData\Quietpane\machine` once at the start and once at the end. Those events
+    must appear; if they don't, the capture proves nothing.
+  - *Count only the ordinary Quietpane.* System (PID 4), Defender and any elevated process are
+    recorded but are outside the rule.
+  - The Safety scan runs much slower while Process Monitor watches (about 35 minutes on the
+    maintainer's PC). Leave its window open until the report appears.
+  - Last recorded run: 30 September 2026, 2.1 release candidate - see
+    [the 2.1 audit, section 7](security/audits/2026-09-quietpane-2.1-security-audit.md#7-protected-machine-store-isolation).
 
 **Needs another account or PC:**
 

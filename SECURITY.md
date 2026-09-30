@@ -12,6 +12,19 @@ We aim to acknowledge reports within **5 working days**, agree a fix and a discl
 ## Supported versions
 Security fixes go into the latest release. **Only the current release is published:** when a new one goes out, the previous one is removed, so everyone downloads the same, current version. The download link on the [README](README.md) always points at it.
 
+## Our approach
+
+- **Admin rights only when the action needs them.** Quietpane opens with your own rights. Windows' permission prompt (UAC) appears only for a change to Windows itself, and saying yes never runs anything by itself.
+- **Offline.** No telemetry, no accounts, no network connections of any kind.
+- **The engine decides, not the window.** What an administrator window will run is checked by the code that runs it, against what that code itself trusts - never against what a button, an argument or a file says.
+- **Nothing to take on trust.** The app is plain text you can read, and for changes that touch administrator rights we publish the reasoning, the tests and the limits (see [Security reviews](#security-reviews)).
+
+## What Quietpane assumes
+
+- **Windows and the PC's administrator accounts are not compromised.** Anything already running with administrator rights can change Quietpane, and everything else on the PC.
+- **The administrator who answers the prompt is trusted with the whole PC, but not with your own settings.** If that is a different account, only machine-wide changes are allowed.
+- **Other accounts and programs on the PC may be hostile.** Nothing they could have written - including anything Quietpane stored before 2.1 - is trusted by an administrator window.
+- **The copy you run is genuine** ([how to check](#check-that-your-download-is-genuine)), and if you run it from a folder you can write to, nothing running as you has changed it.
 ## How Quietpane uses admin rights
 
 Since 2.1, Quietpane opens with the rights of the account that started it and asks Windows for administrator rights only when a change needs them. This section is for people reviewing the code; the everyday version is [The shield](README.md#the-shield).
@@ -43,6 +56,19 @@ Since 2.1, Quietpane opens with the rights of the account that started it and as
 - Checks on a path and then its use can, in principle, race with a change in between. Quietpane checks immediately before each use, refuses links at every level, creates new files only inside folders it has locked, and never follows a junction when deleting. Closing that window entirely would need a different kind of native call, which Quietpane doesn't add. The largest remaining window is the first time a 2.1 administrator window locks an existing `%ProgramData%\Quietpane` while someone else on the PC is actively racing it.
 - Windows does not treat your own ordinary and administrator windows as a security boundary between themselves. Quietpane hardens that, but can't make it one.
 - If you run Quietpane from a folder you can write to, anything running as you could change the script before you say yes. When it is installed, Quietpane starts its own copy from `C:\Program Files\Quietpane` instead, which ordinary programs can't change.
+- Windows builds, domain policies and account types differ in their default owners, inherited permissions and UAC settings. What has been checked, and on what, is in each release's review.
+- Some checks need another account, another PC or another Windows version. They are listed as outstanding until they have been done, never assumed.
+
+For the release-specific engineering review and verification evidence, see the [Quietpane 2.1 Security Engineering Audit](docs/security/audits/2026-09-quietpane-2.1-security-audit.md).
+
+## Security reviews
+
+Internal engineering reviews of security-sensitive releases, carried out by the project itself - not independent audits. The index is [docs/security](docs/security/README.md).
+
+| Release | Review | Date |
+|---|---|---|
+| 2.1 | [Quietpane 2.1 Security Engineering Audit](docs/security/audits/2026-09-quietpane-2.1-security-audit.md) | September 2026 |
+
 ## Getting a genuine copy
 - The only official source is **[github.com/kgntmr/quietpane](https://github.com/kgntmr/quietpane)**, published by KomodoWorks ([komodoworks.com](https://www.komodoworks.com)).
 - Right now Quietpane is **only** distributed as plain-text PowerShell scripts in `Quietpane.zip`. **There is no `.exe` version.** Treat any `.exe`, installer or "cracked/pro" version claiming to be Quietpane as fake. If that ever changes, it will be announced here and in the [Code Signing Policy](README.md#code-signing-policy) first.

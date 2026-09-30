@@ -12,6 +12,11 @@
 </p>
 
 <p align="center">
+  <b>Admin rights only when the action needs them.</b><br>
+  <sub>Runs without admin by default &middot; Offline &middot; No telemetry &middot; <a href="#security-by-design">Security-focused design</a></sub>
+</p>
+
+<p align="center">
   <a href="https://github.com/kgntmr/quietpane/releases/latest/download/Quietpane.zip"><b>⬇&nbsp;&nbsp;Download Quietpane</b></a> &nbsp;(one small ZIP file)
 </p>
 
@@ -60,6 +65,20 @@ Windows' own shield sits on a button when that change needs administrator rights
 - **Works for everyone.** Everything can be done with a keyboard alone, with a clear outline showing where you are; every control has a name screen readers such as Narrator can say, and the status line is read out as it changes. All text meets the WCAG AA contrast standard, and the automated tests fail if a control ever loses its name or a colour gets too faint to read.
 - **Hides nothing.** Plain-text PowerShell you can read, plus four short C# blocks (the graphics driver's temperature, clocks and fan, the drive's own temperature and wear, adding up folder sizes, and making the Start-menu shortcut) and three one-line C# declarations that give the app its own taskbar icon, a sharp window and a dark title bar when it is dark - all shipped as source, and compiled on your PC by PowerShell as it runs. No installer and no `.exe`: it runs from the folder you unzip, and only copies itself to Program Files if you ask for shortcuts or to start it when you sign in.
 
+## Security by design
+
+**Admin rights only when the action needs them.** Quietpane doesn't run as administrator by default. It asks Windows for elevation - the UAC prompt - only for operations that need it, saying yes never runs anything by itself, and every privileged action is checked again by the engine before it runs, whatever the window, a command line or a file says.
+
+Quietpane 2.1 went through an extensive internal security engineering review covering the UAC handoff, privilege boundaries, restore and quarantine safety, folder permissions, SID handling, reparse points, malformed state files, alternate administrator accounts, and unelevated access to protected application data. We publish the security reasoning and verification behind privilege-related changes, including what is still outstanding.
+
+**Security verification (2.1)**
+- Separate test runs without and with administrator rights: 326 and 339 checks passed, 0 failed
+- Adversarial security regression tests: malformed and tampered records, junctions, permission takeover, another administrator account
+- Process Monitor checks of the protected machine-store boundary: zero accesses from the ordinary app in every capture so far
+- Undo records from before 2.1 are never trusted or replayed
+- Real-Windows checks, with the ones still outstanding listed openly
+
+[Read the Quietpane 2.1 Security Engineering Audit →](docs/security/audits/2026-09-quietpane-2.1-security-audit.md)
 ## A look around
 
 <table>
@@ -206,7 +225,7 @@ Removing it doesn't undo its changes, so use **Undo** first if you want your PC 
 
 - **[Privacy Policy](PRIVACY.md):** collects no personal data and makes no network connections.
 - **[Terms of Use](TERMS.md):** free, open source, provided as is. Irish law; your consumer rights are unaffected.
-- **[Security Policy](SECURITY.md):** reporting a vulnerability, and telling a genuine copy from a fake.
+- **[Security Policy](SECURITY.md):** how Quietpane uses administrator rights, reporting a vulnerability, and telling a genuine copy from a fake. Release security reviews are in [docs/security](docs/security/README.md).
 - **[Contributing](CONTRIBUTING.md):** how to add to the lists, and the rules the tests enforce.
 - **[Code of Conduct](CODE_OF_CONDUCT.md):** Contributor Covenant 2.1.
 - **[License](LICENSE):** MIT.
@@ -239,7 +258,7 @@ Free code signing provided by [SignPath.io](https://about.signpath.io), certific
   ```powershell
   Start-Process powershell -Verb RunAs -ArgumentList '-NoExit','-ExecutionPolicy','Bypass','-File',"$PWD\tests\Run-QuietpaneTests.ps1",'-Live'
   ```
-  An elevated window says "Administrator:" in its title bar. Without administrator rights **324 checks run and 15 are skipped** - the quarantine round trip, permanent deletion, the audit log, the sign-in start, the locked data folder and EICAR; the elevated window runs 337 of them, leaving only EICAR (add `-Live`). One check only ever runs on a PC without Defender.
+  An elevated window says "Administrator:" in its title bar. Without administrator rights **326 checks run and 15 are skipped** - the quarantine round trip, permanent deletion, the audit log, the sign-in start, the locked data folder and EICAR; the elevated window runs 339 of them, leaving only EICAR (add `-Live`). One check only ever runs on a PC without Defender.
 - **Check by hand:** [`docs/manual-checks.md`](docs/manual-checks.md) lists what still needs a person, including the AMTSO feature checks. Those stay manual on purpose: automating them would mean the app downloading files.
 - **Contribute:** the lists in [`src/catalog/`](src/catalog) are plain data, so adding a setting, app, folder, brand or startup note needs no code. Describe side effects honestly, and test with **Preview** first. [`CONTRIBUTING.md`](CONTRIBUTING.md) shows a real entry, the word limits the tests enforce, and the two tests that catch people out. The reasons behind a few design choices are in [`docs/LESSONS-LEARNED.md`](docs/LESSONS-LEARNED.md).
 - **What CI checks:** every push and pull request runs the full suite on `windows-latest`, builds the ZIP, and verifies that every script file is still plain ASCII with CRLF endings - see [`.github/workflows/tests.yml`](.github/workflows/tests.yml).

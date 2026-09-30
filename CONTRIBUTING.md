@@ -122,7 +122,7 @@ and the budget is how that promise is kept.
 - **Run it from source:** clone the repository and double-click `Start Quietpane.cmd`.
 - **Try the window without showing it:** `.\Quietpane.ps1 -SelfTest`.
 - **Run the checks:** `powershell -ExecutionPolicy Bypass -File tests\Run-QuietpaneTests.ps1`.
-  Without administrator rights **324 checks run and 15 are skipped**. The
+  Without administrator rights **326 checks run and 15 are skipped**. The
   [README](README.md#for-developers) has the elevated recipe for the rest.
 - **Use Preview first.** If a change alters what happens to a PC, exercise it through Preview before
   proposing it. Preview is what stands between a person and a surprise.
