@@ -247,7 +247,7 @@ function Get-WindowsTheme {
 }
 
 function Get-AppearanceChoice {
-    <# 'System' unless someone chose Light or Dark in About. #>
+    <# 'System' unless someone chose Light or Dark in Settings. #>
     try {
         if (Test-Path $script:AppearanceFile) {
             $v = ([IO.File]::ReadAllText($script:AppearanceFile)).Trim()
@@ -305,7 +305,7 @@ function Set-Theme([ValidateSet('Light', 'Dark')][string]$Name) {
 }
 
 function Set-AppearanceChoice([ValidateSet('System', 'Light', 'Dark')][string]$Choice) {
-    <# The choice in About: remembered as one word, and applied straight away. #>
+    <# The choice in Settings: remembered as one word, and applied straight away. #>
     $script:AppearanceChoice = $Choice
     try {
         New-Item -ItemType Directory -Path $info.DataRoot -Force | Out-Null
@@ -319,7 +319,7 @@ function Sync-ThemeWithWindows {
         Following Windows' light or dark setting while the window is open, called from the window's own
         clock. Asked that way rather than through Windows' change notification, because the notification
         arrives on a thread PowerShell cannot safely run on; one registry read a second, on the window's
-        own thread, costs nothing and cannot crash. Does nothing when Light or Dark was chosen in About.
+        own thread, costs nothing and cannot crash. Does nothing when Light or Dark was chosen in Settings.
     #>
     if ($script:AppearanceChoice -ne 'System') { return }
     if (((Get-Date) - $script:ThemeCheckedAt).TotalSeconds -lt 1) { return }
@@ -967,9 +967,9 @@ function New-SettingRow([string]$Label, [string]$Note, $Control) {
     $left.Margin = Get-Thick '0,0,20,0'
     $name = New-Text $Label 13.5 'SemiBold' '#0F1B1C' '0'
     [void]$left.Children.Add($name)
-    $note = New-Text $Note 12 'Normal' '#66706F' '0,2,0,0'
-    if (-not $Note) { $note.Visibility = 'Collapsed' }
-    [void]$left.Children.Add($note)
+    $noteBlock = New-Text $Note 12 'Normal' '#66706F' '0,2,0,0'
+    if (-not $Note) { $noteBlock.Visibility = 'Collapsed' }
+    [void]$left.Children.Add($noteBlock)
     [void]$grid.Children.Add($left)
     if ($Control) {
         [System.Windows.Controls.Grid]::SetColumn($Control, 1)
@@ -977,7 +977,7 @@ function New-SettingRow([string]$Label, [string]$Note, $Control) {
         [void]$grid.Children.Add($Control)
     }
     $row.Child = $grid
-    return [pscustomobject]@{ Border = $row; Label = $name; Note = $note; Control = $Control }
+    return [pscustomobject]@{ Border = $row; Label = $name; Note = $noteBlock; Control = $Control }
 }
 
 $script:Options = @{}
@@ -1018,17 +1018,30 @@ function New-Card([string]$Title) {
     $b = New-Object System.Windows.Controls.Border
     # Narrow enough that all five cards stay on one row even when a scrollbar appears.
     $b.Width = 186
-    $b.MinHeight = 108
+    $b.MinHeight = 96
     $b.Padding = Get-Thick '14,12'
     $b.Margin = Get-Thick '0,0,12,12'
     $b.Background = Get-Brush '#FAF6EC'
     $b.BorderBrush = Get-Brush '#E6DFCC'
     $b.BorderThickness = Get-Thick '1'
     $sp = New-Object System.Windows.Controls.StackPanel
-    [void]$sp.Children.Add((New-Text $Title 11.5 'SemiBold' '#4B5B5C' '0,0,0,4'))
-    $value = New-Text 'Checking...' 21 'SemiBold' '#0F1B1C' '0,0,0,2' 'Fraunces, Georgia'
+    [void]$sp.Children.Add((New-Text $Title 11.5 'SemiBold' '#4B5B5C' '0,0,0,6'))
+    # The answer big, and one line under it. A longer line is cut short on the card and shown whole when
+    # you point at it, so every card is the same height and can be read at a glance.
+    $value = New-Text 'Checking...' 25 'SemiBold' '#0F1B1C' '0,0,0,4' 'Fraunces, Georgia'
+    $value.TextWrapping = 'NoWrap'
+    $fitValue = New-Object System.Windows.Controls.Viewbox
+    $fitValue.StretchDirection = 'DownOnly'
+    $fitValue.HorizontalAlignment = 'Left'
+    $fitValue.MaxWidth = 158
     $caption = New-Text '' 12 'Normal' '#4B5B5C' '0'
-    [void]$sp.Children.Add($value)
+    $caption.TextWrapping = 'NoWrap'
+    $caption.TextTrimming = 'CharacterEllipsis'
+    $tipBinding = New-Object System.Windows.Data.Binding('Text')
+    $tipBinding.RelativeSource = New-Object System.Windows.Data.RelativeSource([System.Windows.Data.RelativeSourceMode]::Self)
+    [void]$caption.SetBinding([System.Windows.FrameworkElement]::ToolTipProperty, $tipBinding)
+    $fitValue.Child = $value
+    [void]$sp.Children.Add($fitValue)
     [void]$sp.Children.Add($caption)
     $b.Child = $sp
     return [pscustomobject]@{ Border = $b; Value = $value; Caption = $caption }
@@ -1041,7 +1054,8 @@ $script:CardBrands   = New-Card 'HARDWARE & BRANDS'
 $script:CardAdware   = New-Card 'ADWARE CHECK'
 foreach ($c in $script:CardTracking, $script:CardApps, $script:CardSpace, $script:CardBrands, $script:CardAdware) { [void]$cards.Children.Add($c.Border) }
 $script:CardAdware.Value.Text = 'Not checked yet'
-$script:CardAdware.Caption.Text = 'Takes about 2 minutes and changes nothing'
+$script:CardAdware.Caption.Text = 'About 2 minutes'
+Set-MoreInfo $script:CardAdware.Border 'The check takes about 2 minutes and changes nothing.'
 [void]$homePanel.Children.Add($cards)
 
 # Things that switched themselves back on since last time - usually a Windows or driver update.
@@ -1083,42 +1097,6 @@ $script:UpdatePanel.Child = $updateRow
 Set-MoreInfo $script:UpdateText 'Found in your Downloads folder. Quietpane never goes online to look - this is a file you downloaded.'
 [void]$homePanel.Children.Add($script:UpdatePanel)
 
-# Two simple bars: how full the disk is, and how much memory is in use.
-function New-Meter([string]$Title, [string]$FillColour) {
-    $b = New-Object System.Windows.Controls.Border
-    $b.Width = 294
-    $b.MinHeight = 148
-    $b.Padding = Get-Thick '14,12'
-    $b.Margin = Get-Thick '0,0,12,12'
-    $b.Background = Get-Brush '#FFFDF8'
-    $b.BorderBrush = Get-Brush '#E6DFCC'
-    $b.BorderThickness = Get-Thick '1'
-    $sp = New-Object System.Windows.Controls.StackPanel
-    [void]$sp.Children.Add((New-Text $Title 11.5 'SemiBold' '#4B5B5C' '0,0,0,4'))
-    $value = New-Text 'Checking...' 21 'SemiBold' '#0F1B1C' '0,0,0,8' 'Fraunces, Georgia'
-    [void]$sp.Children.Add($value)
-    $track = New-Object System.Windows.Controls.Border
-    $track.Height = 16
-    $track.Width = 272
-    $track.HorizontalAlignment = 'Left'
-    $track.Background = Get-Brush '#EDE6D5'
-    $track.CornerRadius = New-Object System.Windows.CornerRadius(8)
-    $fill = New-Object System.Windows.Controls.Border
-    $fill.Height = 16
-    $fill.Width = 0
-    $fill.HorizontalAlignment = 'Left'
-    $fill.Background = Get-Brush $FillColour
-    $fill.CornerRadius = New-Object System.Windows.CornerRadius(8)
-    $track.Child = $fill
-    [void]$sp.Children.Add($track)
-    $caption = New-Text '' 12 'Normal' '#4B5B5C' '0,6,0,0'
-    $delta = New-Text '' 13 'SemiBold' '#117A68' '0,4,0,0'
-    $delta.Visibility = 'Collapsed'
-    [void]$sp.Children.Add($caption)
-    [void]$sp.Children.Add($delta)
-    $b.Child = $sp
-    return [pscustomobject]@{ Border = $b; Value = $value; Fill = $fill; Caption = $caption; Delta = $delta; TrackWidth = 272 }
-}
 # Two jobs, two sets of colour. Words are read close up and need contrast against the cream behind
 # them, so the text set is the darker one; a bar is a big block and only has to be told apart from the
 # other bars. Both were put through the palette checker rather than chosen by eye: the bar pair clears
@@ -1127,8 +1105,9 @@ function New-Meter([string]$Title, [string]$FillColour) {
 # reckoning, and it stays anyway - it is the product's own colour, and no tile depends on it alone.
 $script:BarColours = @{ ok = 'bar.ok'; high = '#A02020' }
 $meters = New-Object System.Windows.Controls.WrapPanel
-$script:MeterSpace = New-Meter 'SPACE ON THIS PC' 'bar.ok'
-[void]$meters.Children.Add($script:MeterSpace.Border)
+$script:MeterSpace = New-BigNumber 'SPACE ON THIS PC' 380 -Card
+$script:MeterSpace.Heat.Visibility = 'Collapsed'
+[void]$meters.Children.Add($script:MeterSpace.Outer)
 
 [void]$homePanel.Children.Add($meters)
 $script:TotalsText = New-Text '' 13 'Normal' '#117A68' '2,0,0,10'
@@ -1522,117 +1501,81 @@ $btnUndoRefresh = New-Button 'Refresh list'
 [void]$undoButtons.Children.Add($btnUndoRefresh)
 [void]$undoPanel.Children.Add($undoButtons)
 
-# 7. About, privacy & terms
-$aboutPanel = New-TabPage 'About' 'about' ''
-$aboutHead = New-Object System.Windows.Controls.StackPanel
-$aboutHead.Orientation = 'Horizontal'
-$aboutHead.Margin = Get-Thick '0,0,0,12'
-if ($logo) {
-    $img = New-Object System.Windows.Controls.Image
-    $img.Source = $logo; $img.Width = 72; $img.Height = 72; $img.Margin = Get-Thick '0,0,16,0'
-    [void]$aboutHead.Children.Add($img)
-}
-$aboutTitle = New-Object System.Windows.Controls.StackPanel
-$aboutTitle.VerticalAlignment = 'Center'
-[void]$aboutTitle.Children.Add((New-Text "Quietpane $($info.Version)" 24 'SemiBold' '#0F1B1C' '0,0,0,2' 'Fraunces, Georgia'))
-[void]$aboutTitle.Children.Add((New-Text 'Developed by KomodoWorks - an independent technology studio in Dublin, Ireland.' 13 'Normal' '#4B5B5C' '0'))
-[void]$aboutHead.Children.Add($aboutTitle)
-[void]$aboutPanel.Children.Add($aboutHead)
+# 7. Settings - how Quietpane looks and starts, updates, our promise, and who made it. Laid out like a
+# settings page: what each setting is on the left, its switch or choice on the right, a hairline between.
+# A switch is used only where flipping it changes things there and then; it shows "on" only once that
+# has worked. The version and the small print sit at the bottom.
+$aboutPanel = New-TabPage 'Settings' 'about' ''
+[void]$aboutPanel.Children.Add((New-Text 'Settings' 24 'SemiBold' '#0F1B1C' '0,0,0,6' 'Fraunces, Georgia'))
 
-[void]$aboutPanel.Children.Add((New-GroupHeader 'Our promise'))
-# One short line each; point at a line for the whole of it.
-foreach ($pair in @(
-        @('Collects nothing - no accounts, tracking or ads.',
-          'No accounts, analytics, telemetry, crash reports, ads, cookies or tracking of any kind.'),
-        @('Connects to nothing - links open only when you click them.',
-          'The app makes no network requests at all.'),
-        @('Changes nothing without asking, and keeps a restore point.',
-          'Every change is shown first and confirmed, and settings go into a restore point you can undo.'),
-        @('Tidying up uses your Recycle Bin. Anything that can''t be undone says so first.',
-          'Scheduled tasks are switched off, not deleted. Three things can''t be undone - removing an app (the Microsoft Store has it), uninstalling a brand extra, and deleting a threat for good - and the app says so before you confirm.'),
-        @('Hides nothing - plain-text code you can read. No installer.',
-          'Plain-text PowerShell you can read line by line, plus three small pieces of C# - for the graphics temperature, adding up folder sizes, and making shortcuts. It only copies itself to Program Files if you add shortcuts or start it when you sign in.'),
-        @('Free and open source (MIT). Not tied to Microsoft or any PC maker.',
-          'MIT License. Not affiliated with Microsoft, NVIDIA, Intel, AMD, Google or any PC maker.'))) {
-    $t = New-Text ('-  ' + $pair[0]) 13 'Normal' '#0F1B1C' '4,4,0,0'
-    Set-MoreInfo $t $pair[1]
-    [void]$aboutPanel.Children.Add($t)
+function New-ChoiceRow([string]$Group, [string]$Label, [object[]]$Choices, [string]$Current, [scriptblock]$OnPick) {
+    <# A row of round buttons for one choice. Applies the moment one is picked. Returns the buttons by value. #>
+    $row = New-Object System.Windows.Controls.StackPanel
+    $row.Orientation = 'Horizontal'
+    $buttons = @{}
+    foreach ($opt in $Choices) {
+        $rb = New-Object System.Windows.Controls.RadioButton
+        $rb.GroupName = $Group
+        $rb.Content = New-Text $opt[1] 13 'Normal' '#0F1B1C' '2,0,0,0'
+        $rb.Margin = Get-Thick '16,0,0,0'
+        $rb.VerticalContentAlignment = 'Center'
+        $rb.Tag = $opt[0]
+        $rb.FocusVisualStyle = $window.FindResource('FocusRing')
+        [System.Windows.Automation.AutomationProperties]::SetName($rb, $Label + ': ' + $opt[1])
+        $rb.IsChecked = ($Current -eq $opt[0])
+        $rb.Add_Checked($OnPick)
+        $buttons[$opt[0]] = $rb
+        [void]$row.Children.Add($rb)
+    }
+    return [pscustomobject]@{ Panel = $row; Buttons = $buttons }
 }
 
-$aboutButtons = New-Object System.Windows.Controls.WrapPanel
-$aboutButtons.Margin = Get-Thick '0,16,0,8'
-$btnSite = New-Button 'Visit KomodoWorks.com' -Primary
-$btnMail = New-Button "Email $($info.BrandEmail)"
-$btnRepo = New-Button 'Source code on GitHub'
-$btnData = New-Button 'Open this app''s data folder'
-foreach ($b in $btnSite, $btnMail, $btnRepo, $btnData) { $b.Margin = Get-Thick '0,0,8,8'; [void]$aboutButtons.Children.Add($b) }
-[void]$aboutPanel.Children.Add($aboutButtons)
+# Light or dark: follows Windows unless someone would rather it didn't.
+$appear = New-ChoiceRow 'Appearance' 'Appearance' @(@('System', 'Match Windows'), @('Light', 'Light'), @('Dark', 'Dark')) $script:AppearanceChoice {
+    param($s) if ($s.Tag -ne $script:AppearanceChoice) { Set-AppearanceChoice $s.Tag } }
+$script:AppearButtons = $appear.Buttons
+$appearRow = New-SettingRow 'Appearance' 'Match Windows follows your Windows colour setting.' $appear.Panel
+Set-MoreInfo $appearRow.Label 'Match Windows follows Settings > Personalisation > Colours, and changes with it while Quietpane is open. Light or Dark stays put whatever Windows does.'
+[void]$aboutPanel.Children.Add($appearRow.Border)
 
-# The two ways to reach Quietpane without hunting for the folder again.
-[void]$aboutPanel.Children.Add((New-GroupHeader 'Quietpane on this PC'))
-$btnShortcut = New-Button 'Add to Start menu and desktop' '0,8,0,0'
-$btnShortcut.HorizontalAlignment = 'Left'
-[void]$aboutPanel.Children.Add($btnShortcut)
-$script:SignInBox = New-Object System.Windows.Controls.CheckBox
-$script:SignInBox.Margin = Get-Thick '0,14,0,0'
-$script:SignInBox.VerticalContentAlignment = 'Center'
-$script:SignInBox.Content = New-Text 'Start Quietpane when I sign in' 13.5 'SemiBold' '#0F1B1C' '2,0,0,0'
-[void]$aboutPanel.Children.Add($script:SignInBox)
-[void]$aboutPanel.Children.Add((New-Text 'It waits on the taskbar and does nothing until you click it.' 12.5 'Normal' '#4B5B5C' '22,2,0,0'))
-# Only makes sense with the one above, so it sits under it, indented, and waits until that is ticked.
-$script:WatchBox = New-Object System.Windows.Controls.CheckBox
-$script:WatchBox.Margin = Get-Thick '22,10,0,0'
-$script:WatchBox.VerticalContentAlignment = 'Center'
+# Celsius or Fahrenheit, for every temperature Quietpane shows.
+$deg = [char]0x00B0
+$temp = New-ChoiceRow 'Temperature' 'Temperatures' @(@('C', "${deg}C"), @('F', "${deg}F")) (Get-QpTempUnit) { param($s) Set-TemperatureChoice $s.Tag }
+$script:TempButtons = $temp.Buttons
+$tempRow = New-SettingRow 'Temperatures' 'On the Health tab and in session reports.' $temp.Panel
+[void]$aboutPanel.Children.Add($tempRow.Border)
+
+# Starting when you sign in, and checking once as it does. Both take effect the moment they are flipped.
+$script:SignInBox = New-Switch 'Start Quietpane when I sign in'
+$signInRow = New-SettingRow 'Start Quietpane when I sign in' 'It waits on the taskbar and does nothing until you click it.' $script:SignInBox
+[void]$aboutPanel.Children.Add($signInRow.Border)
+# Only makes sense with the one above, so it sits under it, indented, and waits until that is on.
+$script:WatchBox = New-Switch 'Also tell me if Windows switches things back on'
 $script:WatchBox.IsEnabled = $false
-$script:WatchBox.Opacity = 0.55   # looks as unavailable as it is, until the box above is ticked
-$script:WatchBox.Content = New-Text 'Also tell me if Windows switches things back on' 13.5 'SemiBold' '#0F1B1C' '2,0,0,0'
-$script:WatchBox.ToolTip = 'Tick "Start Quietpane when I sign in" first.'
+$script:WatchBox.ToolTip = 'Switch on "Start Quietpane when I sign in" first.'
 [System.Windows.Controls.ToolTipService]::SetShowOnDisabled($script:WatchBox, $true)
-[void]$aboutPanel.Children.Add($script:WatchBox)
-$watchNote = New-Text 'Checks once as you sign in, and badges the taskbar icon if anything came back.' 12.5 'Normal' '#4B5B5C' '44,2,0,0'
-Set-MoreInfo $watchNote 'About a second of work, just after you sign in. If nothing came back, you won''t notice it at all.'
-[void]$aboutPanel.Children.Add($watchNote)
-$placeNote = New-Text 'Both use Quietpane''s own copy, so you can move the folder you unzipped.' 12.5 'Normal' '#4B5B5C' '0,12,0,6'
-Set-MoreInfo $placeNote 'The copy lives in Program Files. To keep Quietpane on the taskbar, right-click it in the Start menu and choose "Pin to taskbar".'
-Set-MoreInfo $btnShortcut 'To keep Quietpane on the taskbar afterwards, right-click it in the Start menu and choose "Pin to taskbar".'
-[void]$aboutPanel.Children.Add($placeNote)
+$watchRow = New-SettingRow 'Also tell me if Windows switches things back on' 'Checks once as you sign in, and badges the taskbar icon if anything came back.' $script:WatchBox
+$watchRow.Border.Margin = Get-Thick '24,0,0,0'
+Set-MoreInfo $watchRow.Note 'About a second of work, just after you sign in. If nothing came back, you won''t notice it at all.'
+[void]$aboutPanel.Children.Add($watchRow.Border)
 
-# Light or dark: follows Windows unless someone would rather it didn't. Applies the moment it is picked.
-$appearRow = New-Object System.Windows.Controls.StackPanel
-$appearRow.Orientation = 'Horizontal'
-$appearRow.Margin = Get-Thick '0,14,0,0'
-$appearLabel = New-Text 'Appearance' 13.5 'SemiBold' '#0F1B1C' '0,0,14,0'
-$appearLabel.VerticalAlignment = 'Center'
-[void]$appearRow.Children.Add($appearLabel)
-$script:AppearButtons = @{}
-foreach ($opt in @(@('System', 'Match Windows'), @('Light', 'Light'), @('Dark', 'Dark'))) {
-    $rb = New-Object System.Windows.Controls.RadioButton
-    $rb.GroupName = 'Appearance'
-    $rb.Content = New-Text $opt[1] 13 'Normal' '#0F1B1C' '2,0,0,0'
-    $rb.Margin = Get-Thick '0,0,16,0'
-    $rb.VerticalContentAlignment = 'Center'
-    $rb.Tag = $opt[0]
-    $rb.FocusVisualStyle = $window.FindResource('FocusRing')
-    [System.Windows.Automation.AutomationProperties]::SetName($rb, 'Appearance: ' + $opt[1])
-    $rb.IsChecked = ($script:AppearanceChoice -eq $opt[0])
-    $rb.Add_Checked({ param($s) if ($s.Tag -ne $script:AppearanceChoice) { Set-AppearanceChoice $s.Tag } })
-    $script:AppearButtons[$opt[0]] = $rb
-    [void]$appearRow.Children.Add($rb)
-}
-Set-MoreInfo $appearLabel 'Match Windows follows Settings > Personalisation > Colours, and changes with it while Quietpane is open. Light or Dark stays put whatever Windows does.'
-[void]$aboutPanel.Children.Add($appearRow)
+# The way to reach Quietpane without hunting for the folder again.
+$btnShortcut = New-Button 'Add to Start menu and desktop' '0'
+$shortcutRow = New-SettingRow 'Start menu and desktop' 'Both use Quietpane''s own copy, so you can move the folder you unzipped.' $btnShortcut
+Set-MoreInfo $shortcutRow.Note 'The copy lives in Program Files. To keep Quietpane on the taskbar, right-click it in the Start menu and choose "Pin to taskbar".'
+Set-MoreInfo $btnShortcut 'To keep Quietpane on the taskbar afterwards, right-click it in the Start menu and choose "Pin to taskbar".'
+[void]$aboutPanel.Children.Add($shortcutRow.Border)
 
 # Updates. Quietpane never goes online to look for one; these are the two ways you can.
-[void]$aboutPanel.Children.Add((New-GroupHeader 'Updates'))
-$script:VersionLine = New-Text '' 13 'Normal' '#0F1B1C' '0,8,0,8'
-[void]$aboutPanel.Children.Add($script:VersionLine)
-$updateButtons = New-Object System.Windows.Controls.WrapPanel
-$btnLookForUpdate = New-Button 'Look for a newer version'
-$btnUpdateFromFile = New-Button 'Install an update from a file...'
-foreach ($b in $btnLookForUpdate, $btnUpdateFromFile) { $b.Margin = Get-Thick '0,0,10,4'; [void]$updateButtons.Children.Add($b) }
+$updateButtons = New-Object System.Windows.Controls.StackPanel
+$btnLookForUpdate = New-Button 'Look for a newer version' '0,0,0,6'
+$btnUpdateFromFile = New-Button 'Install an update from a file...' '0'
+foreach ($b in $btnLookForUpdate, $btnUpdateFromFile) { [void]$updateButtons.Children.Add($b) }
+$updateRow = New-SettingRow 'Updates' ' ' $updateButtons
+$script:VersionLine = $updateRow.Note
 Set-MoreInfo $btnLookForUpdate 'Opens the Quietpane page on GitHub in your web browser. Quietpane itself never connects to anything.'
 Set-MoreInfo $btnUpdateFromFile 'Already downloaded a newer Quietpane.zip? Pick it here and Quietpane installs it for you.'
-[void]$aboutPanel.Children.Add($updateButtons)
+[void]$aboutPanel.Children.Add($updateRow.Border)
 $btnLookForUpdate.Add_Click({ Open-ReleasePage })
 $btnUpdateFromFile.Add_Click({
     $dlg = New-Object Microsoft.Win32.OpenFileDialog
@@ -1650,6 +1593,29 @@ $btnUpdateLater.Add_Click({
     } catch { }
     $script:UpdatePanel.Visibility = 'Collapsed'
 })
+
+# Our promise, as a short list: what, and how. Point at a line for the whole of it.
+$promise = New-DetailsBox 'Our promise'
+$promise.Border.Margin = Get-Thick '0,18,0,12'
+foreach ($p in @(
+        @('Collects', 'nothing - no accounts, tracking or ads', 'No accounts, analytics, telemetry, crash reports, ads, cookies or tracking of any kind.'),
+        @('Connects to', 'nothing - links open only when you click them', 'The app makes no network requests at all.'),
+        @('Changes', 'nothing without asking, and keeps a restore point', 'Every change is shown first and confirmed, and settings go into a restore point you can undo.'),
+        @('Tidying up', 'uses your Recycle Bin', 'Scheduled tasks are switched off, not deleted. Three things can''t be undone - removing an app (the Microsoft Store has it), uninstalling a brand extra, and deleting a threat for good - and the app says so before you confirm.'),
+        @('The code', 'plain text you can read - no installer', 'Plain-text PowerShell you can read line by line, plus a few small pieces of C# - for the graphics card''s and the drive''s own readings, adding up folder sizes, and making shortcuts - compiled on your PC as it runs. It only copies itself to Program Files if you add shortcuts or start it when you sign in.'),
+        @('Licence', 'free and open source (MIT)', 'MIT License. Not affiliated with Microsoft, NVIDIA, Intel, AMD, Google or any PC maker.'))) {
+    [void](Add-DetailRow $promise $p[0] $p[1] -Tip $p[2])
+}
+[void]$aboutPanel.Children.Add($promise.Border)
+
+$aboutButtons = New-Object System.Windows.Controls.WrapPanel
+$aboutButtons.Margin = Get-Thick '0,4,0,8'
+$btnSite = New-Button 'Visit KomodoWorks.com' -Primary
+$btnMail = New-Button "Email $($info.BrandEmail)"
+$btnRepo = New-Button 'Source code on GitHub'
+$btnData = New-Button 'Open this app''s data folder'
+foreach ($b in $btnSite, $btnMail, $btnRepo, $btnData) { $b.Margin = Get-Thick '0,0,8,8'; [void]$aboutButtons.Children.Add($b) }
+[void]$aboutPanel.Children.Add($aboutButtons)
 
 function Get-DocText([string]$File) {
     $p = Join-Path $PSScriptRoot $File
@@ -1681,6 +1647,43 @@ $script:LicenseExpander = New-DocExpander 'License (MIT)' 'LICENSE'
 $script:SecurityExpander = New-DocExpander 'Security & genuine copies' 'SECURITY.md'
 foreach ($e in $script:PrivacyExpander, $script:TermsExpander, $script:LicenseExpander, $script:SecurityExpander) { [void]$aboutPanel.Children.Add($e) }
 
+# At the bottom, like any settings page: which version this is, who made it, and the small print.
+$aboutFoot = New-Object System.Windows.Controls.StackPanel
+$aboutFoot.Margin = Get-Thick '0,26,0,0'
+$footHead = New-Object System.Windows.Controls.StackPanel
+$footHead.Orientation = 'Horizontal'
+if ($logo) {
+    $img = New-Object System.Windows.Controls.Image
+    $img.Source = $logo; $img.Width = 40; $img.Height = 40; $img.Margin = Get-Thick '0,0,12,0'
+    [void]$footHead.Children.Add($img)
+}
+$footWords = New-Object System.Windows.Controls.StackPanel
+$footWords.VerticalAlignment = 'Center'
+$script:VersionTitle = New-Text "Version $($info.Version)" 16 'SemiBold' '#9A6700' '0,0,0,2' 'Fraunces, Georgia'
+[void]$footWords.Children.Add($script:VersionTitle)
+[void]$footWords.Children.Add((New-Text 'Developed by KomodoWorks - an independent technology studio in Dublin, Ireland.' 12.5 'Normal' '#4B5B5C' '0'))
+[void]$footHead.Children.Add($footWords)
+[void]$aboutFoot.Children.Add($footHead)
+$footLinks = New-Object System.Windows.Controls.TextBlock
+$footLinks.Margin = Get-Thick '0,10,0,0'
+$footLinks.FontSize = 12.5
+$footLinks.Foreground = Get-Brush '#4B5B5C'
+$footLinks.TextWrapping = 'Wrap'
+function Add-FootLink([string]$Text, [scriptblock]$OnClick) {
+    if ($footLinks.Inlines.Count) { $footLinks.Inlines.Add((New-Object System.Windows.Documents.Run '   |   ')) }
+    $h = New-Object System.Windows.Documents.Hyperlink
+    $h.Inlines.Add($Text)
+    $h.Foreground = Get-Brush '#117A68'
+    $h.Add_Click($OnClick)
+    $footLinks.Inlines.Add($h)
+}
+Add-FootLink 'Privacy' { Show-Doc $script:PrivacyExpander }
+Add-FootLink 'Terms' { Show-Doc $script:TermsExpander }
+Add-FootLink 'Source' { Open-AsUser $info.RepoUrl }
+Add-FootLink 'Licence' { Show-Doc $script:LicenseExpander }
+[void]$aboutFoot.Children.Add($footLinks)
+[void]$aboutPanel.Children.Add($aboutFoot)
+
 $script:ActionButtons = @($ui.BtnRecommended, $ui.BtnNone, $ui.BtnPreview, $ui.BtnApply, $btnScan, $btnUndo, $btnUndoRefresh, $btnOneClick, $btnHomeScan, $btnUndoAll, $btnRestart, $btnPutBack, $btnThatWasMe, $btnSpaceLook, $btnSpaceBack)
 
 # ------------------------------------------------------------------ links
@@ -1694,6 +1697,37 @@ $ui.LinkFooter.Add_Click({ Open-AsUser $info.BrandUrl })
 $ui.LinkContact.Add_Click({ Open-AsUser "mailto:$($info.BrandEmail)?subject=Quietpane" })
 $ui.LinkPrivacy.Add_Click({ Show-Doc $script:PrivacyExpander })
 $ui.LinkTerms.Add_Click({ Show-Doc $script:TermsExpander })
+function Show-Message([string]$Text) {
+    <# A message you have to click away. The self-test keeps it instead of showing it, so it can read it and never waits. #>
+    if ($SelfTest) { $script:LastMessage = $Text; return }
+    [void][System.Windows.MessageBox]::Show($Text, 'Quietpane')
+}
+
+function Set-TemperatureChoice([string]$Unit) {
+    <#
+        Celsius or Fahrenheit, from Settings: saved as one letter, then every temperature on screen is written
+        again at once. If it cannot be saved, the choice goes back and says why - never a choice that did not stick.
+    #>
+    if ($Unit -eq (Get-QpTempUnit)) { return }
+    $ok = if ($SelfTest) { Set-QpTempUnit -Unit $Unit -SessionOnly } else { Set-QpTempUnit -Unit $Unit }
+    if (-not $ok) {
+        $script:TempButtons[(Get-QpTempUnit)].IsChecked = $true
+        Show-Message 'That choice could not be saved, so temperatures stay as they were.'
+        return
+    }
+    if ($script:LastReading) { Update-LiveTiles $script:LastReading } else { Update-HealthDetails }
+    try { Update-SessionCard } catch { }
+}
+
+# The switches react to being flipped, however they are flipped - by mouse, by keyboard, or by a screen
+# reader, which flips them without a click. When the window itself moves a switch to show how things are,
+# it does so quietly, so that never counts as a person asking for a change.
+$script:SwitchSync = $false
+function Set-SwitchQuietly($Box, [bool]$Value) {
+    $script:SwitchSync = $true
+    try { $Box.IsChecked = $Value } finally { $script:SwitchSync = $false }
+}
+
 function Update-PlaceControls {
     # The button and the tick box always show how things really are. The one button does both jobs,
     # so there is only ever one thing to click.
@@ -1702,11 +1736,10 @@ function Update-PlaceControls {
         $btnShortcut.Content = if ($s.StartMenu -or $s.Desktop) { 'Remove from Start menu and desktop' } else { 'Add to Start menu and desktop' }
         $task = Get-QpSignInTask
         $on = [bool]($task -and "$($task.State)" -ne 'Disabled')
-        $script:SignInBox.IsChecked = $on
+        Set-SwitchQuietly $script:SignInBox $on
         $script:WatchBox.IsEnabled = $on
-        $script:WatchBox.Opacity = $(if ($on) { 1.0 } else { 0.55 })
-        $script:WatchBox.ToolTip = $(if ($on) { $null } else { 'Tick "Start Quietpane when I sign in" first.' })
-        $script:WatchBox.IsChecked = ($on -and (Test-QpTaskWatches $task))
+        $script:WatchBox.ToolTip = $(if ($on) { $null } else { 'Switch on "Start Quietpane when I sign in" first.' })
+        Set-SwitchQuietly $script:WatchBox ($on -and (Test-QpTaskWatches $task))
     } catch { }
 }
 # Taken away while this copy is the one open: it goes to the Recycle Bin once the window closes.
@@ -1733,33 +1766,49 @@ $btnShortcut.Add_Click({
     }
     Update-PlaceControls
 })
-# Click, not Checked: only a person ticking the box changes anything, never the window updating it.
-$script:SignInBox.Add_Click({
+# Only a person flipping a switch changes anything, never the window showing how things are (see above).
+# A switch shows how things are, never how they are about to be: it goes back to that straight away, and
+# only moves once the change has been made and read back.
+$script:OnSignInSwitch = {
+    if ($script:SwitchSync) { return }
+    $want = [bool]$script:SignInBox.IsChecked
+    Set-SwitchQuietly $script:SignInBox (-not $want)
     if (Test-Busy) { Update-PlaceControls; return }
     try {
-        $r = if ($script:SignInBox.IsChecked) { Enable-QpSignInStart } else { Disable-QpSignInStart }
+        $r = if ($want) { Enable-QpSignInStart } else { Disable-QpSignInStart }
         Set-CopyFollowUp $r
-        # The tick itself says it worked; only a problem, or something now in the Recycle Bin, needs words.
-        if (-not $r.Ok -or $r.Copy -in 'Recycled', 'Later', 'Failed') { [void][System.Windows.MessageBox]::Show($r.Note, 'Quietpane') }
+        Update-PlaceControls
+        # The switch itself says it worked; only a problem, or something now in the Recycle Bin, needs words.
+        if (-not $r.Ok -or $r.Copy -in 'Recycled', 'Later', 'Failed') { Show-Message $r.Note }
         else { $ui.Status.Text = $r.Note }
     } catch {
-        [void][System.Windows.MessageBox]::Show("That did not work: $($_.Exception.Message)", 'Quietpane')
+        Update-PlaceControls
+        Show-Message "That did not work: $($_.Exception.Message)"
     }
     Update-PlaceControls
-})
-$script:WatchBox.Add_Click({
+}
+$script:SignInBox.Add_Checked($script:OnSignInSwitch)
+$script:SignInBox.Add_Unchecked($script:OnSignInSwitch)
+$script:OnWatchSwitch = {
+    if ($script:SwitchSync) { return }
+    $want = [bool]$script:WatchBox.IsChecked
+    Set-SwitchQuietly $script:WatchBox (-not $want)
     if (Test-Busy) { Update-PlaceControls; return }
     try {
         # The sign-in task carries this choice, so changing it means setting the task up again.
-        $r = Enable-QpSignInStart -Watch:([bool]$script:WatchBox.IsChecked)
-        if (-not $r.Ok) { [void][System.Windows.MessageBox]::Show($r.Note, 'Quietpane') }
-        elseif ($script:WatchBox.IsChecked) { $ui.Status.Text = $r.Note }
+        $r = Enable-QpSignInStart -Watch:$want
+        Update-PlaceControls
+        if (-not $r.Ok) { Show-Message $r.Note }
+        elseif ($want) { $ui.Status.Text = $r.Note }
         else { $ui.Status.Text = 'Quietpane will no longer check when you sign in. It still starts on the taskbar.' }
     } catch {
-        [void][System.Windows.MessageBox]::Show("That did not work: $($_.Exception.Message)", 'Quietpane')
+        Update-PlaceControls
+        Show-Message "That did not work: $($_.Exception.Message)"
     }
     Update-PlaceControls
-})
+}
+$script:WatchBox.Add_Checked($script:OnWatchSwitch)
+$script:WatchBox.Add_Unchecked($script:OnWatchSwitch)
 
 $btnSite.Add_Click({ Open-AsUser $info.BrandUrl })
 $btnRepo.Add_Click({ Open-AsUser $info.RepoUrl })
@@ -2817,13 +2866,14 @@ function Update-HomeCards($state) {
 
     $good = Get-Brush '#117A68'; $todo = Get-Brush '#0F1B1C'
     if ($priv) { $script:CardTracking.Value.Text = "$priv to switch off"; $script:CardTracking.Value.Foreground = $todo; $script:CardTracking.Caption.Text = 'Telemetry, ads and tips' }
-    else { $script:CardTracking.Value.Text = 'All set'; $script:CardTracking.Value.Foreground = $good; $script:CardTracking.Caption.Text = 'Tracking and ads are already off' }
-    if ($apps) { $script:CardApps.Value.Text = "$apps to remove"; $script:CardApps.Value.Foreground = $todo; $script:CardApps.Caption.Text = 'Pre-installed and promoted apps' }
-    else { $script:CardApps.Value.Text = 'None found'; $script:CardApps.Value.Foreground = $good; $script:CardApps.Caption.Text = 'No known bloat apps on this PC' }
+    else { $script:CardTracking.Value.Text = 'All set'; $script:CardTracking.Value.Foreground = $good; $script:CardTracking.Caption.Text = 'Already switched off' }
+    if ($apps) { $script:CardApps.Value.Text = "$apps to remove"; $script:CardApps.Value.Foreground = $todo; $script:CardApps.Caption.Text = 'Pre-installed extras' }
+    else { $script:CardApps.Value.Text = 'None found'; $script:CardApps.Value.Foreground = $good; $script:CardApps.Caption.Text = 'No known bloat apps' }
     # Startup is never part of one-click (what you want at sign-in is personal), so just point to it.
     $starting = @($state.Startup | Where-Object { $_ -and $_.On -and -not $_.Keep -and -not $_.Locked }).Count
-    if ($starting) { $script:CardApps.Caption.Text += ('. {0} start when you sign in - see Apps' -f $starting) }
-    if ($bytes -gt 0) { $script:CardSpace.Value.Text = Format-QpBytes $bytes; $script:CardSpace.Value.Foreground = $todo; $script:CardSpace.Caption.Text = 'Temp files, crash dumps, old installers' }
+    if ($starting) { $script:CardApps.Caption.Text = ('{0} start when you sign in' -f $starting); Set-MoreInfo $script:CardApps.Border 'Choose what starts when you sign in on the Apps tab.' }
+    else { $script:CardApps.Border.ToolTip = $null }
+    if ($bytes -gt 0) { $script:CardSpace.Value.Text = Format-QpBytes $bytes; $script:CardSpace.Value.Foreground = $todo; $script:CardSpace.Caption.Text = 'Temp files and leftovers' }
     else { $script:CardSpace.Value.Text = 'Nothing to clean'; $script:CardSpace.Value.Foreground = $good; $script:CardSpace.Caption.Text = 'Already tidy' }
     if ($vendors.Count) {
         $script:CardBrands.Border.Visibility = 'Visible'
@@ -3803,6 +3853,8 @@ function Get-VersionLineText {
     if (((Get-Date) - $released).TotalDays -gt 90) { return $text + ' - there may be a newer one.' }
     return $text + '.'
 }
+# Shown straight away; the look in Downloads for a newer one comes after the first read of the PC.
+$script:VersionLine.Text = Get-VersionLineText
 
 function Open-ReleasePage {
     <# Says first that this opens the browser, and that it is the browser - not Quietpane - that connects. #>
@@ -3814,7 +3866,7 @@ function Open-ReleasePage {
 }
 
 function Update-UpdateOffer([string]$Folder = '') {
-    <# The About line, and the Home offer when a newer download is sitting in Downloads. #>
+    <# The version line in Settings, and the Home offer when a newer download is sitting in Downloads. #>
     $script:VersionLine.Text = Get-VersionLineText
     $found = $null
     try { $found = Find-QpDownloadedUpdate -Folder $Folder } catch { }
@@ -4153,7 +4205,7 @@ function Start-SafetyScan([bool]$AskDefender = $false) {
     $scanSummary.Text = 'Having a look around...'
     $script:ScanProgress.Text = if ($AskDefender) { 'Asking Microsoft Defender to scan first. This can take a few minutes - Stop works at any point.' } else { 'Getting started...' }
     $script:CardAdware.Value.Text = 'Checking...'
-    $script:CardAdware.Caption.Text = 'Nothing is changed while we look'
+    $script:CardAdware.Caption.Text = 'Changing nothing'
     Start-Work -StatusText 'Looking for threats and problems (nothing is changed)...' -Params @{ Deep = $AskDefender } -Work {
         param($Deep)
         if ($Deep) { Invoke-QpThreatScan -Type Quick | Out-Null }
@@ -4173,7 +4225,7 @@ function Start-SafetyScan([bool]$AskDefender = $false) {
             $script:ScanProgress.Text = ''
             $script:CardAdware.Value.Text = 'Stopped'
             $script:CardAdware.Value.Foreground = Get-Brush '#0F1B1C'
-            $script:CardAdware.Caption.Text = 'Run the check again when you have a few minutes'
+            $script:CardAdware.Caption.Text = 'Try again when you can'
             Update-ScanSummary
             Update-Buttons
             return
@@ -4724,6 +4776,56 @@ function Test-HealthFacts {
         [bool](($all -match 'Reading right now: 541 B/s') -and ($all -match 'Writing right now: 2\.0 KB/s')),
         [bool](($fahrenheit -match '117.F') -and ($fahrenheit -notmatch '47.C'))
 }
+function Test-Switches {
+    <#
+        The two switches in Settings, flipped the way a person flips them, against a pretend sign-in task
+        (nothing on this PC is touched). A switch may show "on" only once the change has been made and read
+        back: while it is being made it still shows how things were, and a change that fails leaves it
+        where it was, with a message.
+    #>
+    $script:FakeTask = $null; $script:FakeFail = $false; $script:SeenDuring = @()
+    $names = 'Get-QpSignInTask', 'Test-QpTaskWatches', 'Test-QpShortcuts', 'Enable-QpSignInStart', 'Disable-QpSignInStart'
+    $real = @{}; foreach ($n in $names) { $real[$n] = (Get-Command $n -CommandType Function).ScriptBlock }
+    Set-Item function:script:Get-QpSignInTask { $script:FakeTask }
+    Set-Item function:script:Test-QpTaskWatches { param($t) [bool]$t.Watch }
+    Set-Item function:script:Test-QpShortcuts { [pscustomobject]@{ StartMenu = $false; Desktop = $false } }
+    Set-Item function:script:Enable-QpSignInStart { param([switch]$Watch)
+        $script:SeenDuring += [bool]$script:SignInBox.IsChecked
+        if ($script:FakeFail) { return [pscustomobject]@{ Ok = $false; Note = 'Task Scheduler said no.'; Copy = $null } }
+        $script:FakeTask = [pscustomobject]@{ State = 'Ready'; Watch = [bool]$Watch }
+        [pscustomobject]@{ Ok = $true; Note = 'Quietpane will start when you sign in.'; Copy = $null } }
+    Set-Item function:script:Disable-QpSignInStart {
+        if ($script:FakeFail) { throw 'Access is denied.' }
+        $script:FakeTask = $null
+        [pscustomobject]@{ Ok = $true; Note = 'Quietpane will no longer start when you sign in.'; Copy = $null } }
+    $flip = { param($box) ([System.Windows.Automation.Peers.CheckBoxAutomationPeer]::new($box)).Toggle() }
+    try {
+        Update-PlaceControls
+        $startsOff = (-not $script:SignInBox.IsChecked) -and (-not $script:WatchBox.IsEnabled)
+        & $flip $script:SignInBox
+        $on = [bool]$script:SignInBox.IsChecked -and $script:WatchBox.IsEnabled
+        $notEarly = ($script:SeenDuring.Count -eq 1 -and $script:SeenDuring[0] -eq $false)
+        & $flip $script:WatchBox
+        $watching = [bool]$script:WatchBox.IsChecked -and $script:FakeTask.Watch
+        $script:FakeFail = $true; $script:LastMessage = $null
+        & $flip $script:SignInBox                      # switching off fails: it must stay on, and say why
+        $staysOn = [bool]$script:SignInBox.IsChecked -and ($script:LastMessage -match 'Access is denied')
+        $script:FakeTask = $null; Update-PlaceControls; $script:LastMessage = $null
+        & $flip $script:SignInBox                      # switching on fails: it must stay off, and say why
+        $staysOff = (-not $script:SignInBox.IsChecked) -and ($script:LastMessage -match 'Task Scheduler said no')
+        # Fahrenheit, picked in Settings: every temperature changes at once, and nothing is written here.
+        $script:TempButtons['F'].IsChecked = $true
+        $f = (Get-QpTempUnit) -eq 'F'
+        $script:TempButtons['C'].IsChecked = $true
+        $c = (Get-QpTempUnit) -eq 'C'
+    } finally {
+        # The real ones back, exactly as they were.
+        foreach ($n in $names) { Set-Item "function:script:$n" $real[$n] }
+        $script:FakeTask = $null; $script:LastMessage = $null
+    }
+    'starts off: {0}; on only once done: {1}; not shown early: {2}; watch follows: {3}; a failed switch-off stays on: {4}; a failed switch-on stays off: {5}; unit: {6}' -f
+        $startsOff, $on, $notEarly, $watching, $staysOn, $staysOff, ($f -and $c)
+}
 function Test-HealthLayout {
     <#
         The two columns at the window's usual width and at its narrowest: side by side when there is
@@ -4792,7 +4894,7 @@ function Test-Theme {
 
 function Test-UpdateOffer {
     <#
-        The About line and the Home offer, drawn into the real window from a made-up Downloads folder: a
+        The Settings line and the Home offer, drawn into the real window from a made-up Downloads folder: a
         newer Quietpane ZIP must be offered by version, an older one must not, and nothing else is read.
     #>
     $t = Join-Path $env:TEMP ('qp-offer-' + [guid]::NewGuid().ToString('N'))
@@ -4897,6 +4999,7 @@ if ($SelfTest) {
     'live tiles: ' + (Test-LiveTiles)
     'health layout: ' + (Test-HealthLayout)
     'health facts: ' + (Test-HealthFacts)
+    'switches: ' + (Test-Switches)
     'session: ' + (Test-SessionCard)
     'holding up: ' + (Test-SteadyCard)
     'theme: ' + (Test-Theme)
@@ -4913,7 +5016,7 @@ function Show-Welcome {
            "Settings you change can be undone, and cleaned-up files go to the Recycle Bin.`n" +
            "Anything that can't be undone tells you so before you confirm it.`n" +
            "It is free, open source, and comes with no warranty - use it on PCs that are yours to look after.`n`n" +
-           "The full privacy policy and terms are in the About tab. Sound good?"
+           "The full privacy policy and terms are in the Settings tab. Sound good?"
     if ([System.Windows.MessageBox]::Show($window, $msg, 'Quietpane', 'YesNo', 'Information') -ne 'Yes') { return $false }
     try {
         New-Item -ItemType Directory -Path $info.DataRoot -Force | Out-Null

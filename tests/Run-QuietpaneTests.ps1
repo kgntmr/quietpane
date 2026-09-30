@@ -1859,6 +1859,10 @@ Test-Case 'the Health list shows what the PC shares, and leaves out or says "not
     # Made-up PCs drawn into the real window: everything shared, nothing shared, offline, and Fahrenheit.
     $cardsOut -match 'health facts: cores: True; memory: True; clocks: True; fan stopped: True; no clock or fan noise: True; network: True; not connected: True; network not shared: True; power plan: True; fans not shared: True; this pc: True; drive speeds: True; fahrenheit: True'
 }
+Test-Case 'a switch in Settings shows on only once the change is made, and a failed change leaves it where it was' {
+    # Flipped the way a screen reader flips it, against a pretend sign-in task: nothing on this PC is touched.
+    $cardsOut -match 'switches: starts off: True; on only once done: True; not shown early: True; watch follows: True; a failed switch-off stays on: True; a failed switch-on stays off: True; unit: True'
+}
 Test-Case 'the live tiles cope with two graphics cards, built-in graphics, no battery and a silent drive' {
     $cardsOut -match 'two cards: True; built-in graphics quiet: True; no battery box: True; drive temperature not shared: True'
 }
@@ -1890,7 +1894,7 @@ Test-Case 'the window keeps its words down' {
     foreach ($pair in ($matches[1] -split ',\s*')) { if ($pair -match '^(.+)=(\d+)$') { $counts[$matches[1]] = [int]$matches[2] } }
     $total = ($counts.Values | Measure-Object -Sum).Sum
     # Room to grow, but not back to where it was (2,900 words, Privacy alone 1,340).
-    $counts.Count -eq 9 -and $total -lt 2300 -and $counts['Privacy'] -lt 950 -and $counts['Home'] -lt 200 -and $counts['About'] -lt 210
+    $counts.Count -eq 9 -and $total -lt 2300 -and $counts['Privacy'] -lt 950 -and $counts['Home'] -lt 200 -and $counts['Settings'] -lt 210
 }
 
 Section 'What the PC is, and how fast it is going (2.0)'
@@ -2123,7 +2127,7 @@ Test-Case 'looking for a newer version says it opens the browser, and only then 
     $body -match 'Show-ChoiceDialog' -and $body -match "doesn't connect to anything" -and $body -match "if \(\`$choice -eq 'open'\) \{ Open-AsUser" -and
         $body -match '/releases/latest'
 }
-Test-Case 'the About line and the Home offer draw from a made-up Downloads folder' {
+Test-Case 'the Settings line and the Home offer draw from a made-up Downloads folder' {
     $cardsOut -match 'updates: offered: True; older ignored: True; version line: True'
 }
 Test-Case 'every launcher explains a PC that only runs signed apps, instead of failing silently' {

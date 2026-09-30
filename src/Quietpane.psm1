@@ -14,7 +14,7 @@
         user chooses to delete for good, which is confirmed twice and written to the audit log.
       * Quarantined files are moved, never altered, and can be restored byte-for-byte.
       * Other programs' scheduled tasks are disabled, never deleted. (Quietpane's own sign-in task,
-        which you switch on in About, goes completely when you switch it off.)
+        which you switch on in Settings, goes completely when you switch it off.)
       * Security (Defender, SmartScreen, firewall) and Windows Update are never touched.
       * No network requests, no telemetry, no data collection. Everything stays on this PC.
 #>
@@ -3972,8 +3972,8 @@ function New-QpSignInTask {
         Trigger     = $trigger
         Principal   = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Highest
         Settings    = $settings
-        Description = $(if ($Watch) { 'Opens Quietpane on the taskbar when you sign in, and checks once for anything Windows switched back on. Change this in Quietpane > About.' }
-                        else { 'Opens Quietpane on the taskbar when you sign in. Switch it off in Quietpane > About.' })
+        Description = $(if ($Watch) { 'Opens Quietpane on the taskbar when you sign in, and checks once for anything Windows switched back on. Change this in Quietpane > Settings.' }
+                        else { 'Opens Quietpane on the taskbar when you sign in. Switch it off in Quietpane > Settings.' })
     }
     $task = New-ScheduledTask @parts
     $task.Author = 'KomodoWorks'
@@ -5586,7 +5586,7 @@ function Invoke-QpAudit {
         $actions = (@($t.Actions) | ForEach-Object { ("{0} {1}" -f $_.Execute, $_.Arguments).Trim() }) -join ' ; '
         $id = "$($t.TaskPath)$($t.TaskName)"
         if (Test-QpOwnSignInTask $t) {
-            Add-Finding 'Scheduled tasks' 'Info' "Quietpane's own sign-in start: $id" "You switched this on in Quietpane > About. It opens Quietpane from $($script:InstallRoot) when you sign in.`nAction: $actions"
+            Add-Finding 'Scheduled tasks' 'Info' "Quietpane's own sign-in start: $id" "You switched this on in Quietpane > Settings. It opens Quietpane from $($script:InstallRoot) when you sign in.`nAction: $actions"
             continue
         }
         if ($actions -match $suspiciousTask) {
