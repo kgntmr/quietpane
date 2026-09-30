@@ -1,5 +1,6 @@
 @echo off
-rem Quietpane - double-click to start. Windows will ask for administrator rights.
+rem Quietpane - double-click to start. It opens with your own rights; Windows asks for
+rem administrator rights only when a change you press needs them.
 rem Developed by KomodoWorks.com - free, open source, collects nothing.
 if not exist "%~dp0src\Quietpane.psm1" goto notextracted
 rem Windows can restrict PowerShell to signed scripts only (Smart App Control, or a work policy).

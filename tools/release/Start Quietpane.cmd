@@ -1,5 +1,6 @@
 @echo off
-rem Quietpane - double-click to start. Windows will ask for administrator rights.
+rem Quietpane - double-click to start. It opens with your own rights; Windows asks for
+rem administrator rights only when a change you press needs them.
 rem Developed by KomodoWorks.com - free, open source, collects nothing.
 set "APPDIR=%~dp0App files - no need to open"
 if not exist "%APPDIR%\src\Quietpane.psm1" goto notextracted

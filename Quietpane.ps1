@@ -10,7 +10,8 @@
 
 .DESCRIPTION
     Double-click "Start Quietpane" to open the app. From PowerShell:
-        .\Quietpane.ps1                          open the app (asks for administrator rights)
+        .\Quietpane.ps1                          open the app, with your own rights. It asks Windows for
+                                                 administrator rights only when a change needs them.
         .\Quietpane.ps1 -Scan                    run only the read-only scan and open the HTML report
         .\Quietpane.ps1 -Minimized               open on the taskbar, out of the way (used at sign-in)
         .\Quietpane.ps1 -Minimized -Watch        the same, and check once for anything Windows switched
@@ -22,6 +23,10 @@
         .\Quietpane.ps1 -SelfTest -Theme Dark    build it in the dark colours (the self-test is light unless told)
 
     Privacy: this app collects nothing and makes no network connections. See PRIVACY.md.
+
+    When a change needs administrator rights, Quietpane asks Windows to open it again with them, using
+    -Elevated -ForUser <SID> -Tab <tab> -Tick <ticked choices> -Pending <what was pressed>. Those only
+    choose what the new window shows; none of them makes any change, and each is checked before use.
 #>
 param(
     [switch]$Scan,
@@ -32,7 +37,14 @@ param(
     [int]$SnapshotTab = 0,
     [int]$SnapshotWidth = 0,
     [int]$SnapshotHeight = 0,
-    [ValidateSet('', 'Light', 'Dark')][string]$Theme = ''
+    [ValidateSet('', 'Light', 'Dark')][string]$Theme = '',
+    # Opened with administrator rights by Quietpane itself. All of these are untrusted: they are checked
+    # by Test-QpElevationArguments, and they can only ever change what the window shows.
+    [switch]$Elevated,
+    [string]$ForUser = '',
+    [string]$Tab = '',
+    [string]$Tick = '',
+    [string]$Pending = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -43,29 +55,30 @@ function Test-IsAdmin {
         [Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
-# ------------------------------------------------------------------ elevation
-if (-not $SelfTest -and -not (Test-IsAdmin)) {
-    $argList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-STA', '-File', "`"$PSCommandPath`"")
-    if ($Scan) { $argList += '-Scan' } else { $argList = @('-WindowStyle', 'Hidden') + $argList }
-    if ($Minimized) { $argList += '-Minimized' }
-    if ($Watch) { $argList += '-Watch' }
-    try {
-        Start-Process -FilePath 'powershell.exe' -Verb RunAs -ArgumentList $argList | Out-Null
-    } catch {
-        Write-Host 'Administrator rights are needed. Nothing was changed.' -ForegroundColor Yellow
-        Start-Sleep -Seconds 3
-    }
-    exit
-}
+# Quietpane opens with your own rights. There is no asking for administrator rights here any more: each
+# change that needs them asks, when it is pressed (Request-Elevation), and nothing else ever does.
 
 Import-Module $modulePath -Force
 $info = Get-QpInfo
 
+# Who this window works for. An ordinary window works for the account running it. A window opened with
+# administrator rights works for the account that asked for them - if that is said, and said properly;
+# otherwise for nobody it knows, which limits it to changes to Windows itself. The -Elevated switch is
+# only a hint: what counts is the rights this process really has.
+$script:Elevated = Test-IsAdmin
+$script:MySid = [Security.Principal.WindowsIdentity]::GetCurrent().User
+$script:Asked = Test-QpElevationArguments -ForUser $ForUser -Tab $Tab -Tick $Tick -Pending $Pending
+if (-not $script:Elevated -or $SelfTest) { Set-QpActor -RequesterSid $script:MySid.Value }
+else { Set-QpActor -RequesterSid $script:Asked.RequesterSid }
+$script:ActorSid = (Get-QpActor).RequesterSid
+$script:OtherAccount = $script:Elevated -and -not (Test-QpSameUser)
+
 # An old unzipped folder opened after an update: open the newer copy in Program Files instead, so the
 # update sticks whichever Quietpane someone happens to double-click. That copy can only have been written
-# by an administrator, so starting it from here, with the rights already granted, is safe. The copy
-# itself is never redirected, so this cannot go round in a circle.
-if (-not $SelfTest -and -not $Scan) {
+# by an administrator, so starting it is safe. The copy itself is never redirected, so this cannot go
+# round in a circle; and a window Quietpane opened with administrator rights is never redirected either,
+# because the window that asked for it already chose which copy to open.
+if (-not $SelfTest -and -not $Scan -and -not $Elevated) {
     $newer = $null
     try { $newer = Get-QpNewerInstalledCopy -Running $PSScriptRoot } catch { }
     if ($newer) {
@@ -78,12 +91,58 @@ if (-not $SelfTest -and -not $Scan) {
 
 # One Quietpane at a time. Two copies could make changes at once and record them in two different
 # restore points, so the second one brings the first to the front and steps aside.
+#
+# The name is shared by an ordinary window and one with administrator rights, and either may have made
+# it, so it carries its own permissions: the account that made it, and Administrators - which is what
+# lets a window opened for another administrator account take it over. A copy that isn't allowed to
+# open it at all (another account's, or one with more rights) means Quietpane is already open.
+# It is only ever taken and let go on this, the window's own thread.
+# The self-test uses a name of its own, so it can never collide with a Quietpane that is really open.
+$script:MutexName = if ($SelfTest) { "Local\Quietpane-selftest-$PID" } else { 'Local\Quietpane-single-instance' }
 $script:OnlyInstance = $null
+$script:MutexThreads = New-Object System.Collections.ArrayList   # which thread took and let go of it (always the window's own)
+function Show-OtherQuietpane {
+    $other = @(Get-Process powershell -ErrorAction SilentlyContinue | Where-Object { $_.Id -ne $PID -and $_.MainWindowTitle -like 'Quietpane*' })[0]
+    if ($other) { try { [void](New-Object -ComObject WScript.Shell).AppActivate($other.Id); return $true } catch { } }
+    return $false
+}
+function Open-QuietpaneMutex {
+    # Returns the mutex, or $null when another Quietpane owns one this window may not even open.
+    try { return [System.Threading.Mutex]::OpenExisting($script:MutexName, [System.Security.AccessControl.MutexRights]'Synchronize, Modify') }
+    catch [System.Threading.WaitHandleCannotBeOpenedException] { }
+    catch [System.UnauthorizedAccessException] { return $null }
+    $sec = New-Object System.Security.AccessControl.MutexSecurity
+    foreach ($who in $script:MySid, (New-Object System.Security.Principal.SecurityIdentifier('S-1-5-32-544'))) {
+        $sec.AddAccessRule((New-Object System.Security.AccessControl.MutexAccessRule($who, [System.Security.AccessControl.MutexRights]'Synchronize, Modify', 'Allow')))
+    }
+    $created = $false
+    try { return (New-Object System.Threading.Mutex($false, $script:MutexName, [ref]$created, $sec)) }
+    catch [System.UnauthorizedAccessException] { return $null }
+}
+function Enter-QuietpaneMutex([int]$WaitMs = 0) {
+    <# $true once this window holds the one-at-a-time mutex. A mutex left behind by a Quietpane that crashed counts as free. #>
+    if (-not $script:OnlyInstance) { $script:OnlyInstance = Open-QuietpaneMutex }
+    if (-not $script:OnlyInstance) { return $false }
+    [void]$script:MutexThreads.Add([System.Threading.Thread]::CurrentThread.ManagedThreadId)
+    try { return $script:OnlyInstance.WaitOne($WaitMs, $false) }
+    catch [System.Threading.AbandonedMutexException] { return $true }
+}
+function Exit-QuietpaneMutex {
+    if (-not $script:OnlyInstance) { return }
+    [void]$script:MutexThreads.Add([System.Threading.Thread]::CurrentThread.ManagedThreadId)
+    try { $script:OnlyInstance.ReleaseMutex() } catch { }
+}
 if (-not $SelfTest -and -not $Scan) {
-    $script:OnlyInstance = New-Object System.Threading.Mutex($false, 'Local\Quietpane-single-instance')
-    if (-not $script:OnlyInstance.WaitOne(0, $false)) {
-        $other = @(Get-Process powershell -ErrorAction SilentlyContinue | Where-Object { $_.Id -ne $PID -and $_.MainWindowTitle -like 'Quietpane*' })[0]
-        if ($other) { try { (New-Object -ComObject WScript.Shell).AppActivate($other.Id) | Out-Null } catch { } }
+    # Opened by a Quietpane asking for administrator rights: that window lets go of the mutex a moment
+    # after this one starts, so this one waits for it a little. Anyone else takes it at once or steps aside.
+    $wait = if ($Elevated) { 10000 } else { 0 }
+    if (-not (Enter-QuietpaneMutex $wait)) {
+        if (-not (Show-OtherQuietpane) -and -not $Elevated) {
+            # Windows won't let this window bring that one forward (it has more rights, or is another
+            # account's), so say so rather than vanish.
+            # (Windows' own message box, through its shell: the window's code is not loaded yet.)
+            try { [void](New-Object -ComObject WScript.Shell).Popup('Quietpane is already open.', 0, 'Quietpane', 64) } catch { }
+        }
         exit
     }
 }
@@ -217,7 +276,8 @@ $script:Palette = [ordered]@{
 # Not $script:Theme: the -Theme parameter lives at script scope too, and would be the same variable.
 $script:ActiveTheme = 'Light'
 $script:BrushCache = @{}
-$script:AppearanceFile = Join-Path $info.DataRoot 'appearance.txt'
+# Your own settings live in your own store (%LOCALAPPDATA%\Quietpane), never in the shared machine one.
+$script:AppearanceFile = Join-Path $info.UserDataRoot 'appearance.txt'
 
 function Get-Brush([string]$Hex) {
     <# The one shared brush for this colour name, in the current theme's colour. #>
@@ -248,12 +308,8 @@ function Get-WindowsTheme {
 
 function Get-AppearanceChoice {
     <# 'System' unless someone chose Light or Dark in Settings. #>
-    try {
-        if (Test-Path $script:AppearanceFile) {
-            $v = ([IO.File]::ReadAllText($script:AppearanceFile)).Trim()
-            if ($v -in 'Light', 'Dark') { return $v }
-        }
-    } catch { }
+    $v = Read-QpTextFile -Path $script:AppearanceFile -MaxBytes 64
+    if ($v -and $v.Trim() -in 'Light', 'Dark') { return $v.Trim() }
     return 'System'
 }
 
@@ -307,10 +363,8 @@ function Set-Theme([ValidateSet('Light', 'Dark')][string]$Name) {
 function Set-AppearanceChoice([ValidateSet('System', 'Light', 'Dark')][string]$Choice) {
     <# The choice in Settings: remembered as one word, and applied straight away. #>
     $script:AppearanceChoice = $Choice
-    try {
-        New-Item -ItemType Directory -Path $info.DataRoot -Force | Out-Null
-        [IO.File]::WriteAllText($script:AppearanceFile, $Choice)
-    } catch { }
+    # A window working for another account keeps the choice until it closes, and writes nothing.
+    [void](Write-QpTextFile -Path $script:AppearanceFile -Text $Choice)
     Set-Theme (Resolve-Theme)
 }
 
@@ -489,6 +543,8 @@ if ($Theme) { $script:ActiveTheme = $Theme; $script:AppearanceChoice = $Theme } 
             <Run Text="Developed by "/><Hyperlink x:Name="LinkHeader" FontWeight="SemiBold">KomodoWorks.com</Hyperlink>
           </TextBlock>
           <TextBlock HorizontalAlignment="Right" Foreground="#8FA3A0" FontSize="11.5" Margin="0,3,0,0" Text="Free - open source - no tracking"/>
+          <TextBlock x:Name="AdminNote" HorizontalAlignment="Right" Foreground="#FFB627" FontSize="11.5" FontWeight="SemiBold" Margin="0,3,0,0"
+                     Visibility="Collapsed" Text="Admin rights on until you close Quietpane"/>
         </StackPanel>
       </Grid>
     </Border>
@@ -579,7 +635,11 @@ $window.Dispatcher.add_UnhandledException({
 $ui = @{}
 foreach ($n in 'Tabs', 'LogBox', 'Status', 'BtnRecommended', 'BtnNone', 'BtnPreview', 'BtnApply', 'HeaderLogo',
                'LinkHeader', 'LinkFooter', 'LinkPrivacy', 'LinkTerms', 'LinkContact', 'VersionRun',
-               'LinkDetails', 'AdvancedButtons', 'LogRow', 'LogSplitter', 'StatusLine') { $ui[$n] = $window.FindName($n) }
+               'LinkDetails', 'AdvancedButtons', 'LogRow', 'LogSplitter', 'StatusLine', 'AdminNote') { $ui[$n] = $window.FindName($n) }
+# A window with administrator rights says so, in its title and at the top, for as long as it is open.
+$script:TitleBase = if ($script:Elevated -and -not $SelfTest) { 'Quietpane - by KomodoWorks (admin)' } else { 'Quietpane - by KomodoWorks' }
+$window.Title = $script:TitleBase
+if ($script:Elevated -and -not $SelfTest) { $ui.AdminNote.Visibility = 'Visible' }
 # Screen readers hear the status line whenever it changes ("Reading the current state...", "All done").
 # It is spoken by name, so the name follows the text.
 function Send-StatusToScreenReader {
@@ -644,6 +704,7 @@ $script:TabIcons = @{ home = 0xE80F; health = 0xE95E; scan = 0xEA18; privacy = 0
     apps = 0xE71D; cleanup = 0xEDA2; undo = 0xE7A7; about = 0xE713 }
 $script:IconFont = New-Object System.Windows.Media.FontFamily('Segoe Fluent Icons, Segoe MDL2 Assets')
 $script:TabIconBlocks = New-Object System.Collections.ArrayList
+$script:TabPanels = @{}
 # On a narrow window the icons step aside, so the nine tabs stay on one row instead of wrapping onto two
 # (which WPF does by shuffling the rows - the tab you are on jumps to the bottom).
 function Update-TabIcons([double]$Width) {
@@ -685,6 +746,7 @@ function New-TabPage {
     $sv.Content = $sp
     $tab.Content = $sv
     [void]$ui.Tabs.Items.Add($tab)
+    $script:TabPanels[$Key] = $sp
     return $sp
 }
 
@@ -703,6 +765,23 @@ function Set-MoreInfo($Element, [string]$Text) {
     [System.Windows.Automation.AutomationProperties]::SetHelpText($Element, $Text)
 }
 
+# Windows' own shield, for anything that needs administrator rights (see Request-Elevation).
+$script:ShieldImage = $null
+$script:ShieldTip = 'Windows will ask for permission. Quietpane reopens with admin rights and your choices still ticked - nothing happens until you press this again.'
+$script:ShieldPrev = @{}
+function Get-ShieldImage {
+    <# Windows' own shield, from Windows itself - no picture shipped, nothing downloaded. Made once, then shared. #>
+    if (-not $script:ShieldImage) {
+        try {
+            Add-Type -AssemblyName System.Drawing
+            $src = [System.Windows.Interop.Imaging]::CreateBitmapSourceFromHIcon([System.Drawing.SystemIcons]::Shield.Handle, [System.Windows.Int32Rect]::Empty,
+                [System.Windows.Media.Imaging.BitmapSizeOptions]::FromWidthAndHeight(16, 16))
+            $src.Freeze()
+            $script:ShieldImage = $src
+        } catch { }
+    }
+    return $script:ShieldImage
+}
 # ------------------------------------------------------------------ the shared pieces
 # One way of showing information on every tab, after the way MSI Center shows its hardware: a ring for
 # the two things that work hardest, one big number and one bar for things that fill up, and a plain list
@@ -1042,7 +1121,7 @@ function Add-Option {
         [void]$rowStack.Children.Add($desc)
         if ($Short -and $Description -and $Description -ne $Short) { Set-MoreInfo $cb $Description; Set-MoreInfo $desc $Description }
     }
-    [void]$script:Options[$Key].Add([pscustomobject]@{ Id = $Id; CheckBox = $cb; Recommended = $Recommended; Label = $label; Title = $Title; Status = 'Unknown' })
+    [void]$script:Options[$Key].Add([pscustomobject]@{ Id = $Id; CheckBox = $cb; Recommended = $Recommended; Label = $label; Title = $Title; Status = 'Unknown'; NeedsAdmin = $false })
 }
 
 # ------------------------------------------------------------------ tabs
@@ -1541,6 +1620,12 @@ $btnUndo = New-Button 'Undo selected restore point' -Primary
 $btnUndoRefresh = New-Button 'Refresh list'
 [void]$undoButtons.Children.Add($btnUndo)
 [void]$undoButtons.Children.Add($btnUndoRefresh)
+# Changes made with administrator rights are kept in the locked machine store, which an ordinary window
+# never opens - not even to count them. This button is always here, and asks for the rights to look.
+$script:BtnMachineUndo = New-Button 'Changes made with admin rights' '8,0,0,0'
+$script:BtnMachineUndo.Visibility = $(if ($script:Elevated) { 'Collapsed' } else { 'Visible' })
+$script:BtnMachineUndo.Add_Click({ [void](Request-Elevation 'undo' 'undo') })
+[void]$undoButtons.Children.Add($script:BtnMachineUndo)
 [void]$undoPanel.Children.Add($undoButtons)
 
 # 7. Settings - how Quietpane looks and starts, updates, our promise, and who made it. Laid out like a
@@ -1593,14 +1678,30 @@ $script:SignInBox = New-Switch 'Start Quietpane when I sign in'
 $script:SignInBox.IsEnabled = $false
 $script:SignInBox.ToolTip = 'Checking whether this is on...'
 [System.Windows.Controls.ToolTipService]::SetShowOnDisabled($script:SignInBox, $true)
-$signInRow = New-SettingRow 'Start Quietpane when I sign in' 'It waits on the taskbar and does nothing until you click it.' $script:SignInBox
+function New-ShieldedControl($Control) {
+    <# A switch with Windows' shield beside it, for a setting only an administrator can change. The shield goes when this window has the rights. #>
+    $sp = New-Object System.Windows.Controls.StackPanel
+    $sp.Orientation = 'Horizontal'
+    $img = New-Object System.Windows.Controls.Image
+    $img.Source = Get-ShieldImage
+    $img.Width = 16; $img.Height = 16
+    $img.Margin = Get-Thick '0,0,8,0'
+    $img.VerticalAlignment = 'Center'
+    $img.Visibility = $(if ($script:Elevated) { 'Collapsed' } else { 'Visible' })
+    Set-MoreInfo $img $script:ShieldTip
+    if (-not $script:Elevated) { [System.Windows.Automation.AutomationProperties]::SetHelpText($Control, $script:ShieldTip) }
+    [void]$sp.Children.Add($img)
+    [void]$sp.Children.Add($Control)
+    return $sp
+}
+$signInRow = New-SettingRow 'Start Quietpane when I sign in' 'It waits on the taskbar and does nothing until you click it.' (New-ShieldedControl $script:SignInBox)
 [void]$aboutPanel.Children.Add($signInRow.Border)
 # Only makes sense with the one above, so it sits under it, indented, and waits until that is on.
 $script:WatchBox = New-Switch 'Also tell me if Windows switches things back on'
 $script:WatchBox.IsEnabled = $false
 $script:WatchBox.ToolTip = 'Switch on "Start Quietpane when I sign in" first.'
 [System.Windows.Controls.ToolTipService]::SetShowOnDisabled($script:WatchBox, $true)
-$watchRow = New-SettingRow 'Also tell me if Windows switches things back on' 'Checks once as you sign in, and badges the taskbar icon if anything came back.' $script:WatchBox
+$watchRow = New-SettingRow 'Also tell me if Windows switches things back on' 'Checks once as you sign in, and badges the taskbar icon if anything came back.' (New-ShieldedControl $script:WatchBox)
 $watchRow.Border.Margin = Get-Thick '24,0,0,0'
 Set-MoreInfo $watchRow.Note 'About a second of work, just after you sign in. If nothing came back, you won''t notice it at all.'
 [void]$aboutPanel.Children.Add($watchRow.Border)
@@ -1633,10 +1734,7 @@ $btnUpdateFromFile.Add_Click({
 $btnUpdateNow.Add_Click({ if ($script:OfferedUpdate) { Install-QuietpaneUpdate $script:OfferedUpdate.Path } })
 $btnUpdateLater.Add_Click({
     # "Not now" means not for this version; a newer one after it is offered again.
-    try {
-        New-Item -ItemType Directory -Path $info.DataRoot -Force | Out-Null
-        [IO.File]::WriteAllText($script:UpdateDismissedFile, [string]$script:OfferedUpdate.Version)
-    } catch { }
+    [void](Write-QpTextFile -Path $script:UpdateDismissedFile -Text ([string]$script:OfferedUpdate.Version))
     $script:UpdatePanel.Visibility = 'Collapsed'
 })
 
@@ -1755,7 +1853,8 @@ function Set-TemperatureChoice([string]$Unit) {
         again at once. If it cannot be saved, the choice goes back and says why - never a choice that did not stick.
     #>
     if ($Unit -eq (Get-QpTempUnit)) { return }
-    $ok = if ($SelfTest) { Set-QpTempUnit -Unit $Unit -SessionOnly } else { Set-QpTempUnit -Unit $Unit }
+    # A window working for another account writes nothing to anyone's own store: the choice lasts until it closes.
+    $ok = if ($SelfTest -or $script:OtherAccount) { Set-QpTempUnit -Unit $Unit -SessionOnly } else { Set-QpTempUnit -Unit $Unit }
     if (-not $ok) {
         $script:TempButtons[(Get-QpTempUnit)].IsChecked = $true
         Show-Message 'That choice could not be saved, so temperatures stay as they were.'
@@ -1802,6 +1901,7 @@ function Set-CopyFollowUp($Result) {
 }
 $btnShortcut.Add_Click({
     if (Test-Busy) { return }
+    if (Request-Elevation 'shortcut' 'about') { return }
     $s = Test-QpShortcuts
     try {
         if ($s.StartMenu -or $s.Desktop) {
@@ -1826,6 +1926,7 @@ $script:OnSignInSwitch = {
     $want = [bool]$script:SignInBox.IsChecked
     Set-SwitchQuietly $script:SignInBox (-not $want)
     if (Test-Busy) { Update-PlaceControls; return }
+    if (Request-Elevation 'signin' 'about') { return }
     try {
         $r = if ($want) { Enable-QpSignInStart } else { Disable-QpSignInStart }
         Set-CopyFollowUp $r
@@ -1846,6 +1947,7 @@ $script:OnWatchSwitch = {
     $want = [bool]$script:WatchBox.IsChecked
     Set-SwitchQuietly $script:WatchBox (-not $want)
     if (Test-Busy) { Update-PlaceControls; return }
+    if (Request-Elevation 'signin' 'about') { return }
     try {
         # The sign-in task carries this choice, so changing it means setting the task up again.
         $r = Enable-QpSignInStart -Watch:$want
@@ -1866,9 +1968,310 @@ $btnSite.Add_Click({ Open-AsUser $info.BrandUrl })
 $btnRepo.Add_Click({ Open-AsUser $info.RepoUrl })
 $btnMail.Add_Click({ Open-AsUser "mailto:$($info.BrandEmail)?subject=Quietpane" })
 $btnData.Add_Click({
-    if (Test-Path $info.DataRoot) { Open-AsUser $info.DataRoot }
+    # Your own store. The machine store is locked to administrators and is not opened from here.
+    if (Test-Path -LiteralPath $info.UserDataRoot) { Open-AsUser $info.UserDataRoot }
     else { [void][System.Windows.MessageBox]::Show('Nothing saved yet. Restore points show up here after your first change.', 'Quietpane') }
 })
+
+# ------------------------------------------------------------------ administrator rights, only when needed
+#
+# Quietpane opens with your own rights. An action that needs administrator rights carries Windows' own
+# shield. Pressing it brings up Windows' permission prompt - nothing of Quietpane's first - and, if you
+# say yes, a second Quietpane opens with those rights, on the same tab, with the same things ticked. It
+# does nothing by itself: you press the action again there. If you say no, nothing changes and this
+# window carries on. The shield is only a sign: the engine decides, on its own, what may be done.
+
+
+function Get-ButtonLabel($Button) {
+    $c = $Button.Content
+    if ($c -is [System.Windows.Controls.StackPanel] -and [string]$c.Tag -eq 'shield') { return [string]$c.Children[1].Text }
+    return [string]$c
+}
+
+function Set-ButtonLabel($Button, [string]$Text) {
+    <# A button's words, kept beside its shield if it has one. #>
+    $c = $Button.Content
+    if ($c -is [System.Windows.Controls.StackPanel] -and [string]$c.Tag -eq 'shield') {
+        $c.Children[1].Text = $Text
+        [System.Windows.Automation.AutomationProperties]::SetName($Button, $Text)
+    } else { $Button.Content = $Text }
+}
+
+function Set-ShieldState($Button, [bool]$NeedsAdmin) {
+    <#
+        Puts Windows' shield beside a button's words while it needs administrator rights this window
+        doesn't have, and takes it away when it doesn't. Screen readers hear the same as the tooltip.
+    #>
+    if (-not $Button) { return }
+    $show = $NeedsAdmin -and -not $script:Elevated
+    $key = [System.Runtime.CompilerServices.RuntimeHelpers]::GetHashCode($Button)
+    $has = ($Button.Content -is [System.Windows.Controls.StackPanel] -and [string]$Button.Content.Tag -eq 'shield')
+    if ($show -and -not $has) {
+        $text = Get-ButtonLabel $Button
+        $sp = New-Object System.Windows.Controls.StackPanel
+        $sp.Orientation = 'Horizontal'
+        $sp.Tag = 'shield'
+        $img = New-Object System.Windows.Controls.Image
+        $img.Source = Get-ShieldImage
+        $img.Width = 16; $img.Height = 16
+        $img.Margin = Get-Thick '0,0,6,0'
+        $img.VerticalAlignment = 'Center'
+        $tb = New-Object System.Windows.Controls.TextBlock
+        $tb.Text = $text
+        $tb.VerticalAlignment = 'Center'
+        [void]$sp.Children.Add($img)
+        [void]$sp.Children.Add($tb)
+        $script:ShieldPrev[$key] = @{ Tip = $Button.ToolTip; Help = [System.Windows.Automation.AutomationProperties]::GetHelpText($Button) }
+        $Button.Content = $sp
+        [System.Windows.Automation.AutomationProperties]::SetName($Button, $text)
+        Set-MoreInfo $Button $script:ShieldTip
+    } elseif (-not $show -and $has) {
+        $text = Get-ButtonLabel $Button
+        $Button.Content = $text
+        [System.Windows.Automation.AutomationProperties]::SetName($Button, $text)
+        $prev = $script:ShieldPrev[$key]
+        $Button.ToolTip = $(if ($prev) { $prev.Tip } else { $null })
+        [System.Windows.Automation.AutomationProperties]::SetHelpText($Button, $(if ($prev) { [string]$prev.Help } else { '' }))
+    }
+}
+
+function Test-Shielded($Button) {
+    return [bool]($Button -and $Button.Content -is [System.Windows.Controls.StackPanel] -and [string]$Button.Content.Tag -eq 'shield')
+}
+
+$script:Policy = @{}
+function Test-OptionNeedsAdmin($Option) { return [bool]($Option -and $Option.NeedsAdmin) }
+
+function Get-TickedPairs([string[]]$Lists) {
+    <# What is ticked in these lists, as (list, id) pairs - what a window with administrator rights is asked to tick again. #>
+    $pairs = @()
+    foreach ($k in $Lists) {
+        if ($k -eq 'junk') { foreach ($j in @($script:JunkBoxes | Where-Object { $_.CheckBox.IsChecked })) { $pairs += ,@('junk', [string]$j.Key) } }
+        elseif ($k -eq 'deprovision') { $pairs += ,@('deprovision', $(if ($script:DeprovisionCb.IsChecked) { '1' } else { '0' })) }
+        else { foreach ($o in @($script:Options[$k] | Where-Object { $_.CheckBox.IsChecked })) { $pairs += ,@($k, [string]$o.Id) } }
+    }
+    return ,$pairs
+}
+
+function Get-ApplyNeedsAdmin {
+    <# Whether pressing Apply on this tab, with these ticks, needs administrator rights. #>
+    foreach ($k in @(Get-TabOptionKeys)) { foreach ($o in @($script:Options[$k])) { if ($o.CheckBox.IsChecked -and $o.NeedsAdmin) { return $true } } }
+    if ([string]$ui.Tabs.SelectedItem.Tag -eq 'apps' -and $script:DeprovisionCb.IsChecked -and @($script:Options['apps'] | Where-Object { $_.CheckBox.IsChecked }).Count) {
+        $p = $script:Policy['deprovision']
+        if (-not $p -or $p.NeedsAdmin) { return $true }
+    }
+    return $false
+}
+
+function Get-PutBackNeedsAdmin {
+    $d = $script:CameBack
+    if (-not $d -or -not $d.Count) { return $false }
+    if (@($d.Apps).Count) { return $true }   # it keeps them off new accounts too, which is the PC's
+    foreach ($x in @($d.Privacy)) { $p = $script:Policy["privacy|$($x.Id)"]; if (-not $p -or $p.NeedsAdmin) { return $true } }
+    foreach ($x in @($d.Vendors)) { $p = $script:Policy["vendors|$($x.Id)"]; if (-not $p -or $p.NeedsAdmin) { return $true } }
+    foreach ($x in @($d.Startup)) { $p = $script:Policy["startup|$($x.Id)"]; if (-not $p -or $p.NeedsAdmin) { return $true } }
+    return $false
+}
+
+function Update-Shields {
+    <# Every shield, worked out again from what is ticked right now. Called whenever ticks change or the PC is read again. #>
+    if ($script:Elevated) { return }
+    try {
+        Set-ShieldState $ui.BtnApply (Get-ApplyNeedsAdmin)
+        Set-ShieldState $btnOneClick $true
+        Set-ShieldState $btnPutBack (Get-PutBackNeedsAdmin)
+        Set-ShieldState $btnShortcut $true
+        Set-ShieldState $script:BtnMachineUndo $true
+        Set-ShieldState $script:BtnQuarantineOpen $true
+        $junkNeeds = [bool]@($script:JunkBoxes | Where-Object { $_.CheckBox.IsChecked -and $_.NeedsAdmin }).Count
+        foreach ($b in @($script:JunkButtons)) { Set-ShieldState $b $junkNeeds }
+    } catch { }
+}
+
+$script:Handoff = $null
+$script:HandoffTimer = $null
+$script:HandedOver = $false
+$script:HandoffTest = $false   # set by the self-test, which then drives the handoff with pretend windows
+# How the second Quietpane is started: Windows' own permission prompt (RunAs), always -File, never a
+# command built from text. The self-test swaps in pretend launches, so no prompt ever appears.
+$script:LaunchElevated = {
+    param([string]$ArgLine)
+    Start-Process -FilePath (Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe') -Verb RunAs -ArgumentList $ArgLine -PassThru -ErrorAction Stop
+}
+function Complete-Handoff {
+    <# This window's part is over: the other one is the Quietpane to use now. #>
+    $script:HandedOver = $true
+    if ($SelfTest) { $script:HandoffClosed = $true } else { $window.Close() }
+}
+function Request-Elevation {
+    <#
+        Asks Windows to open Quietpane again with administrator rights, on this tab, with these ticked,
+        and with a note saying what to press. Returns $true when the click has been dealt with here (the
+        request was made, or refused, or declined) - the caller then does nothing else.
+
+        This window keeps the one-at-a-time mutex while Windows asks. If you say no, or Windows can't
+        start it, this window simply carries on. If it starts, this window lets go of the mutex, waits
+        for the new window to show itself - and only then closes. If the new one ends without showing,
+        this one takes the mutex back and carries on.
+    #>
+    param([Parameter(Mandatory)][string]$PendingId, [string]$TabKey = '', [object[]]$Ticks = @())
+    if ($script:Elevated) { return $false }
+    if ($SelfTest -and -not $script:HandoffTest) { $script:LastElevationRequest = [pscustomobject]@{ Pending = $PendingId; Tab = $TabKey; Ticks = @($Ticks) }; return $true }
+    if ($script:Handoff) { $ui.Status.Text = 'Already asking Windows for admin rights...'; return $true }
+    if (-not $TabKey) { $TabKey = [string]$ui.Tabs.SelectedItem.Tag }
+    # The copy in Program Files, when it is this very version (only an administrator can change it);
+    # otherwise this one.
+    $target = $PSCommandPath
+    try {
+        $pf = (Get-QpShortcutPaths).InstallRoot
+        if (-not (Test-QpSamePath $PSScriptRoot $pf) -and (Get-QpAppVersion $pf) -eq $info.Version -and (Test-QpCopyMatches $PSScriptRoot $pf)) { $target = Join-Path $pf 'Quietpane.ps1' }
+    } catch { }
+    $named = [ordered]@{ ForUser = $script:MySid.Value; Tab = $TabKey; Pending = $PendingId }
+    try {
+        $packed = ConvertTo-QpTickList @($Ticks)
+        if ($packed.Length -gt 24000) { $packed = ''; $ui.LogBox.AppendText('Too many things are ticked to carry over; tick them again in the new window.' + [Environment]::NewLine) }
+        if ($packed) { $named['Tick'] = $packed }
+        $argLine = ConvertTo-QpArgumentString -Script $target -Named $named -Switches 'Elevated'
+    } catch {
+        $ui.Status.Text = "Quietpane couldn't ask for admin rights: $($_.Exception.Message) Nothing was changed."
+        return $true
+    }
+    $script:LastArgLine = $argLine
+    try {
+        $child = & $script:LaunchElevated $argLine
+        if (-not $child) { throw 'Windows did not say it had started it.' }
+    } catch {
+        $e = $_.Exception
+        while ($e.InnerException -and -not ($e -is [System.ComponentModel.Win32Exception])) { $e = $e.InnerException }
+        if ($e -is [System.ComponentModel.Win32Exception] -and $e.NativeErrorCode -eq 1223) { $ui.Status.Text = 'Nothing was changed.' }
+        else { $ui.Status.Text = "Windows couldn't open Quietpane with admin rights ($($e.Message)). Nothing was changed." }
+        return $true
+    }
+    # Started. Let go of the mutex so the new window can take it, and wait for it to show itself.
+    $window.IsEnabled = $false
+    $ui.Status.Text = 'Opening Quietpane with admin rights...'
+    Exit-QuietpaneMutex
+    $script:Handoff = @{ Child = $child; Started = Get-Date; Reenabled = $false }
+    if (-not $script:HandoffTest) {
+        $script:HandoffTimer = New-Object System.Windows.Threading.DispatcherTimer
+        $script:HandoffTimer.Interval = [TimeSpan]::FromMilliseconds(250)
+        $script:HandoffTimer.Add_Tick({ Watch-Handoff })
+        $script:HandoffTimer.Start()
+    }
+    return $true
+}
+
+function Watch-Handoff {
+    <#
+        Four times a second, on this window's own thread: has the new window shown itself (then this one
+        closes), or ended without doing so (then this one takes the mutex back and carries on)? Never
+        waits, so nothing can hang on the other window. After a minute this window is usable again,
+        and it still closes if the new one shows up later - so there is only ever one to use.
+    #>
+    $h = $script:Handoff
+    if (-not $h) { if ($script:HandoffTimer) { $script:HandoffTimer.Stop() }; return }
+    $stop = { if ($script:HandoffTimer) { $script:HandoffTimer.Stop() } }
+    $c = $h.Child
+    $gone = $false
+    try { $gone = $c.HasExited } catch { $gone = $false }
+    if (-not $gone) {
+        $ready = $false
+        try { $c.Refresh(); $ready = ($c.MainWindowHandle -ne [IntPtr]::Zero -and "$($c.MainWindowTitle)" -like 'Quietpane*') } catch { }
+        if ($ready) {
+            & $stop; $script:Handoff = $null
+            Complete-Handoff
+            return
+        }
+        if (-not $h.Reenabled -and ((Get-Date) - $h.Started).TotalSeconds -ge 60) {
+            $h.Reenabled = $true
+            $window.IsEnabled = $true
+            $ui.Status.Text = 'The admin window is taking a long time. You can keep using this one.'
+        }
+        return
+    }
+    & $stop; $script:Handoff = $null
+    if (Enter-QuietpaneMutex 0) {
+        $window.IsEnabled = $true
+        $ui.Status.Text = "The admin window didn't open. Nothing was changed."
+    } else {
+        # Another Quietpane took over in between. That one is the window to use now.
+        if (-not $SelfTest) { [void](Show-OtherQuietpane) }
+        Complete-Handoff
+    }
+}
+
+# ---- in the window opened with administrator rights: what was asked for, shown, and nothing more
+
+$script:PendingNotes = @{
+    apply        = 'Admin rights on. Your choices are ticked - press Apply selected to go ahead.'
+    oneclick     = 'Admin rights on. Press Quiet my PC now to go ahead.'
+    undo         = 'Admin rights on. Pick the restore point below and press Undo to go ahead.'
+    quarantine   = 'Admin rights on. Run the check again, then choose what to do with it.'
+    scan         = 'Admin rights on. Run the check again to see everything.'
+    shortcut     = 'Admin rights on. Press the Start menu and desktop button again to go ahead.'
+    signin       = 'Admin rights on. Flip the switch again to go ahead.'
+    putback      = 'Admin rights on. Press Switch them off again to go ahead.'
+    vendorremove = 'Admin rights on. Your choices are ticked - press Remove the ticked extras to go ahead.'
+}
+$script:PendingTicks = $null
+
+function Show-ElevatedNote {
+    <# The mint note at the top of the tab that was asked for. #>
+    if (-not $script:Elevated) { return }
+    if ($script:ElevatedNote -and $script:ElevatedNote.Parent) { $script:ElevatedNote.Parent.Children.Remove($script:ElevatedNote) }
+    $text = if ($script:OtherAccount) {
+        "Admin rights on as $(Get-QpAccountName $script:MySid.Value). Only changes to Windows itself can be made here - your own settings stay with your normal Quietpane window."
+    } elseif ($script:Asked.Pending) { $script:PendingNotes[$script:Asked.Pending] } else { 'Admin rights on until you close Quietpane.' }
+    $note = New-Object System.Windows.Controls.Border
+    $note.Background = Get-Brush '#EAF5F1'
+    $note.BorderBrush = Get-Brush '#117A68'
+    $note.BorderThickness = Get-Thick '4,0,0,0'
+    $note.Padding = Get-Thick '14,10'
+    $note.Margin = Get-Thick '0,0,0,12'
+    $note.Child = New-Text $text 13.5 'SemiBold' '#0F1B1C' '0'
+    [System.Windows.Automation.AutomationProperties]::SetName($note, $text)
+    $panel = $script:TabPanels[$script:Asked.Tab]
+    if ($panel) { $panel.Children.Insert(0, $note) }
+    $script:ElevatedNote = $note
+}
+
+function Set-PendingTicks {
+    <#
+        Ticks what the other window had ticked - once, after the first read of the PC, and only choices
+        that are really on this tab's lists right now. Anything else is dropped and noted in the details.
+    #>
+    $p = $script:PendingTicks
+    if (-not $p) { return }
+    $script:PendingTicks = $null
+    $lists = @(switch ($script:Asked.Tab) { 'privacy' { 'privacy', 'devices', 'extensions' } 'vendors' { 'vendors', 'junk' } 'apps' { 'startup', 'apps', 'deprovision' } 'cleanup' { 'cleanup' } })
+    foreach ($k in $lists) {
+        if ($k -eq 'junk') { foreach ($j in @($script:JunkBoxes)) { $j.CheckBox.IsChecked = $false } }
+        elseif ($k -ne 'deprovision') { foreach ($o in @($script:Options[$k])) { $o.CheckBox.IsChecked = $false } }
+    }
+    $dropped = [int]$script:Asked.Dropped
+    foreach ($pair in @($p)) {
+        $hit = $null
+        if ($pair.List -eq 'deprovision') { $script:DeprovisionCb.IsChecked = ($pair.Id -eq '1'); continue }
+        if ($pair.List -eq 'junk') { $hit = @($script:JunkBoxes | Where-Object { [string]$_.Key -ceq $pair.Id })[0] }
+        elseif ($lists -contains $pair.List) { $hit = @($script:Options[$pair.List] | Where-Object { [string]$_.Id -ceq $pair.Id })[0] }
+        if ($hit) { $hit.CheckBox.IsChecked = $true } else { $dropped++ }
+    }
+    if ($dropped) { $ui.LogBox.AppendText(("{0} choice(s) from the other window aren't on this tab now, so they were left unticked." -f $dropped) + [Environment]::NewLine) }
+    Update-TickCount
+}
+
+function Show-BatchSummary($Result) {
+    <# What a batch did, counted, for the status line; anything not done also gets a message you have to click away. #>
+    $s = @($Result | Where-Object { $_ -and $_.PSObject.Properties['QpSummary'] })[-1]
+    if (-not $s) { return }
+    $script:PendingStatus = $s.Text
+    if ($s.Refused -gt 0) {
+        $why = @($s.Problems | Select-Object -First 5) -join "`n"
+        $msg = "Some of that wasn't done:`n`n$why"
+        if ($script:OtherAccount) { $msg = (Get-QpAccountMessage) + "`n`n" + $why }
+        Show-Message $msg
+    }
+}
 
 # ------------------------------------------------------------------ background worker
 $script:Sync = [hashtable]::Synchronized(@{ Queue = New-Object 'System.Collections.Concurrent.ConcurrentQueue[string]'; Result = $null; Progress = $null; Cancel = $false })
@@ -1895,8 +2298,9 @@ function Update-TickCount {
     try {
         $n = 0
         foreach ($k in (Get-TabOptionKeys)) { $n += @($script:Options[$k] | Where-Object { $_.CheckBox.IsChecked }).Count }
-        $ui.BtnApply.Content = if ($n -gt 0) { "Apply $n selected" } else { 'Apply selected' }
+        Set-ButtonLabel $ui.BtnApply $(if ($n -gt 0) { "Apply $n selected" } else { 'Apply selected' })
     } catch { }
+    Update-Shields
 }
 
 function Update-Buttons {
@@ -1942,12 +2346,15 @@ function Start-Work {
     $rs.Open()
     $rs.SessionStateProxy.SetVariable('Sync', $script:Sync)
     $rs.SessionStateProxy.SetVariable('ModulePath', $modulePath)
+    $rs.SessionStateProxy.SetVariable('ActorSid', [string]$script:ActorSid)
     $ps = [powershell]::Create()
     $ps.Runspace = $rs
     $wrapper = {
         param($WorkText, $Params)
         try {
             Import-Module $ModulePath -Force
+            # The worker works for the same account as the window - no more, no less.
+            Set-QpActor -RequesterSid $ActorSid
             Set-QpLogSink { param($line) $Sync.Queue.Enqueue($line) }
             # Where the work says how far it has got, and how it asks whether Stop has been pressed.
             Set-QpProgressSink { param($p) $Sync.Progress = $p }
@@ -2114,6 +2521,8 @@ function Set-OptionStatus($opt, [string]$Status) {
         'Applied'       { $opt.Label.Text = "$($opt.Title)   [already applied]"; $opt.Label.Foreground = Get-Brush '#117A68' }
         'Partial'       { $opt.Label.Text = "$($opt.Title)   [partly applied]";  $opt.Label.Foreground = Get-Brush '#9A6700' }
         'NotApplicable' { $opt.Label.Text = "$($opt.Title)   [not on this PC]";  $opt.Label.Foreground = Get-Brush '#66706F' }
+        # Windows hides part of it from an ordinary account: it may or may not be on, so it stays tickable.
+        'NeedsAdmin'    { $opt.Label.Text = "$($opt.Title)   [needs admin rights to check]"; $opt.Label.Foreground = Get-Brush '#9A6700' }
         default         { $opt.Label.Text = $opt.Title;                          $opt.Label.Foreground = Get-Brush '#0F1B1C' }
     }
 }
@@ -2130,6 +2539,7 @@ function Update-FromState($state) {
         return
     }
     $script:LastState = $state
+    if ($state.Policy) { $script:Policy = $state.Policy }
     # Each part draws on its own: a part that cannot be drawn must not stop the rest appearing.
     function Show-Part([string]$What, [scriptblock]$Body) {
         try { & $Body } catch { $ui.LogBox.AppendText(('[{0}] WARN    Could not show {1}: {2}' -f (Get-Date -Format 'HH:mm:ss'), $What, $_.Exception.Message) + [Environment]::NewLine) }
@@ -2144,6 +2554,9 @@ function Update-FromState($state) {
     Show-Part 'your browser add-ons' { Update-AddonList @($state.Addons | Where-Object { $_ }) }
     if (@($state.Problems).Count) {
         $ui.Status.Text = 'Some of this PC could not be read: ' + (@($state.Problems) -join ', ') + '. The rest is up to date.'
+    } elseif (@($state.Limited).Count -and -not $script:Elevated) {
+        # Not a problem: what Windows keeps from an ordinary account, said precisely.
+        $script:PendingStatus = 'Some checks need admin rights: ' + ((@($state.Limited) -join ', ') -replace ', ([^,]+)$', ' and $1') + '.'
     }
     $script:AppsList.Children.Clear()
     $script:Options['apps'].Clear()
@@ -2157,6 +2570,14 @@ function Update-FromState($state) {
     $leftover = [double](@($state.Cleanup | Where-Object { $_ } | ForEach-Object { [double]$_.SizeBytes }) | Measure-Object -Sum).Sum
     Set-Glance 'cleanup' 'leftovers' 'Leftovers you could clear' $(if ($leftover -gt 0) { Format-QpBytes $leftover } else { 'none - already tidy' }) -Tip 'Temporary files, crash dumps and old installers, listed below. They go to your Recycle Bin.'
     foreach ($c in @($state.Cleanup | Where-Object { $_ })) {
+        if ($c.Availability -eq 'NeedsAdmin') {
+            # Its size can't be seen without administrator rights - which is not the same as nothing to clean.
+            Add-Option -Panel $script:CleanupList -Key 'cleanup' -Id $c.Id -Title $c.Title -Description $c.Description -Recommended ([bool]$c.Recommended)
+            $last = $script:Options['cleanup'][$script:Options['cleanup'].Count - 1]
+            $last.Label.Text = "$($c.Title)   [size needs admin rights to see]"
+            $last.Label.Foreground = Get-Brush '#9A6700'
+            continue
+        }
         $title = '{0}   ({1})' -f $c.Title, (Format-QpBytes $c.SizeBytes)
         Add-Option -Panel $script:CleanupList -Key 'cleanup' -Id $c.Id -Title $title -Description $c.Description -Recommended ([bool]$c.Recommended)
         if ($c.SizeBytes -le 0) {
@@ -2184,6 +2605,16 @@ function Update-FromState($state) {
         foreach ($k in 'devices', 'extensions', 'apps', 'startup', 'cleanup', 'vendors') { Select-Recommended $k }
         foreach ($o in $script:Options['privacy']) { if ($o.Status -in 'Applied', 'NotApplicable') { $o.CheckBox.IsChecked = $false } }
     }
+    # What needs administrator rights, from the engine's own rules - so the shields match what it allows.
+    foreach ($k in @($script:Options.Keys)) {
+        foreach ($o in @($script:Options[$k])) { $pol = $script:Policy["$k|$($o.Id)"]; $o.NeedsAdmin = [bool]($pol -and $pol.NeedsAdmin) }
+    }
+    foreach ($j in @($script:JunkBoxes)) { $pol = $script:Policy["junk|$($j.Key)"]; $j.NeedsAdmin = [bool](-not $pol -or $pol.NeedsAdmin) }
+    # Opened with administrator rights: tick what the other window had ticked, once, now that it is drawn.
+    Set-PendingTicks
+    Update-TickCount
+    Update-Shields
+    if ($script:PendingStatus) { $ui.Status.Text = $script:PendingStatus; $script:PendingStatus = $null }
 }
 
 $script:CameBack = $null
@@ -2225,7 +2656,7 @@ function Update-TaskbarBadge($d) {
         } else {
             $window.TaskbarItemInfo.Overlay = $null
             $window.TaskbarItemInfo.Description = ''
-            $window.Title = 'Quietpane - by KomodoWorks'
+            $window.Title = $script:TitleBase
         }
     } catch { }
 }
@@ -2254,6 +2685,7 @@ function Update-CameBack($d) {
 $btnPutBack.Add_Click({
     $d = $script:CameBack
     if (-not $d -or -not $d.Count) { return }
+    if ((Get-PutBackNeedsAdmin) -and (Request-Elevation 'putback' 'home')) { return }
     $msg = "Switch these off again?`n`n" + ((@(@($d.Privacy) + @($d.Vendors) + @($d.Apps) + @($d.Startup)) | ForEach-Object { '  - ' + $(if ($_.Title) { $_.Title } else { $_.Id }) }) -join "`n") + "`n`nOnly these change, a restore point is saved first, and Undo puts them back."
     if ([System.Windows.MessageBox]::Show($msg, 'Quietpane', 'YesNo', 'Question') -ne 'Yes') { return }
     $ui.LogBox.AppendText([Environment]::NewLine)
@@ -2264,7 +2696,7 @@ $btnPutBack.Add_Click({
     Start-Work -StatusText 'Switching them off again...' -Params $params -Work {
         param($PrivacyIds, $VendorIds, $AppNames, $StartupIds)
         Invoke-QpPutBack -PrivacyIds $PrivacyIds -VendorIds $VendorIds -AppNames $AppNames -StartupIds $StartupIds
-    } -OnDone { Update-StateAfterChange }
+    } -OnDone { param($r) Show-BatchSummary $r; Update-StateAfterChange }
 })
 
 $btnThatWasMe.Add_Click({
@@ -2299,6 +2731,9 @@ function Update-StartupList($items, $signIn) {
         $mb = (@($on | ForEach-Object { $costs[[string]$_.Id] } | Where-Object { $_ -and $_.Running }) | Measure-Object -Property MemoryMB -Sum).Sum
         if ($mb) { [void]$script:StartupList.Children.Add((New-Text ('Together they are using {0} right now.' -f (Format-QpBytes ([double]$mb * 1MB))) 12.5 'SemiBold' '#0F1B1C' '0,8,0,0')) }
         $boot = $signIn.Record.Boot
+        if (-not $boot -and "$($signIn.RecordStatus)" -eq 'NeedsAdmin') {
+            [void]$script:StartupList.Children.Add((New-Text "Windows' own restart timing needs admin rights to read." 12.5 'Normal' '#66706F' '0,2,0,0'))
+        }
         if ($boot) {
             $line = 'Windows timed your last restart at {0} seconds, {1}.' -f $boot.Seconds, (Format-QpWhen $boot.When)
             $t = New-Text $line 12.5 'Normal' '#4B5B5C' '0,2,0,0'
@@ -2860,6 +3295,7 @@ function Update-VendorTab($vendors) {
     $script:VendorList.Children.Clear()
     $script:Options['vendors'].Clear()
     $script:JunkBoxes = New-Object System.Collections.ArrayList
+    $script:JunkButtons = New-Object System.Collections.ArrayList
     $vendors = @($vendors | Where-Object { $_ })
     if ($vendors.Count -eq 0) {
         $script:VendorIntro.Text = 'Nothing to do here - no brand software that Quietpane recognises.'
@@ -2893,13 +3329,19 @@ function Update-VendorTab($vendors) {
                 $cb.Margin = Get-Thick '0,8,0,0'
                 $cb.VerticalContentAlignment = 'Center'
                 $cb.Content = New-Text $j.Name 13.5 'SemiBold' '#0F1B1C' '2,0,0,0'
+                $cb.Add_Checked({ Update-Shields })
+                $cb.Add_Unchecked({ Update-Shields })
                 [void]$sec.Content.Children.Add($cb)
                 [void]$sec.Content.Children.Add((New-Text $j.Why 12.5 'Normal' '#4B5B5C' '22,2,0,0'))
-                [void]$script:JunkBoxes.Add([pscustomobject]@{ Key = $j.Key; Name = $j.Name; CheckBox = $cb })
+                # Where it is registered says whose it is; whether its uninstaller needs administrator
+                # rights is worked out from what would actually run (the engine's Get-QpUninstallPrivilege).
+                $pol = $script:Policy["junk|$($j.Key)"]
+                [void]$script:JunkBoxes.Add([pscustomobject]@{ Key = $j.Key; Name = $j.Name; CheckBox = $cb; NeedsAdmin = [bool](-not $pol -or $pol.NeedsAdmin) })
             }
             $btnJunk = New-Button 'Remove the ticked extras'
             $btnJunk.Margin = Get-Thick '0,10,0,0'
             $btnJunk.Add_Click({ Remove-TickedExtras })
+            [void]$script:JunkButtons.Add($btnJunk)
             [void]$sec.Content.Children.Add($btnJunk)
         }
         [void]$script:VendorList.Children.Add($sec.Expander)
@@ -2910,6 +3352,7 @@ function Remove-TickedExtras {
     if (Test-Busy) { return }
     $picked = @($script:JunkBoxes | Where-Object { $_.CheckBox.IsChecked })
     if ($picked.Count -eq 0) { [void][System.Windows.MessageBox]::Show('Tick the ones you want gone first.', 'Quietpane'); return }
+    if (@($picked | Where-Object { $_.NeedsAdmin }).Count -and (Request-Elevation 'vendorremove' 'vendors' (Get-TickedPairs @('junk')))) { return }
     $list = ($picked | ForEach-Object { '  - ' + $_.Name }) -join [Environment]::NewLine
     $msg = "These programs will be removed using their own uninstallers:`n`n$list`n`n" +
            "This one CANNOT be undone by Quietpane. You can install them again from the maker's website any time.`n`n" +
@@ -2918,7 +3361,7 @@ function Remove-TickedExtras {
     $keys = @($picked | ForEach-Object { $_.Key })
     $ui.LogBox.AppendText([Environment]::NewLine)
     Set-LogVisible $true
-    Start-Work -StatusText 'Removing the extras you picked...' -Params @{ Keys = $keys } -Work { param($Keys) Invoke-QpVendorUninstall -Keys $Keys } -OnDone { Update-StateAfterChange }
+    Start-Work -StatusText 'Removing the extras you picked...' -Params @{ Keys = $keys } -Work { param($Keys) Invoke-QpVendorUninstall -Keys $Keys } -OnDone { param($r) Show-BatchSummary $r; Update-StateAfterChange }
 }
 
 function Update-HomeCards($state) {
@@ -3236,8 +3679,12 @@ function Update-HealthDetails {
         elseif ($d.Health) { [void](Add-DetailRow $b "Windows' verdict" 'Healthy' -Tone 'good' -Tip "Windows' own verdict on the drive, from what the drive reports about itself.") }
         [void](Add-DetailRow $b 'Model' ((@($d.Name, $(if ($d.Media) { "($($d.Media))" })) | Where-Object { $_ }) -join ' '))
         $heat = Get-HeatLine $d.TempC $null $false 'Drive'
-        [void](Add-DetailRow $b 'Temperature' $(if ($heat.Shared) { $heat.Text } else { $null }) -Tone $heat.Level -ShowMissing -Tip $(if ($d.FromDrive) { 'Asked of the drive itself, so it moves with what the drive is doing.' } else { "Windows' own figure for this drive. Some storage drivers report the same number whatever is happening, so treat it as a guide." }))
+        # Missing only because Windows keeps its own record from ordinary accounts: say that, not "not shared".
+        $needsAdmin = ("$($d.Availability)" -eq 'NeedsAdmin')
+        if (-not $heat.Shared -and $needsAdmin) { [void](Add-DetailRow $b 'Temperature' 'needs admin rights to read' -Tone 'none' -Tip "This drive doesn't report its temperature itself, and Windows keeps its own record of it for administrators.") }
+        else { [void](Add-DetailRow $b 'Temperature' $(if ($heat.Shared) { $heat.Text } else { $null }) -Tone $heat.Level -ShowMissing -Tip $(if ($d.FromDrive) { 'Asked of the drive itself, so it moves with what the drive is doing.' } else { "Windows' own figure for this drive. Some storage drivers report the same number whatever is happening, so treat it as a guide." })) }
         if ($null -ne $d.WearPct) { [void](Add-DetailRow $b 'Rated life used' ('{0}%' -f $d.WearPct) -Ratio ([math]::Min(100, $d.WearPct) / 100) -Tone $(if ($d.WearPct -ge 90) { 'warn' } else { '' }) -Tip 'How much of the writing the maker rates this drive for has been used. Under 100% is within that.') }
+        elseif ($needsAdmin) { [void](Add-DetailRow $b 'Rated life used' 'needs admin rights to read' -Tone 'none') }
         if ($d.PowerOnHours) { [void](Add-DetailRow $b 'Switched on for' ('about {0:N0} hours' -f $d.PowerOnHours)) }
         if ($d.BytesWritten) { [void](Add-DetailRow $b 'Written to it so far' (Format-QpBytes $d.BytesWritten)) }
     } elseif ($script:DriveRead) {
@@ -3680,13 +4127,27 @@ function Update-UndoList($points) {
     $script:UndoList.Items.Clear()
     foreach ($r in @($points | Where-Object { $_ })) {
         $li = New-Object System.Windows.Controls.ListBoxItem
-        $li.Content = '{0}   -   {1} change(s){2}' -f (Format-RestoreName $r.Name), $r.Changes, $(if ($r.Undone) { '   (already undone)' } else { '' })
+        $kind = if ($r.PSObject.Properties['Kind']) { [string]$r.Kind } else { 'User' }
+        $canUndo = -not $r.PSObject.Properties['CanUndo'] -or $r.CanUndo
+        if ($kind -eq 'Legacy') {
+            $li.Content = '{0}   -   made by an older Quietpane' -f (Format-RestoreName $r.Name)
+        } elseif ($kind -eq 'User' -and $script:Elevated) {
+            $li.Content = '{0}   -   undo from your normal window' -f (Format-RestoreName $r.Name)
+        } else {
+            $li.Content = '{0}   -   {1} change(s){2}' -f (Format-RestoreName $r.Name), $r.Changes, $(if ($r.Undone) { '   (already undone)' } elseif (-not $canUndo) { "   (can't be used)" } else { '' })
+        }
         $li.Tag = $r.Path
-        $li.ToolTip = $r.Path
+        # Only a restore point this window can undo can be picked; the others say why when pointed at.
+        if (-not $canUndo) {
+            $li.IsEnabled = $false
+            [System.Windows.Controls.ToolTipService]::SetShowOnDisabled($li, $true)
+            $why = if ($kind -eq 'Legacy') { "Older versions kept undo records in a folder other accounts on this PC could change, so Quietpane can't be sure this one is genuine. You can still change these settings back in Windows yourself." } else { [string]$r.Note }
+            Set-MoreInfo $li $why
+        } else { $li.ToolTip = $r.Path }
         [void]$script:UndoList.Items.Add($li)
     }
     if ($script:UndoList.Items.Count -eq 0) { [void]$script:UndoList.Items.Add('No restore points yet.') }
-    $pts = @($points | Where-Object { $_ })
+    $pts = @($points | Where-Object { $_ -and (-not $_.PSObject.Properties['CanUndo'] -or $_.CanUndo) })
     Set-Glance 'undo' 'points' 'Restore points' $(if ($pts.Count) { '{0}' -f $pts.Count } else { 'none yet' }) -Tip 'Every change Quietpane makes is saved as one first.'
     # Restore points come newest first.
     if ($pts.Count) { Set-Glance 'undo' 'newest' 'Newest' (Format-RestoreName $pts[0].Name) }
@@ -3718,6 +4179,12 @@ function Invoke-Selected([bool]$Preview) {
     $deviceIds = if ($key -eq 'privacy') { @(Get-SelectedIds 'devices') } else { @() }
     $addonIds = if ($key -eq 'privacy') { @(Get-SelectedIds 'extensions') } else { @() }
     if ($ids.Count -eq 0 -and $startupIds.Count -eq 0 -and $deviceIds.Count -eq 0 -and $addonIds.Count -eq 0) { [void][System.Windows.MessageBox]::Show('Pick at least one thing first.', 'Quietpane'); return }
+    # Needs administrator rights: Windows' own prompt, then a window with them - nothing is changed here,
+    # not even the parts that wouldn't need them, so one click is one decision.
+    if (-not $Preview -and (Get-ApplyNeedsAdmin)) {
+        $lists = @(Get-TabOptionKeys) + @(if ($key -eq 'apps') { 'deprovision' })
+        if (Request-Elevation 'apply' $key (Get-TickedPairs $lists)) { return }
+    }
     if (-not $Preview) {
         $msg = switch ($key) {
             'privacy' {
@@ -3738,7 +4205,7 @@ function Invoke-Selected([bool]$Preview) {
     }
     $ui.LogBox.AppendText([Environment]::NewLine)
     Set-LogVisible $true   # preview/apply results are shown in the details log
-    $after = if ($Preview) { $null } else { { Update-StateAfterChange } }
+    $after = if ($Preview) { $null } else { { param($r) Show-BatchSummary $r; Update-StateAfterChange } }
     $verb = if ($Preview) { 'Previewing' } else { 'Applying' }
     switch ($key) {
         'privacy' {
@@ -3912,7 +4379,7 @@ function Show-ChoiceDialog {
 }
 
 # ------------------------------------------------------------------ updates, without a connection
-$script:UpdateDismissedFile = Join-Path $info.DataRoot 'update-dismissed.txt'
+$script:UpdateDismissedFile = Join-Path $info.UserDataRoot 'update-dismissed.txt'
 $script:OfferedUpdate = $null
 
 function Get-VersionLineText {
@@ -3943,7 +4410,8 @@ function Update-UpdateOffer([string]$Folder = '') {
     $found = $null
     try { $found = Find-QpDownloadedUpdate -Folder $Folder } catch { }
     $dismissed = ''
-    try { if (Test-Path -LiteralPath $script:UpdateDismissedFile) { $dismissed = ([IO.File]::ReadAllText($script:UpdateDismissedFile)).Trim() } } catch { }
+    $d = Read-QpTextFile -Path $script:UpdateDismissedFile -MaxBytes 64
+    if ($d) { $dismissed = $d.Trim() }
     if ($found -and $found.Version -ne $dismissed) {
         $script:OfferedUpdate = $found
         $script:UpdateText.Text = "Quietpane $($found.Version) is in your Downloads."
@@ -3956,8 +4424,8 @@ function Update-UpdateOffer([string]$Folder = '') {
 
 function Install-QuietpaneUpdate([string]$Zip) {
     <#
-        Unpacks a newer Quietpane next to its ZIP and starts it the way a double-click would, so Windows
-        asks for permission as usual; then this window steps aside. Says what will happen first.
+        Unpacks a newer Quietpane next to its ZIP and starts it the way a double-click would - as the
+        signed-in user, with that user's own rights; then this window steps aside. Says what will happen first.
     #>
     if (Test-Busy) { return }
     $z = Get-QpZipVersion -Path $Zip
@@ -3967,7 +4435,7 @@ function Install-QuietpaneUpdate([string]$Zip) {
     }
     $hash = (Get-FileHash -LiteralPath $z.Path -Algorithm SHA256).Hash
     $choice = Show-ChoiceDialog -Title 'Install the update' -Message ("Quietpane $($z.Version) will be unpacked next to the file, into a folder called `"Quietpane $($z.Version)`", and started in place of this window. " +
-        "Windows will ask for permission, just as when you first opened Quietpane.`n`n" +
+        "It opens with your own rights, just like this one.`n`n" +
         "$($z.Name)`nSHA256 $hash`nIt matches the one on the release page if it is genuine.") -Options @(
         @{ Key = 'install'; Label = "Install Quietpane $($z.Version)"; Primary = $true }
     )
@@ -3976,7 +4444,7 @@ function Install-QuietpaneUpdate([string]$Zip) {
     catch { [void][System.Windows.MessageBox]::Show($window, $_.Exception.Message, 'Quietpane'); return }
     Write-QpLog "Updating to Quietpane $($x.Version) from $($z.Path)" 'STEP'
     # Step aside first, so the new window is not turned away as a second copy.
-    try { if ($script:OnlyInstance) { $script:OnlyInstance.ReleaseMutex(); $script:OnlyInstance.Dispose(); $script:OnlyInstance = $null } } catch { }
+    try { if ($script:OnlyInstance) { Exit-QuietpaneMutex; $script:OnlyInstance.Dispose(); $script:OnlyInstance = $null } } catch { }
     Open-AsUser $x.Start
     $window.Close()
 }
@@ -4015,6 +4483,8 @@ function New-FindingButtons($f, [switch]$Compact) {
     $quar.Tag = $f.Id
     Set-MoreInfo $quar 'Moves it somewhere it can''t run. You can put it back from this tab.'
     $quar.Add_Click({ Invoke-FindingAction ([string]$this.Tag) 'Quarantine' })
+    Set-ShieldState $quar $true
+    Set-ShieldState $remove $true
     $set = @($quar, $remove)
     if (-not $Compact) {
         $leave = New-Button 'Leave it for now'
@@ -4121,6 +4591,9 @@ function Invoke-FindingAction([string]$Id, [string]$Action) {
     if (Test-Busy) { return }   # ask nothing we cannot then carry out
     $f = Get-FindingById $Id
     if (-not $f) { return }
+    # Removing, quarantining or deleting needs administrator rights. The findings don't travel - a window
+    # with administrator rights runs the check again, and sees more while it does.
+    if ($Action -ne 'Allow' -and (Request-Elevation 'quarantine' 'scan')) { return }
     $where = if ($f.Path) { "`n$($f.Path)" } else { '' }
     $force = $false
     if ($Action -eq 'Allow') {
@@ -4163,10 +4636,26 @@ function Invoke-FindingAction([string]$Id, [string]$Action) {
     }
 }
 
+$script:BtnQuarantineOpen = $null
 function Update-QuarantineList {
-    <# Everything Quietpane is currently holding, with a way back out. #>
-    $items = @(Get-QpQuarantineItems)
+    <#
+        Everything Quietpane is currently holding, with a way back out. The quarantine is locked to
+        administrators, and an ordinary window never looks inside it - not even to count - so without
+        administrator rights there is one button, always, that asks for them.
+    #>
     $script:QuarantinePanel.Children.Clear()
+    if (-not $script:Elevated) {
+        $script:QuarantineBox.Visibility = 'Visible'
+        $script:QuarantineBox.Header = New-Text 'In quarantine' 14.5 'SemiBold' '#117A68' '0' 'Fraunces, Georgia'
+        [void]$script:QuarantinePanel.Children.Add((New-Text 'Quietpane keeps quarantined files where only administrators can look.' 12.5 'Normal' '#4B5B5C' '0,0,0,8'))
+        $script:BtnQuarantineOpen = New-Button "Open with admin rights to see what's in quarantine" '0'
+        $script:BtnQuarantineOpen.HorizontalAlignment = 'Left'
+        $script:BtnQuarantineOpen.Add_Click({ [void](Request-Elevation 'scan' 'scan') })
+        Set-ShieldState $script:BtnQuarantineOpen $true
+        [void]$script:QuarantinePanel.Children.Add($script:BtnQuarantineOpen)
+        return
+    }
+    $items = @(Get-QpQuarantineItems)
     if (-not $items.Count) {
         $script:QuarantineBox.Visibility = 'Collapsed'
         return
@@ -4180,6 +4669,13 @@ function Update-QuarantineList {
         $row.Padding = Get-Thick '0,8'
         $sp = New-Object System.Windows.Controls.StackPanel
         [void]$sp.Children.Add((New-Text $i.FileName 13.5 'SemiBold' '#0F1B1C' '0'))
+        if (-not $i.Ok) {
+            # Not what Quietpane puts there: listed, and left completely alone.
+            [void]$sp.Children.Add((New-Text ("Can't be checked, so Quietpane leaves it alone: " + $i.Reason + '.') 12 'Normal' '#9A6700' '0,2,0,0'))
+            $row.Child = $sp
+            [void]$script:QuarantinePanel.Children.Add($row)
+            continue
+        }
         [void]$sp.Children.Add((New-Text ('{0}   |   was at {1}   |   quarantined {2}' -f $(if ($i.ThreatName) { $i.ThreatName } else { 'Quietpane check' }), $i.OriginalPath, $i.QuarantinedAt) 12 'Normal' '#4B5B5C' '0,2,0,0'))
         $btns = New-Object System.Windows.Controls.WrapPanel
         $btns.Margin = Get-Thick '0,6,0,0'
@@ -4242,7 +4738,8 @@ function Update-ScanSummary {
     # Something that failed to be dealt with is still there, so it still counts as outstanding.
     $outstanding = @($script:ScanFindings | Where-Object { $_.Severity -in 'Critical', 'High' -and $_.Status -in 'Detected', 'Failed' }).Count
     $s = New-QpScanSummary -Counts $r.Counts -Tally $script:ActionTally -Scanned ([int]$r.Scanned) `
-        -Seconds ([int]$script:ScanSeconds) -Outstanding $outstanding -IsAdmin (Test-IsAdmin) -Cancelled ([bool]$r.Cancelled)
+        -Seconds ([int]$script:ScanSeconds) -Outstanding $outstanding -IsAdmin $script:Elevated -Cancelled ([bool]$r.Cancelled) `
+        -NotVisible @($(if ($r.PSObject.Properties['NotVisible']) { $r.NotVisible } else { @() }))
     $script:SummaryStack.Children.Clear()
     [void]$script:SummaryStack.Children.Add((New-Text 'How it went' 16 'SemiBold' '#117A68' '0,0,0,6' 'Fraunces, Georgia'))
     foreach ($l in $s.Lines) { [void]$script:SummaryStack.Children.Add((New-Text $l 13.5 'Normal' '#0F1B1C' '0,0,0,3')) }
@@ -4353,6 +4850,12 @@ function Show-HomeResult($r) {
         $script:ResultText.Text = 'Click "Show details" at the bottom to see what happened. Anything that was changed can be undone in the Undo tab.'
         return
     }
+    if ($r.PSObject.Properties['Refused'] -and $r.Refused) {
+        $script:ResultTitle.Text = 'Nothing was changed'
+        $script:ResultText.Text = $(if ($script:OtherAccount) { Get-QpAccountMessage } else { 'Some of it needs admin rights. Press Quiet my PC now again and say yes when Windows asks.' })
+        $btnRestart.Visibility = 'Collapsed'; $btnUndoAll.Visibility = 'Collapsed'
+        return
+    }
     if ($r.Nothing) {
         $script:ResultTitle.Text = 'Already clean!'
         $script:ResultText.Text = 'This PC already has every recommended setting. Nothing needed changing.'
@@ -4365,6 +4868,7 @@ function Show-HomeResult($r) {
     if ($r.AppsRemoved)   { $lines += "Removed $($r.AppsRemoved) unneeded app(s)." }
     if ($r.BytesFreed -gt 0) { $lines += "Freed about $(Format-QpBytes $r.BytesFreed) of space - it is in your Recycle Bin, empty it whenever you like." }
     if ($r.MemoryFreed -gt 0) { $lines += "Memory in use dropped by about $(Format-QpBytes $r.MemoryFreed)." }
+    if ($r.PSObject.Properties['Failed'] -and ([int]$r.Failed + [int]$r.RefusedCount) -gt 0) { $lines += "Not everything worked: $($r.Text)" }
     $lines += ''
     $lines += 'Restart your PC to finish. Changed your mind? "Undo everything" restores settings; cleared files stay in your Recycle Bin, and removed apps reinstall from the Microsoft Store.'
     Show-MeterGains ([int64]$r.BytesFreed) ([int64]$r.MemoryFreed)
@@ -4377,10 +4881,12 @@ function Show-HomeResult($r) {
 
 $btnOneClick.Add_Click({
     $s = $script:HomeCounts
-    if ($s -and $s.Total -eq 0) {
+    if ($s -and $s.Total -eq 0 -and $script:Elevated) {
         [void][System.Windows.MessageBox]::Show('Your PC is already in great shape. Nothing left for me to do.', 'Quietpane')
         return
     }
+    # It always includes changes to Windows itself, so it always needs administrator rights.
+    if (Request-Elevation 'oneclick' 'home') { return }
     $lines = @()
     if ($s.Privacy) { $lines += "  - switch off $($s.Privacy) tracking and ads setting(s)" }
     if ($s.Brands)  { $lines += ('  - quieten {0} background item(s) from {1}' -f $s.Brands, $s.BrandNames) }
@@ -4443,7 +4949,9 @@ $btnUndo.Add_Click({
         param($result)
         $r = Get-UndoResult $result
         Update-StateAfterChange
-        if ($r.Failed) {
+        if ($r.PSObject.Properties['Refused'] -and $r.Refused) {
+            [void][System.Windows.MessageBox]::Show("Nothing was undone. $($r.Reason)", 'Quietpane')
+        } elseif ($r.Failed) {
             [void][System.Windows.MessageBox]::Show("$($r.Failed) change(s) could not be put back; everything else is as it was.`n`nThe restore point stays in the list, so you can try again. The details below say what Windows said.", 'Quietpane')
         }
     }
@@ -4466,6 +4974,18 @@ $window.Add_Closing({
 })
 
 $ui.Tabs.SelectedIndex = 0
+if ($script:Elevated -and -not $SelfTest) {
+    Show-ElevatedNote
+    Select-Tab $script:Asked.Tab
+    $script:PendingTicks = @($script:Asked.Ticks)
+    # Settings from 2.0 are carried into your own store here, once the machine store has been checked -
+    # never from an ordinary window, which doesn't open that folder at all.
+    try { [void](Get-QpMachineStorePath); [void](Invoke-QpPreferenceMigration) } catch { $ui.LogBox.AppendText("$($_.Exception.Message)" + [Environment]::NewLine) }
+    if ($script:OtherAccount) {
+        # Nothing here is written to anyone's own store; choices last until this window closes.
+        foreach ($row in $appearRow, $tempRow) { if ($row.Note) { $row.Note.Text = 'Changes here last until you close this window.'; $row.Note.Visibility = 'Visible' } }
+    }
+}
 
 # ------------------------------------------------------------------ self-test / snapshot
 function Get-UnnamedControls {
@@ -4541,7 +5061,7 @@ function Test-FindingCards {
         $stack.Push($script:FindingsPanel)
         while ($stack.Count) {
             $el = $stack.Pop()
-            if ($el -is [System.Windows.Controls.Button] -and $el.Content -eq 'Quarantine') { $quarantine++ }
+            if ($el -is [System.Windows.Controls.Button] -and (Get-ButtonLabel $el) -eq 'Quarantine') { $quarantine++ }
             foreach ($child in [System.Windows.LogicalTreeHelper]::GetChildren($el)) { if ($child -is [System.Windows.DependencyObject]) { $stack.Push($child) } }
         }
         return [pscustomobject]@{ Quarantine = $quarantine; Unnamed = @(Get-UnnamedControls).Count }
@@ -4875,7 +5395,17 @@ function Test-Switches {
         $script:FakeTask = $null
         [pscustomobject]@{ Ok = $true; Note = 'Quietpane will no longer start when you sign in.'; Copy = $null } }
     $flip = { param($box) ([System.Windows.Automation.Peers.CheckBoxAutomationPeer]::new($box)).Toggle() }
+    $wasElevated = $script:Elevated
     try {
+        # Without administrator rights, flipping it asks Windows for them and changes nothing here.
+        $script:Elevated = $false
+        Update-PlaceControls
+        $script:LastElevationRequest = $null; $script:SeenDuring = @()
+        & $flip $script:SignInBox
+        $asks = [bool]($script:LastElevationRequest -and $script:LastElevationRequest.Pending -eq 'signin' -and $script:LastElevationRequest.Tab -eq 'about') -and
+            (-not $script:SignInBox.IsChecked) -and ($script:SeenDuring.Count -eq 0)
+        # With them, it does the job - the rest of this test.
+        $script:Elevated = $true
         $script:SignInBox.IsEnabled = $false   # as the window starts: nothing known yet
         $greyedUntilKnown = -not $script:SignInBox.IsEnabled
         Update-PlaceControls
@@ -4899,11 +5429,202 @@ function Test-Switches {
     } finally {
         # The real ones back, exactly as they were.
         foreach ($n in $names) { Set-Item "function:script:$n" $real[$n] }
-        $script:FakeTask = $null; $script:LastMessage = $null
+        $script:FakeTask = $null; $script:LastMessage = $null; $script:Elevated = $wasElevated
     }
-    'greyed until known: {7}; starts off: {0}; on only once done: {1}; not shown early: {2}; watch follows: {3}; a failed switch-off stays on: {4}; a failed switch-on stays off: {5}; unit: {6}' -f
-        $startsOff, $on, $notEarly, $watching, $staysOn, $staysOff, ($f -and $c), $greyedUntilKnown
+    'greyed until known: {7}; starts off: {0}; on only once done: {1}; not shown early: {2}; watch follows: {3}; a failed switch-off stays on: {4}; a failed switch-on stays off: {5}; unit: {6}; without admin rights it asks and changes nothing: {8}' -f
+        $startsOff, $on, $notEarly, $watching, $staysOn, $staysOff, ($f -and $c), $greyedUntilKnown, $asks
 }
+function Test-Shields {
+    <#
+        The shield, in the real window as an ordinary one draws it: it follows what is ticked, only a choice
+        that needs administrator rights brings it, every shielded button keeps its name and gets the help
+        text, pressing Apply then asks Windows instead of changing anything, and a window that has the
+        rights shows none. Two real Privacy choices are used, with what they need set by the test.
+    #>
+    $was = $script:Elevated
+    $user = @($script:Options['privacy'] | Where-Object { $_.Id -eq 'priv.feedback' })[0]
+    $admin = @($script:Options['privacy'] | Where-Object { $_.Id -eq 'tel.diagtrack' })[0]
+    $saved = @{ U = $user.NeedsAdmin; A = $admin.NeedsAdmin }
+    try {
+        $script:Elevated = $false
+        Select-Tab 'privacy'
+        foreach ($k in 'privacy', 'devices', 'extensions') { foreach ($o in $script:Options[$k]) { $o.CheckBox.IsChecked = $false } }
+        $user.NeedsAdmin = $false; $admin.NeedsAdmin = $true
+        $user.CheckBox.IsChecked = $true; Update-TickCount
+        $plain = -not (Test-Shielded $ui.BtnApply)
+        $admin.CheckBox.IsChecked = $true; Update-TickCount
+        $follows = $plain -and (Test-Shielded $ui.BtnApply)
+        $named = ([System.Windows.Automation.AutomationProperties]::GetName($ui.BtnApply) -eq 'Apply 2 selected') -and
+            ([System.Windows.Automation.AutomationProperties]::GetHelpText($ui.BtnApply) -eq $script:ShieldTip)
+        $admin.CheckBox.IsChecked = $false; Update-TickCount
+        $only = -not (Test-Shielded $ui.BtnApply) -and (Get-ButtonLabel $ui.BtnApply) -eq 'Apply 1 selected'
+        $admin.CheckBox.IsChecked = $true; Update-TickCount
+        $script:LastElevationRequest = $null
+        Invoke-Selected $false
+        $req = $script:LastElevationRequest
+        $asked = [bool]($req -and $req.Pending -eq 'apply' -and $req.Tab -eq 'privacy' -and -not $script:Job -and
+            @($req.Ticks | Where-Object { $_[0] -eq 'privacy' -and $_[1] -eq 'tel.diagtrack' }).Count -eq 1)
+        $others = (Test-Shielded $btnOneClick) -and (Test-Shielded $btnShortcut) -and (Test-Shielded $script:BtnMachineUndo)
+        $unnamed = @(Get-UnnamedControls).Count
+        $script:Elevated = $true
+        Set-ShieldState $ui.BtnApply $true
+        $none = -not (Test-Shielded $ui.BtnApply) -and (Get-ButtonLabel $ui.BtnApply) -eq 'Apply 2 selected'
+    } finally {
+        $script:Elevated = $was
+        $user.NeedsAdmin = $saved.U; $admin.NeedsAdmin = $saved.A
+        foreach ($o in $user, $admin) { $o.CheckBox.IsChecked = $false }
+        Update-TickCount
+        Select-Tab 'home'
+    }
+    'follows the ticks: {0}; only for what needs it: {1}; named with help: {2}; asks instead of changing: {3}; one-click, shortcuts and machine undo: {4}; none with admin rights: {5}; unnamed controls: {6}' -f
+        $follows, $only, $named, $asked, $others, $none, $unnamed
+}
+
+function Test-RelaunchView {
+    <#
+        What a window opened with administrator rights is asked to show - the tab, the ticks and the note -
+        drawn from real arguments, with every function that changes anything replaced by one that only
+        notes it was called. The view has to come back exactly, the choices that aren't really on that
+        tab have to be dropped, hostile values have to be ignored, and nothing at all may be changed.
+    #>
+    $names = 'Invoke-QpPrivacy', 'Invoke-QpVendor', 'Invoke-QpStartup', 'Invoke-QpRemoveApps', 'Invoke-QpCleanup', 'Invoke-QpDeviceAccess', 'Invoke-QpExtension',
+        'Invoke-QpRecommended', 'Invoke-QpUndo', 'Invoke-QpVendorUninstall', 'Invoke-QpPutBack', 'Enable-QpSignInStart', 'Disable-QpSignInStart', 'New-QpShortcuts', 'Remove-QpShortcuts', 'Invoke-QpRemediate'
+    $script:ChangeCalls = New-Object System.Collections.ArrayList
+    foreach ($n in $names) { Set-Item "function:script:$n" ([scriptblock]::Create("[void]`$script:ChangeCalls.Add('$n')")) }
+    $wasAsked = $script:Asked; $wasElevated = $script:Elevated
+    try {
+        $pairs = @()
+        $pairs += ,@('privacy', 'tel.diagtrack')
+        $pairs += ,@('privacy', 'no.such.setting')
+        $pairs += ,@('startup', 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run|Chat app')
+        $script:Asked = Test-QpElevationArguments -ForUser $script:MySid.Value -Tab 'privacy' -Tick (ConvertTo-QpTickList $pairs) -Pending 'apply'
+        $script:Elevated = $true
+        Show-ElevatedNote
+        Select-Tab $script:Asked.Tab
+        $script:PendingTicks = @($script:Asked.Ticks)
+        Update-FromState @{ Privacy = @{}; Vendors = @(); Apps = @(); Startup = @(); Devices = @(); Addons = @(); Cleanup = @(); Restore = @(); Problems = @(); Policy = @{} }
+        $tabOk = [string]$ui.Tabs.SelectedItem.Tag -eq 'privacy'
+        $ticked = @(foreach ($k in 'privacy', 'devices', 'extensions') { $script:Options[$k] | Where-Object { $_.CheckBox.IsChecked } | ForEach-Object { $_.Id } })
+        $ticksOk = ($ticked -join ',') -eq 'tel.diagtrack'
+        $noteOk = [bool]($script:ElevatedNote -and [object]::ReferenceEquals($script:TabPanels['privacy'].Children[0], $script:ElevatedNote) -and
+            ([System.Windows.Automation.AutomationProperties]::GetName($script:ElevatedNote) -match 'press Apply selected'))
+        $bad = Test-QpElevationArguments -ForUser 'S-1-5-21-x' -Tab 'nowhere' -Tick 'AAAA"' -Pending 'apply;calc'
+        $hostile = ($bad.RequesterSid -eq '') -and ($bad.Tab -eq 'home') -and (@($bad.Ticks).Count -eq 0) -and ($bad.Pending -eq '')
+        $nothing = ($script:ChangeCalls.Count -eq 0)
+    } finally {
+        foreach ($n in $names) { Remove-Item "function:script:$n" -ErrorAction SilentlyContinue }
+        if ($script:ElevatedNote -and $script:ElevatedNote.Parent) { $script:ElevatedNote.Parent.Children.Remove($script:ElevatedNote) }
+        $script:ElevatedNote = $null
+        $script:Asked = $wasAsked; $script:Elevated = $wasElevated
+        foreach ($o in $script:Options['privacy']) { $o.CheckBox.IsChecked = $false }
+        Select-Tab 'home'
+    }
+    'tab: {0}; ticks, and only real ones: {1}; note: {2}; hostile values ignored: {3}; nothing changed: {4}' -f $tabOk, $ticksOk, $noteOk, $hostile, $nothing
+}
+
+function Test-Handoff {
+    <#
+        Asking for administrator rights, with pretend windows instead of real ones - no prompt ever
+        appears. Windows' prompt declined, or a launch that fails: this window stays, usable, and still
+        holds the one-at-a-time mutex. A new window that ends straight away: this one takes the mutex back.
+        One that shows itself: this one closes. The console flashing up first doesn't count as the window.
+        Slow: this one is usable again after a minute and still closes if the other turns up. Another
+        Quietpane taking the mutex in between: that one is the window to use. A mutex left behind by a
+        crash counts as free; one this window may not open means Quietpane is already open. The mutex is
+        only ever taken and let go on this window's own thread, and the command line uses -File.
+    #>
+    function New-FakeChild([bool]$Exited, [int64]$Handle, [string]$Title) {
+        $c = [pscustomobject]@{ HasExited = $Exited; MainWindowHandle = [IntPtr]$Handle; MainWindowTitle = $Title }
+        $c | Add-Member -MemberType ScriptMethod -Name Refresh -Value { }
+        return $c
+    }
+    $r = [ordered]@{}
+    $wasLaunch = $script:LaunchElevated
+    $realEnter = (Get-Command Enter-QuietpaneMutex -CommandType Function).ScriptBlock
+    $wasName = $script:MutexName
+    $reset = { $script:Handoff = $null; $script:HandoffClosed = $false; $script:HandedOver = $false; $window.IsEnabled = $true; $ui.Status.Text = '' }
+    # Asking only ever happens from a window without admin rights, so the test is that window, whoever runs it.
+    $wasElevated = $script:Elevated
+    $script:Elevated = $false
+    $script:HandoffTest = $true
+    try {
+        $script:MutexThreads.Clear()
+        [void](Enter-QuietpaneMutex 0)
+        & $reset
+        $script:LaunchElevated = { param($a) throw (New-Object System.ComponentModel.Win32Exception 1223) }
+        [void](Request-Elevation 'apply' 'privacy')
+        $r.declined = (-not $script:Handoff) -and $window.IsEnabled -and $ui.Status.Text -eq 'Nothing was changed.' -and -not $script:HandoffClosed -and $script:MutexThreads.Count -eq 1
+        & $reset
+        $script:LaunchElevated = { param($a) throw 'The system cannot find the file specified.' }
+        [void](Request-Elevation 'apply' 'privacy')
+        $r.failure = (-not $script:Handoff) -and $window.IsEnabled -and $ui.Status.Text -match "couldn't open" -and $script:MutexThreads.Count -eq 1
+        $argsOk = $script:LastArgLine -match '-File "[^"]+\.ps1"' -and $script:LastArgLine -match ' -Elevated$' -and $script:LastArgLine -match ' -ForUser S-1-' -and $script:LastArgLine -notmatch '-Command'
+        & $reset
+        $script:FakeChild = New-FakeChild $true 0 ''
+        $script:LaunchElevated = { param($a) $script:FakeChild }
+        [void](Request-Elevation 'apply' 'privacy')
+        $wasDisabled = -not $window.IsEnabled
+        Watch-Handoff
+        $r.exits = $wasDisabled -and $window.IsEnabled -and $ui.Status.Text -match "didn't open" -and -not $script:HandoffClosed
+        & $reset
+        $script:FakeChild = New-FakeChild $false 5 'C:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe'
+        [void](Request-Elevation 'apply' 'privacy')
+        Watch-Handoff
+        $r.flash = [bool]$script:Handoff -and -not $script:HandoffClosed -and -not $window.IsEnabled
+        $script:FakeChild.MainWindowHandle = [IntPtr]7; $script:FakeChild.MainWindowTitle = 'Quietpane - by KomodoWorks (admin)'
+        Watch-Handoff
+        $r.ready = [bool]$script:HandoffClosed -and -not $script:Handoff
+        & $reset
+        [void](Enter-QuietpaneMutex 0)
+        $script:FakeChild = New-FakeChild $false 0 ''
+        [void](Request-Elevation 'apply' 'privacy')
+        $script:Handoff.Started = (Get-Date).AddSeconds(-61)
+        Watch-Handoff
+        $slowUsable = $window.IsEnabled -and $ui.Status.Text -match 'taking a long time' -and [bool]$script:Handoff
+        $script:FakeChild.MainWindowHandle = [IntPtr]9; $script:FakeChild.MainWindowTitle = 'Quietpane - by KomodoWorks (admin)'
+        Watch-Handoff
+        $r.slow = $slowUsable -and [bool]$script:HandoffClosed
+        & $reset
+        [void](Enter-QuietpaneMutex 0)
+        $script:FakeChild = New-FakeChild $true 0 ''
+        [void](Request-Elevation 'apply' 'privacy')
+        Set-Item function:script:Enter-QuietpaneMutex { param([int]$WaitMs = 0) $false }
+        Watch-Handoff
+        Set-Item function:script:Enter-QuietpaneMutex $realEnter
+        $r.third = [bool]$script:HandoffClosed -and $script:HandedOver
+        $threads = @($script:MutexThreads | Sort-Object -Unique)
+        $r.oneThread = ($threads.Count -eq 1 -and $threads[0] -eq [System.Threading.Thread]::CurrentThread.ManagedThreadId)
+        # A mutex left behind by a Quietpane that crashed.
+        Exit-QuietpaneMutex
+        $script:OnlyInstance = $null
+        $script:MutexName = "Local\Quietpane-selftest-abandoned-$PID"
+        $ps = [powershell]::Create()
+        [void]$ps.AddScript({ param($n) $m = New-Object System.Threading.Mutex($false, $n); [void]$m.WaitOne(); 'held' }).AddArgument($script:MutexName)
+        [void]$ps.Invoke(); $ps.Dispose()
+        $r.abandoned = [bool](Enter-QuietpaneMutex 0)
+        Exit-QuietpaneMutex
+        # One this window may not even open: another account's, or one with more rights.
+        $script:OnlyInstance = $null
+        $script:MutexName = "Local\Quietpane-selftest-foreign-$PID"
+        $sec = New-Object System.Security.AccessControl.MutexSecurity
+        $sec.AddAccessRule((New-Object System.Security.AccessControl.MutexAccessRule((New-Object System.Security.Principal.SecurityIdentifier('S-1-5-18')), 'FullControl', 'Allow')))
+        $created = $false
+        $foreign = New-Object System.Threading.Mutex($false, $script:MutexName, [ref]$created, $sec)
+        $r.foreign = -not (Enter-QuietpaneMutex 0)
+        $foreign.Dispose()
+    } finally {
+        $script:LaunchElevated = $wasLaunch
+        Set-Item function:script:Enter-QuietpaneMutex $realEnter
+        $script:HandoffTest = $false
+        $script:Elevated = $wasElevated
+        & $reset
+        try { if ($script:OnlyInstance) { $script:OnlyInstance.Dispose() } } catch { }
+        $script:OnlyInstance = $null
+        $script:MutexName = $wasName
+    }
+    (($r.Keys | ForEach-Object { '{0}: {1}' -f $_, $r[$_] }) -join '; ') + ('; command line: {0}' -f $argsOk)
+}
+
 function Test-Glance {
     <#
         The "At a glance" boxes, filled from a made-up PC: a leftover to clear, a restore point, an app
@@ -5099,6 +5820,9 @@ if ($SelfTest) {
     'health layout: ' + (Test-HealthLayout)
     'health facts: ' + (Test-HealthFacts)
     'switches: ' + (Test-Switches)
+    'shields: ' + (Test-Shields)
+    'relaunch view: ' + (Test-RelaunchView)
+    'handoff: ' + (Test-Handoff)
     'at a glance: ' + (Test-Glance)
     'session: ' + (Test-SessionCard)
     'holding up: ' + (Test-SteadyCard)
@@ -5108,9 +5832,11 @@ if ($SelfTest) {
 }
 
 # ------------------------------------------------------------------ first run notice
-$acceptFile = Join-Path $info.DataRoot 'welcome-accepted.txt'
+$acceptFile = Join-Path $info.UserDataRoot 'welcome-accepted.txt'
 function Show-Welcome {
-    if (Test-Path $acceptFile) { return $true }
+    if (Test-Path -LiteralPath $acceptFile) { return $true }
+    # A window with administrator rights was opened from a normal one, where the welcome was already seen.
+    if ($Elevated -and $script:Elevated) { return $true }
     $msg = "Hello, and welcome to Quietpane $($info.Version).`n`n" +
            "Nothing leaves this PC, and nothing changes until you press a button.`n" +
            "Settings you change can be undone, and cleaned-up files go to the Recycle Bin.`n" +
@@ -5118,10 +5844,7 @@ function Show-Welcome {
            "It is free, open source, and comes with no warranty - use it on PCs that are yours to look after.`n`n" +
            "The full privacy policy and terms are in the Settings tab. Sound good?"
     if ([System.Windows.MessageBox]::Show($window, $msg, 'Quietpane', 'YesNo', 'Information') -ne 'Yes') { return $false }
-    try {
-        New-Item -ItemType Directory -Path $info.DataRoot -Force | Out-Null
-        Set-Content -Path $acceptFile -Value ("Welcome notice acknowledged {0} (version {1})" -f (Get-Date).ToString('s'), $info.Version)
-    } catch { }
+    [void](Write-QpTextFile -Path $acceptFile -Text ("Welcome notice acknowledged {0} (version {1})" -f (Get-Date).ToString('s'), $info.Version))
     return $true
 }
 

@@ -1,5 +1,5 @@
 @echo off
-rem Quietpane - safety scan only. Changes nothing and opens a report when finished.
+rem Quietpane - safety scan only. Changes nothing, needs no administrator rights, and opens a report when finished.
 if not exist "%~dp0src\Quietpane.psm1" goto notextracted
 rem Windows can restrict PowerShell to signed scripts only (Smart App Control, or a work policy).
 rem Then Quietpane cannot work, so say so here instead of failing out of sight.
