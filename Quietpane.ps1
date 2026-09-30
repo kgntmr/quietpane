@@ -4655,7 +4655,9 @@ function Update-QuarantineList {
         [void]$script:QuarantinePanel.Children.Add($script:BtnQuarantineOpen)
         return
     }
-    $items = @(Get-QpQuarantineItems)
+    # The self-test must change nothing, and opening the quarantine checks and locks the machine store -
+    # so a self-test with admin rights draws an empty quarantine instead of looking at the real one.
+    $items = if ($SelfTest) { @() } else { @(Get-QpQuarantineItems) }
     if (-not $items.Count) {
         $script:QuarantineBox.Visibility = 'Collapsed'
         return

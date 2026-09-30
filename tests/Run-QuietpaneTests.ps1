@@ -31,6 +31,43 @@ Import-Module (Join-Path $root 'src\Quietpane.psm1') -Force
 # so that area is added to what it may touch - from here, inside the module, where nothing else can.
 & (Get-Module Quietpane) { $script:TestRegRoots = @('HKCU:\Software\QuietpaneTest', 'HKCU:\Software\QuietpaneTest-UndoKind') }
 $script:IsAdminRun = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+
+# Every store this run uses is its own, in a fresh folder under %TEMP%: your real %LOCALAPPDATA%\Quietpane
+# and %ProgramData%\Quietpane are never written. The engine is pointed there from inside the module, the
+# way the registry area above is; nothing in the app itself changes, and with administrator rights the
+# machine store here is checked and locked by the same Protect-QpMachineStore as the real one.
+$script:RealUserRoot = & (Get-Module Quietpane) { $script:UserDataRoot }
+$script:RealMachineRoot = & (Get-Module Quietpane) { $script:MachineRoot }
+$script:RunRoot = Join-Path $env:TEMP ('qp-run-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+$script:RunMachine = Join-Path $script:RunRoot 'ProgramData\Quietpane'
+$script:RunLegacy = Join-Path $script:RunRoot 'ProgramData\CleanMyPC'
+$script:RunUser = Join-Path $script:RunRoot 'LocalAppData\Quietpane'
+[void][IO.Directory]::CreateDirectory($script:RunUser)
+[void][IO.Directory]::CreateDirectory((Split-Path $script:RunMachine -Parent))
+& (Get-Module Quietpane) {
+    param($m, $l, $u)
+    $script:MachineRoot = $m; $script:LegacyDataRoot = $l; $script:UserDataRoot = $u
+    $script:TempUnitFile = Join-Path $u 'temperature.txt'; $script:TempUnit = $null; $script:MachineVerified = $null
+} $script:RunMachine $script:RunLegacy $script:RunUser
+
+function Get-RealStoreSnapshot {
+    <#
+        Every folder (with its permissions) and file (with its size and SHA256) in your real Quietpane
+        folders: your own always, the machine store's machine folder only with administrator rights - an
+        ordinary run must not even look there. Compared at the very end of the run.
+    #>
+    $roots = @($script:RealUserRoot)
+    if ($script:IsAdminRun) { $roots += Join-Path $script:RealMachineRoot 'machine' }
+    foreach ($r in $roots) {
+        if (-not [IO.Directory]::Exists($r)) { "$r absent"; continue }
+        "$r $((Get-Acl -LiteralPath $r).Sddl)"
+        foreach ($i in @(Get-ChildItem -LiteralPath $r -Recurse -Force | Sort-Object FullName)) {
+            if ($i.PSIsContainer) { '{0} folder {1}' -f $i.FullName, (Get-Acl -LiteralPath $i.FullName).Sddl }
+            else { '{0} {1} {2}' -f $i.FullName, $i.Length, (Get-FileHash -LiteralPath $i.FullName -Algorithm SHA256).Hash }
+        }
+    }
+}
+$script:RealBefore = @(Get-RealStoreSnapshot)
 # Where this run's restore points and notes go: your own store without administrator rights, the locked
 # machine store with them.
 function Get-TestRestoreRoot { if ($script:IsAdminRun) { Get-QpMachineStorePath 'points' } else { Get-QpUserStorePath 'restore' } }
@@ -2288,11 +2325,8 @@ function Use-QpTestStore([string]$Machine, [string]$Legacy = '') {
     [void][IO.Directory]::CreateDirectory((Join-Path $Machine 'machine\points'))
 }
 function Reset-QpTestStore {
-    & $mod {
-        $script:MachineRoot = Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'Quietpane'
-        $script:LegacyDataRoot = Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'CleanMyPC'
-        $script:MachineVerified = $null
-    }
+    # Back to this run's own stores - never the real ones.
+    & $mod { param($m, $l) $script:MachineRoot = $m; $script:LegacyDataRoot = $l; $script:MachineVerified = $null } $script:RunMachine $script:RunLegacy
 }
 function Get-Pol($Op) { Get-QpOperationPolicy $Op }
 function Copy-Map($m) { $c = [ordered]@{}; foreach ($k in $m.Keys) { $c[$k] = $m[$k] }; return $c }
@@ -2506,8 +2540,10 @@ Test-Case 'the report says the same, in so many words' {
 
 Section 'Your own store, and settings carried over from 2.0'
 Test-Case 'your own settings live in your own profile, never the shared machine folder' {
-    $u = Get-QpUserStorePath
+    # The folder the app itself uses, as the module worked it out before this run pointed it elsewhere.
+    $u = $script:RealUserRoot
     $u.StartsWith([Environment]::GetFolderPath('LocalApplicationData'), [StringComparison]::OrdinalIgnoreCase) -and
+    (Get-QpUserStorePath).StartsWith($script:RunRoot, [StringComparison]::OrdinalIgnoreCase) -and
     -not (Get-QpInfo).PSObject.Properties['DataRoot']
 }
 Test-Case 'only the four plain settings are carried over, only when valid, and never over your own' {
@@ -3015,6 +3051,20 @@ try { [IO.Directory]::Delete($scratch, $true) } catch { }
 Reset-QpAs
 Reset-QpTestStore
 
+Section 'The tests themselves leave your real Quietpane folders alone'
+Test-Case 'every store this run used was its own, under %TEMP%' {
+    $paths = @((Get-QpUserStorePath), (Get-TestStoreFile 'audit.log'), (Get-TestRestoreRoot))
+    -not @($paths | Where-Object { -not $_.StartsWith($script:RunRoot, [StringComparison]::OrdinalIgnoreCase) }).Count
+}
+Test-Case 'this run left your real Quietpane folders exactly as they were (the machine store only checked with administrator rights)' {
+    # Taken at the very start, before the first test; everything since - including the window's own
+    # self-tests, run as separate copies of the app - must have left every file and permission as it was.
+    $after = @(Get-RealStoreSnapshot)
+    $changed = @(Compare-Object $script:RealBefore $after | ForEach-Object { '{0} {1}' -f $_.SideIndicator, $_.InputObject })
+    foreach ($c in $changed) { Write-Host "        $c" -ForegroundColor DarkYellow }
+    $changed.Count -eq 0
+}
+
 Section 'The checks a person has to do by hand'
 Test-Case 'the manual test pages are written down, including the AMTSO ones' {
     $doc = Join-Path $root 'docs\manual-checks.md'
@@ -3049,6 +3099,9 @@ if (-not $Live) {
         }
     }
 }
+
+# This run's own stores go with it (a folder the run made itself, under %TEMP%).
+try { [IO.Directory]::Delete($script:RunRoot, $true) } catch { Write-Host "  (could not tidy up $($script:RunRoot): $($_.Exception.Message))" -ForegroundColor DarkGray }
 
 Write-Host ("`n{0} passed, {1} failed, {2} skipped" -f $script:Pass, $script:Fail, $script:Skip) -ForegroundColor $(if ($script:Fail) { 'Red' } else { 'Green' })
 if ($script:Fail) { exit 1 }
