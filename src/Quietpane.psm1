@@ -9,7 +9,11 @@
 
     Principles
       * Scan is read-only.
-      * Every change is recorded in a restore point (%ProgramData%\Quietpane\restore\...) and can be undone.
+      * Every change is recorded in a restore point and can be undone: your own settings in
+        %LOCALAPPDATA%\Quietpane\restore, changes made with administrator rights in the protected
+        %ProgramData%\Quietpane\machine\points.
+      * Quietpane runs without administrator rights. It asks Windows for them only when a change needs
+        them, and this engine decides for itself what each change needs - never the window.
       * Tidying up only ever moves files to the Recycle Bin. The single exception is a threat the
         user chooses to delete for good, which is confirmed twice and written to the audit log.
       * Quarantined files are moved, never altered, and can be restored byte-for-byte.
@@ -19,7 +23,7 @@
       * No network requests, no telemetry, no data collection. Everything stays on this PC.
 #>
 
-$script:AppVersion  = '2.0.0'
+$script:AppVersion  = '2.1.0'
 $script:AppReleased = '2026-09-30'   # the day this version was published; bumped with the version
 $script:Brand       = @{ Name = 'KomodoWorks'; Url = 'https://www.komodoworks.com'; Email = 'info@komodoworks.com'; Repo = 'https://github.com/kgntmr/quietpane' }
 $script:AssetsRoot  = Join-Path (Split-Path $PSScriptRoot -Parent) 'assets'
@@ -29,10 +33,14 @@ $script:ProgressSink = $null      # where "where the check has got to" is sent, 
 $script:CancelCheck = $null       # how the engine asks whether the user has pressed Stop
 $script:Session     = $null
 $script:CatalogRoot = Join-Path $PSScriptRoot 'catalog'
-$script:DataRoot    = Join-Path $env:ProgramData 'Quietpane'
-# Restore points made before the app was renamed (it used to be called Clean My PC).
-# New ones go to the folder above; old ones stay readable so Undo keeps working.
-$script:LegacyDataRoot = Join-Path $env:ProgramData 'CleanMyPC'
+# Two places to keep things. Your own settings and your own restore points live in your profile, where
+# only you and administrators can write. What changes the whole PC lives in ProgramData, locked to
+# administrators - and it is only ever opened by a Quietpane that has administrator rights.
+$script:UserDataRoot = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'Quietpane'
+$script:MachineRoot  = Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'Quietpane'
+# Restore points made before the app was renamed (it used to be called Clean My PC). Like every restore
+# point made before 2.1, they are listed for reference and never replayed.
+$script:LegacyDataRoot = Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'CleanMyPC'
 $script:HostsPath   = Join-Path $env:WINDIR 'System32\drivers\etc\hosts'
 $script:ComputerMaker = $null      # filled in once, when brand software is looked for
 $script:GpuNames = $null
@@ -54,7 +62,9 @@ function Get-QpInfo {
         LogoPath   = Join-Path $script:AssetsRoot 'komodoworks-logo.png'
         IconPath   = Join-Path $script:AssetsRoot 'quietpane.ico'
         AppId      = $script:AppUserModelId
-        DataRoot   = $script:DataRoot
+        # Your own store. The machine store has no entry here on purpose: only the engine, with
+        # administrator rights and after checking it, ever opens it (Get-QpMachineStorePath).
+        UserDataRoot = $script:UserDataRoot
     }
 }
 
@@ -109,9 +119,14 @@ function Test-QpCancelled {
     try { return [bool](& $script:CancelCheck) } catch { return $false }
 }
 
+$script:IsAdmin = $null
 function Test-QpAdmin {
-    ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
-        [Security.Principal.WindowsBuiltInRole]::Administrator)
+    # Asked once: a process's rights never change while it runs.
+    if ($null -eq $script:IsAdmin) {
+        $script:IsAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
+            [Security.Principal.WindowsBuiltInRole]::Administrator)
+    }
+    return $script:IsAdmin
 }
 
 $script:CatalogCache = @{}
@@ -340,6 +355,833 @@ function Get-QpStamp {
 
 #endregion
 
+#region ---------------------------------------------------------------- who is asking, and what that allows
+
+# Quietpane opens without administrator rights and asks Windows for them only when a change needs them.
+# Two questions decide every change, and they are kept apart:
+#
+#   Scope      whose state it changes: this account's own ('User'), or the whole PC's ('Machine').
+#   Privilege  what it takes to change it: an ordinary token ('User') or an administrator's ('Admin').
+#              'RuntimeCheck' is for a target whose permissions really do vary; it is looked at without
+#              changing anything, and any doubt at all counts as 'Admin'.
+#
+# The window may say what the person wants. This engine decides, on its own, what it will do: every
+# batch is checked as a whole before its first change, and every single change is checked again as it
+# is made. Nothing the window, a command line or a file says can widen that.
+
+$script:SidSystem = 'S-1-5-18'
+$script:SidAdmins = 'S-1-5-32-544'
+$script:Actor = $null
+$script:TokenSid = $null
+
+function Get-QpTokenSid {
+    if (-not $script:TokenSid) { $script:TokenSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value }
+    return $script:TokenSid
+}
+
+function Set-QpActor {
+    <#
+        Whose Quietpane this is. The window says so once, as it opens: the account it was opened for,
+        as a SID. An empty or unreadable SID means "not known", and then only changes to Windows itself
+        are made. Names are never used to decide anything - two accounts can share one.
+    #>
+    param([AllowEmptyString()][AllowNull()][string]$RequesterSid)
+    $sid = ''
+    if ($RequesterSid) { try { $sid = (New-Object Security.Principal.SecurityIdentifier($RequesterSid)).Value } catch { $sid = '' } }
+    $script:Actor = [pscustomobject]@{ RequesterSid = $sid; TokenSid = (Get-QpTokenSid) }
+}
+
+function Get-QpActor {
+    # Used straight from a script (the tests, the scan) the engine works for the account running it.
+    if (-not $script:Actor) { Set-QpActor -RequesterSid (Get-QpTokenSid) }
+    return $script:Actor
+}
+
+function Test-QpSameUser {
+    <# Whether this process runs as the account it works for. Unknown counts as no. #>
+    $a = Get-QpActor
+    return [bool]($a.RequesterSid -and $a.RequesterSid -eq $a.TokenSid)
+}
+
+function Test-QpAccessDenied($Ex) {
+    <#
+        Whether an error means "not allowed" - which, for Quietpane, means "needs administrator rights to
+        see" - rather than anything else. Decided by the kind of error and Windows' code, never the
+        wording, which is translated.
+    #>
+    $e = $Ex
+    if ($e -is [Management.Automation.ErrorRecord]) { $e = $e.Exception }
+    while ($e) {
+        if ($e -is [UnauthorizedAccessException] -or $e -is [Security.SecurityException]) { return $true }
+        if ($e.HResult -eq -2147024891) { return $true }                                   # 0x80070005
+        if ($e.GetType().Name -eq 'CimException' -and "$($e.NativeErrorCode)" -eq 'AccessDenied') { return $true }
+        $e = $e.InnerException
+    }
+    return $false
+}
+
+function Get-QpAccountName([string]$Sid) {
+    <# For showing only: the account's name, or the SID itself when Windows can't name it. #>
+    if (-not $Sid) { return 'an account Quietpane was not told' }
+    try { return (New-Object Security.Principal.SecurityIdentifier($Sid)).Translate([Security.Principal.NTAccount]).Value } catch { return $Sid }
+}
+
+function Get-QpAccountMessage {
+    $a = Get-QpActor
+    $me = Get-QpAccountName $a.TokenSid
+    if (-not $a.RequesterSid) {
+        return "This window has admin rights as $me, and Quietpane was not told whose own settings to change, so it only changes Windows itself here. Nothing was changed. Change your own settings from your normal Quietpane window."
+    }
+    return ("Your own settings belong to {0}; this window has admin rights as {1}. Nothing was changed. Change your own settings from your normal Quietpane window." -f (Get-QpAccountName $a.RequesterSid), $me)
+}
+
+# ---- paths, spelled one way
+
+function Get-QpCanonicalPath {
+    <#
+        A local path exactly as Windows would spell it, or $null. A path that changes when Windows tidies
+        it up - "..", a trailing dot or space, "\\?\", a network path - is not the path it claims to be,
+        so it is refused rather than tidied.
+    #>
+    param([string]$Path)
+    if (-not $Path -or $Path.Length -gt 1024 -or $Path -match '[\x00-\x1F"<>|*?]' -or $Path.StartsWith('\\') -or $Path -notmatch '^[A-Za-z]:\\') { return $null }
+    try { $full = [IO.Path]::GetFullPath($Path) } catch { return $null }
+    if ($full.TrimEnd('\') -ine $Path.TrimEnd('\')) { return $null }
+    return $full.TrimEnd('\')
+}
+
+function Test-QpPathUnder([string]$Path, [string]$Root) {
+    if (-not $Path -or -not $Root) { return $false }
+    try { $p = [IO.Path]::GetFullPath($Path).TrimEnd('\'); $r = [IO.Path]::GetFullPath($Root).TrimEnd('\') } catch { return $false }
+    return ($p -ieq $r -or $p.StartsWith($r + '\', [StringComparison]::OrdinalIgnoreCase))
+}
+
+function Test-QpReparseFree {
+    <#
+        $true when the path, and every folder above it that exists, is a plain file or folder: no
+        junction, no symbolic link, no mount point. Checked immediately before each use, because a
+        check made earlier says nothing about now.
+    #>
+    param([string]$Path)
+    try { $p = [IO.Path]::GetFullPath($Path) } catch { return $false }
+    while ($p) {
+        try {
+            if ([IO.File]::Exists($p) -or [IO.Directory]::Exists($p)) {
+                if ([IO.File]::GetAttributes($p) -band [IO.FileAttributes]::ReparsePoint) { return $false }
+            }
+        } catch { return $false }
+        $parent = [IO.Path]::GetDirectoryName($p)
+        if (-not $parent -or $parent -eq $p) { break }
+        $p = $parent
+    }
+    return $true
+}
+
+function Find-QpReparseInTree {
+    <# Walks a folder, never following a link, and stops at the first link it meets. Bounded, so it always ends. #>
+    param([Parameter(Mandatory)][string]$Root, [int]$Limit = 20000)
+    $count = 0
+    $stack = New-Object System.Collections.Stack
+    $stack.Push($Root)
+    while ($stack.Count) {
+        $dir = $stack.Pop()
+        $entries = $null
+        try { $entries = [IO.Directory]::GetFileSystemEntries($dir) } catch { return [pscustomobject]@{ Ok = $false; Why = "part of it can't be read ($dir)"; Found = $dir } }
+        foreach ($e in $entries) {
+            $count++
+            if ($count -gt $Limit) { return [pscustomobject]@{ Ok = $false; Why = 'it holds far more than Quietpane ever puts there'; Found = $null } }
+            $a = $null
+            try { $a = [IO.File]::GetAttributes($e) } catch { return [pscustomobject]@{ Ok = $false; Why = "part of it can't be read ($e)"; Found = $e } }
+            if ($a -band [IO.FileAttributes]::ReparsePoint) { return [pscustomobject]@{ Ok = $false; Why = "a link or junction is inside it ($e)"; Found = $e } }
+            if ($a -band [IO.FileAttributes]::Directory) { $stack.Push($e) }
+        }
+    }
+    return [pscustomobject]@{ Ok = $true; Why = ''; Found = $null; Count = $count }
+}
+
+# ---- your own store
+
+function Test-QpUserStoreWritable {
+    # An administrator window working for somebody else - or for nobody it was told about - writes
+    # nothing into anyone's own store. Its choices last until it closes.
+    if (-not (Test-QpAdmin)) { return $true }
+    return (Test-QpSameUser)
+}
+
+function Write-QpTextFile {
+    <#
+        Writes one small file: through a fresh temporary file beside it, never through a link, and never
+        into your own store from a window working for someone else. Returns $true once it is written.
+    #>
+    param([Parameter(Mandatory)][string]$Path, [AllowEmptyString()][string]$Text)
+    if ((Test-QpPathUnder $Path $script:UserDataRoot) -and -not (Test-QpUserStoreWritable)) { return $false }
+    $tmp = $null
+    try {
+        $full = [IO.Path]::GetFullPath($Path)
+        $dir = [IO.Path]::GetDirectoryName($full)
+        if (-not [IO.Directory]::Exists($dir)) { [void][IO.Directory]::CreateDirectory($dir) }
+        if (-not (Test-QpReparseFree $full)) { Write-QpLog "$full is behind a link, so Quietpane did not write to it." 'WARN'; return $false }
+        $tmp = Join-Path $dir ('.qp-' + [guid]::NewGuid().ToString('N') + '.tmp')
+        $fs = New-Object IO.FileStream($tmp, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+        try { $b = [Text.Encoding]::UTF8.GetBytes([string]$Text); $fs.Write($b, 0, $b.Length) } finally { $fs.Close() }
+        # (NullString: PowerShell would otherwise hand .NET an empty string for "no backup", which it refuses.)
+        if ([IO.File]::Exists($full)) { [IO.File]::Replace($tmp, $full, [NullString]::Value) } else { [IO.File]::Move($tmp, $full) }
+        $tmp = $null
+        return $true
+    } catch {
+        return $false
+    } finally {
+        if ($tmp) { try { [IO.File]::Delete($tmp) } catch { } }
+    }
+}
+
+function Read-QpTextFile {
+    <# One small file, or $null: missing, too big, or reached through a link. #>
+    param([Parameter(Mandatory)][string]$Path, [int]$MaxBytes = 1MB)
+    try {
+        if (-not [IO.File]::Exists($Path)) { return $null }
+        if (-not (Test-QpReparseFree $Path)) { return $null }
+        if ((New-Object IO.FileInfo $Path).Length -gt $MaxBytes) { return $null }
+        return [IO.File]::ReadAllText($Path)
+    } catch { return $null }
+}
+
+function Get-QpUserStorePath([string]$Child = '') {
+    if ($Child) { return (Join-Path $script:UserDataRoot $Child) }
+    return $script:UserDataRoot
+}
+
+function Invoke-QpPreferenceMigration {
+    <#
+        Carries four settings over from 2.0, where they were kept in the shared ProgramData folder:
+        light or dark, Celsius or Fahrenheit, the update you said "not now" to, and that you have seen
+        the welcome. Only in an administrator window working for the same account, once that folder
+        has been checked; only when you have no copy of your own yet; and only a value that is exactly
+        one of the expected ones. Nothing else from that folder is ever carried over.
+    #>
+    param([string]$From = $script:MachineRoot, [string]$To = $script:UserDataRoot)
+    if (-not (Test-QpAdmin) -or -not (Test-QpSameUser)) { return 0 }
+    $moved = 0
+    foreach ($r in @(
+            @{ Name = 'appearance.txt'; Ok = '^(Light|Dark)$' },
+            @{ Name = 'temperature.txt'; Ok = '^(C|F)$' },
+            @{ Name = 'update-dismissed.txt'; Ok = '^\d{1,4}\.\d{1,4}\.\d{1,6}$' },
+            @{ Name = 'welcome-accepted.txt'; Ok = '' })) {
+        $dest = Join-Path $To $r.Name
+        if ([IO.File]::Exists($dest)) { continue }
+        $text = Read-QpTextFile -Path (Join-Path $From $r.Name) -MaxBytes 4096
+        if ($null -eq $text) { continue }
+        if ($r.Ok) { $v = $text.Trim(); if ($v -notmatch $r.Ok) { continue } }
+        else { $v = 'Welcome notice acknowledged in an earlier version of Quietpane.' }
+        if (Write-QpTextFile -Path $dest -Text $v) { $moved++ }
+    }
+    return $moved
+}
+
+# ---- registry places, spelled one way
+
+function ConvertTo-QpRegTarget {
+    <#
+        A registry key in the one spelling Quietpane uses - 'HKCU:\...' or 'HKLM:\...' - or $null. The
+        provider's long form for those two hives is accepted from Windows' own objects; every other hive,
+        an empty part, '.', '..' or a part with spaces around it is refused.
+    #>
+    param([string]$Path)
+    if (-not $Path -or $Path.Length -gt 1024 -or $Path -match '[\x00-\x1F]') { return $null }
+    $p = $Path
+    if ($p -match '^(?i)(?:Microsoft\.PowerShell\.Core\\)?Registry::(HKEY_CURRENT_USER|HKEY_LOCAL_MACHINE)\\(.+)$') {
+        $p = $(if ($matches[1] -ieq 'HKEY_CURRENT_USER') { 'HKCU:\' } else { 'HKLM:\' }) + $matches[2]
+    }
+    if ($p -notmatch '^(?i)(HKCU|HKLM):\\(.+)$') { return $null }
+    $hive = $matches[1].ToUpperInvariant()
+    $key = $matches[2].TrimEnd('\')
+    if (-not $key) { return $null }
+    foreach ($part in $key.Split('\')) { if (-not $part -or $part -eq '.' -or $part -eq '..' -or $part.Trim() -ne $part) { return $null } }
+    [pscustomobject]@{ Hive = $hive; Key = $key; Path = ('{0}:\{1}' -f $hive, $key) }
+}
+
+# Registry places whose writability genuinely varies from PC to PC. None in 2.1: on the PCs this was
+# checked on, HKCU\Software\Policies is read-only for an ordinary account, so it is Admin outright.
+$script:RuntimeCheckRoots = @()
+
+function Test-QpRegistryWritable {
+    <#
+        The only privilege probe there is, and it changes nothing: it opens a key that already exists,
+        asking for the right to change it, and closes it again. No key is created, no value is written,
+        nothing is deleted. A missing key is answered from the nearest key above it only while that is
+        still inside the same policy root; otherwise - and whenever anything is unclear - the answer is
+        "no", which means the change waits for administrator rights.
+    #>
+    param([Parameter(Mandatory)][string]$Path, [string]$PolicyRoot = '')
+    $t = ConvertTo-QpRegTarget $Path
+    if (-not $t) { return $false }
+    $root = if ($PolicyRoot) { ConvertTo-QpRegTarget $PolicyRoot } else { $null }
+    $hive = if ($t.Hive -eq 'HKCU') { [Microsoft.Win32.Registry]::CurrentUser } else { [Microsoft.Win32.Registry]::LocalMachine }
+    $key = $t.Key
+    $rights = [Security.AccessControl.RegistryRights]::SetValue
+    while ($true) {
+        $k = $null
+        try { $k = $hive.OpenSubKey($key, $false) } catch { return $false }
+        if ($k) { $k.Close(); break }
+        # Not there: only its parent could say, and only if the parent is still inside the policy root.
+        $cut = $key.LastIndexOf('\')
+        if ($cut -le 0) { return $false }
+        $key = $key.Substring(0, $cut)
+        if (-not $root -or $root.Hive -ne $t.Hive -or -not ($key -ieq $root.Key -or $key.StartsWith($root.Key + '\', [StringComparison]::OrdinalIgnoreCase))) { return $false }
+        $rights = [Security.AccessControl.RegistryRights]::CreateSubKey
+    }
+    $k = $null
+    try {
+        $k = $hive.OpenSubKey($key, [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree, $rights)
+        return [bool]$k
+    } catch { return $false } finally { if ($k) { $k.Close() } }
+}
+
+# ---- operations: every change Quietpane can make, described before it is made
+
+$script:OperationKinds = @('Reg', 'Service', 'Task', 'Env', 'Hosts', 'File', 'AppxUser', 'AppxProvisioned', 'Uninstall',
+    'StartupApproved', 'ExtBlock', 'Quarantine', 'Remediate', 'SignInTask', 'ProgramFilesCopy', 'Shortcut', 'Cleanup', 'Recycle', 'Undo')
+
+function New-QpOperation {
+    <#
+        One change, described: what kind, what it touches, and anything it reads to decide. Nothing here
+        runs anything. -Hive and -Command are for uninstallers: where the program is registered, and the
+        exact command Quietpane would run.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Kind, [string]$Target = '', [string]$Name = '', [string]$Item = '',
+        [string[]]$Reads = @(), [string]$Hive = '', [string]$Command = '', [string]$Store = ''
+    )
+    [pscustomobject]@{ Kind = $Kind; Target = $Target; Name = $Name; Item = $Item; Reads = @($Reads | Where-Object { $_ }); Hive = $Hive; Command = $Command; Store = $Store }
+}
+
+function Format-QpOperation($Op) {
+    switch ($Op.Kind) {
+        'Service'   { return "service $($Op.Target)" }
+        'Task'      { return "task $($Op.Target)$($Op.Name)" }
+        'Reg'       { return "$($Op.Target)\$($Op.Name)" }
+        'Env'       { return "environment variable $($Op.Target)" }
+        'Hosts'     { return 'the hosts file' }
+        'Uninstall' { return "uninstalling $($Op.Name)" }
+        'Undo'      { return "undoing $(Split-Path $Op.Target -Leaf)" }
+        default     { $t = if ($Op.Name) { "$($Op.Target) $($Op.Name)" } else { $Op.Target }; return ("{0} {1}" -f $Op.Kind, $t).Trim() }
+    }
+}
+
+function Get-QpPathScope([string]$Path) {
+    # Inside this account's own folder it is yours; anywhere else it is the PC's.
+    if (Test-QpPathUnder $Path ([Environment]::GetFolderPath('UserProfile'))) { return 'User' }
+    return 'Machine'
+}
+
+function Get-QpManifestLevel {
+    <#
+        The run level a program asks Windows for, read from the manifest inside it - not by running it,
+        and not by searching the file for words. The program's own resource table is walked to its
+        manifest (resource type 24), and only that manifest is read. '' when there isn't one or the file
+        can't be read that way; the caller treats '' as "needs administrator rights".
+    #>
+    param([Parameter(Mandatory)][string]$Path)
+    $fs = $null
+    try {
+        $fs = New-Object IO.FileStream($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+        $br = New-Object IO.BinaryReader $fs
+        $len = $fs.Length
+        if ($len -lt 512) { return '' }
+        if ($br.ReadUInt16() -ne 0x5A4D) { return '' }                      # MZ
+        $fs.Position = 0x3C; $pe = [int64]$br.ReadInt32()
+        if ($pe -le 0 -or $pe -gt $len - 256) { return '' }
+        $fs.Position = $pe; if ($br.ReadUInt32() -ne 0x00004550) { return '' }  # PE\0\0
+        $fs.Position = $pe + 6; $sections = [int]$br.ReadUInt16()
+        $fs.Position = $pe + 20; $optSize = [int]$br.ReadUInt16()
+        $opt = $pe + 24
+        $fs.Position = $opt; $magic = $br.ReadUInt16()
+        $dirs = if ($magic -eq 0x20B) { $opt + 112 } elseif ($magic -eq 0x10B) { $opt + 96 } else { return '' }
+        $fs.Position = $dirs + 16                                               # data directory 2: resources
+        $resRva = [int64]$br.ReadUInt32()
+        if ($resRva -le 0 -or $sections -le 0 -or $sections -gt 96) { return '' }
+        $table = @(for ($i = 0; $i -lt $sections; $i++) {
+            $fs.Position = $opt + $optSize + 40 * $i + 8
+            $vsize = [int64]$br.ReadUInt32(); $va = [int64]$br.ReadUInt32(); $raw = [int64]$br.ReadUInt32(); $ptr = [int64]$br.ReadUInt32()
+            [pscustomobject]@{ Va = $va; Size = [math]::Max($vsize, $raw); Ptr = $ptr }
+        })
+        $toFile = { param([int64]$Rva) foreach ($s in $table) { if ($Rva -ge $s.Va -and $Rva -lt $s.Va + $s.Size) { return ($Rva - $s.Va + $s.Ptr) } }; return [int64]-1 }
+        $base = & $toFile $resRva
+        if ($base -lt 0 -or $base -ge $len) { return '' }
+        $entries = {
+            param([int64]$At)
+            if ($At -lt 0 -or $At + 16 -gt $len) { return @() }
+            $fs.Position = $At + 12
+            $n = [int]$br.ReadUInt16() + [int]$br.ReadUInt16()
+            if ($n -gt 2048) { return @() }
+            @(for ($i = 0; $i -lt $n; $i++) {
+                $fs.Position = $At + 16 + 8 * $i
+                $id = [int64]$br.ReadUInt32(); $off = [int64]$br.ReadUInt32()
+                [pscustomobject]@{ Id = $id; IsDir = [bool]($off -band [int64]2147483648); Off = ($off -band [int64]2147483647) }
+            })
+        }
+        $type = @(& $entries $base | Where-Object { $_.Id -eq 24 -and $_.IsDir })[0]
+        if (-not $type) { return '' }
+        $name = @(& $entries ($base + $type.Off) | Where-Object { $_.IsDir })[0]
+        if (-not $name) { return '' }
+        $lang = @(& $entries ($base + $name.Off) | Where-Object { -not $_.IsDir })[0]
+        if (-not $lang) { return '' }
+        $fs.Position = $base + $lang.Off
+        $dataRva = [int64]$br.ReadUInt32(); $size = [int64]$br.ReadUInt32()
+        if ($size -le 0 -or $size -gt 65536) { return '' }
+        $at = & $toFile $dataRva
+        if ($at -lt 0 -or $at + $size -gt $len) { return '' }
+        $fs.Position = $at
+        $xml = [Text.Encoding]::UTF8.GetString($br.ReadBytes([int]$size))
+        if ($xml -notmatch '<assembly') { return '' }
+        $m = [regex]::Matches($xml, '<(?:\w+:)?requestedExecutionLevel\b[^>]*\blevel\s*=\s*["'']([A-Za-z]+)["'']')
+        if ($m.Count -ne 1) { return '' }
+        return $m[0].Groups[1].Value
+    } catch { return '' } finally { if ($fs) { $fs.Dispose() } }
+}
+
+function Get-QpUninstallPrivilege {
+    <#
+        Whether running an uninstaller needs administrator rights. Where the program is registered says
+        whose it is (the scope); it does not say what its uninstaller will do. So this looks at what
+        Quietpane would actually run, without running it, and only an uninstaller that is plainly an
+        ordinary program in your own folders that asks for no more than your own rights counts as not
+        needing them. Anything else - Windows Installer, a wrapper, a path it can't pin down - needs them.
+    #>
+    param([string]$Hive, [string]$Command)
+    $admin = { param($why) [pscustomobject]@{ Privilege = 'Admin'; Why = $why } }
+    if ($Hive -ne 'HKCU') { return (& $admin 'It is installed for everyone on this PC.') }
+    $c = "$Command".Trim()
+    if (-not $c) { return (& $admin 'It has no uninstall command.') }
+    if ($c -match '%') { return (& $admin 'Its uninstall command uses a variable Quietpane will not guess at.') }
+    if (($c.Length - $c.Replace('"', '').Length) % 2) { return (& $admin 'Its uninstall command could not be read with certainty.') }
+    if ($c -match '\{[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\}') { return (& $admin 'It is removed by Windows Installer.') }
+    $run = Split-QpUninstallCommand $c
+    $exe = [string]$run.Program
+    if ($exe -match '(?i)(^|\\)(msiexec|cmd|rundll32|wscript|cscript|powershell|pwsh|mshta|regsvr32|conhost|explorer)(\.exe)?$') { return (& $admin 'Its uninstaller runs through another program.') }
+    $full = Get-QpCanonicalPath $exe
+    if (-not $full) { return (& $admin 'Its uninstaller could not be found with certainty.') }
+    $own = @([Environment]::GetFolderPath('LocalApplicationData'), [Environment]::GetFolderPath('ApplicationData')) | Where-Object { $_ }
+    if (-not @($own | Where-Object { Test-QpPathUnder $full $_ }).Count) { return (& $admin 'Its uninstaller is outside your own folders.') }
+    if (-not [IO.File]::Exists($full)) { return (& $admin 'Its uninstaller is not where it says it is.') }
+    if (-not (Test-QpReparseFree $full)) { return (& $admin 'Its uninstaller is behind a link.') }
+    $level = Get-QpManifestLevel $full
+    if ($level -eq 'asInvoker') { return [pscustomobject]@{ Privilege = 'User'; Why = 'It runs with your own rights.' } }
+    if ($level) { return (& $admin "It asks Windows for $level rights.") }
+    return (& $admin 'It does not say what rights it needs.')
+}
+
+function Get-QpOperationPolicy {
+    <#
+        The three answers for one change: whose state it touches (Scope), what it needs (Privilege), and
+        whether this process may make it now (CanRunNow, with the reason when not). Refused is $true when
+        the change is not one Quietpane makes at all - an unknown kind or a place it never touches.
+    #>
+    param([Parameter(Mandatory)]$Op)
+    $refuse = { param($why) [pscustomobject]@{ Scope = ''; Privilege = ''; CanRunNow = $false; Refused = $true; Reason = $why; Code = 'target' } }
+    $scope = ''; $priv = ''; $runtimeOk = $null
+    switch ([string]$Op.Kind) {
+        { $_ -in 'Reg', 'StartupApproved', 'ExtBlock' } {
+            $t = ConvertTo-QpRegTarget $Op.Target
+            if (-not $t) { return (& $refuse "that is not a registry place Quietpane changes ($($Op.Target))") }
+            if ($t.Hive -eq 'HKLM') { $scope = 'Machine'; $priv = 'Admin' }
+            elseif ($t.Key -match '^(?i)Software\\Policies(\\|$)') { $scope = 'User'; $priv = 'Admin' }
+            else { $scope = 'User'; $priv = 'User' }
+            foreach ($rc in $script:RuntimeCheckRoots) {
+                $r = ConvertTo-QpRegTarget $rc
+                if ($r -and $r.Hive -eq $t.Hive -and ($t.Key -ieq $r.Key -or $t.Key.StartsWith($r.Key + '\', [StringComparison]::OrdinalIgnoreCase))) {
+                    $priv = 'RuntimeCheck'
+                    $runtimeOk = Test-QpRegistryWritable -Path $t.Path -PolicyRoot $r.Path
+                }
+            }
+        }
+        { $_ -in 'Service', 'Task', 'Env', 'Hosts', 'AppxProvisioned', 'Quarantine', 'Remediate' } { $scope = 'Machine'; $priv = 'Admin' }
+        'ProgramFilesCopy' {
+            # Quietpane's own copy belongs in Program Files, which only administrators can change. A copy
+            # made anywhere else (the tests make one in a temporary folder) is judged by where it goes.
+            $full = Get-QpCanonicalPath $Op.Target
+            $pf = @($env:ProgramW6432, $env:ProgramFiles, ${env:ProgramFiles(x86)}) | Where-Object { $_ }
+            if (-not $full -or @($pf | Where-Object { Test-QpPathUnder $full $_ }).Count) { $scope = 'Machine'; $priv = 'Admin' }
+            else { $scope = Get-QpPathScope $full; $priv = if ($scope -eq 'User') { 'User' } else { 'Admin' } }
+        }
+        'AppxUser' { $scope = 'User'; $priv = 'User' }
+        { $_ -in 'SignInTask', 'Shortcut' } { $scope = 'User'; $priv = 'Admin' }
+        'File' {
+            if (-not (Get-QpCanonicalPath $Op.Target)) { return (& $refuse "that is not a place Quietpane changes ($($Op.Target))") }
+            $scope = Get-QpPathScope $Op.Target
+            $priv = if ($scope -eq 'User') { 'User' } else { 'Admin' }
+        }
+        'Cleanup' {
+            if (-not (Get-QpCanonicalPath $Op.Target)) { return (& $refuse "that is not a place Quietpane clears ($($Op.Target))") }
+            $scope = Get-QpPathScope $Op.Target
+            $priv = if ($scope -eq 'User') { 'User' } else { 'Admin' }
+        }
+        'Recycle' {
+            # Something you picked yourself on the Free up space tab. It is moved with this window's own
+            # rights, and Windows says no if they aren't enough - which is reported, never hidden.
+            if (-not (Get-QpCanonicalPath $Op.Target)) { return (& $refuse "that is not a place Quietpane moves things from ($($Op.Target))") }
+            $scope = Get-QpPathScope $Op.Target
+            $priv = 'User'
+        }
+        'Uninstall' {
+            if ($Op.Hive -notin 'HKCU', 'HKLM') { return (& $refuse 'Quietpane does not know where that program is registered') }
+            $scope = if ($Op.Hive -eq 'HKCU') { 'User' } else { 'Machine' }
+            $priv = (Get-QpUninstallPrivilege -Hive $Op.Hive -Command $Op.Command).Privilege
+        }
+        'Undo' {
+            if ($Op.Store -eq 'User') { $scope = 'User'; $priv = 'User' }
+            elseif ($Op.Store -eq 'Machine') { $scope = 'Machine'; $priv = 'Admin' }
+            else { return (& $refuse 'that restore point is not one Quietpane can replay') }
+        }
+        default { return (& $refuse "Quietpane does not make changes of the kind '$($Op.Kind)'") }
+    }
+    # Anything read to decide counts too: reading your own settings makes it your change.
+    foreach ($r in @($Op.Reads)) {
+        if ($r -match '^(?i)HKCU:' -or ($r -match '^[A-Za-z]:\\' -and (Get-QpPathScope $r) -eq 'User')) { $scope = 'User' }
+    }
+    $admin = Test-QpAdmin
+    $can = $true; $why = ''; $code = ''
+    if ($priv -eq 'Admin' -and -not $admin) { $can = $false; $why = 'it needs administrator rights'; $code = 'admin' }
+    elseif ($priv -eq 'RuntimeCheck' -and -not $admin -and -not $runtimeOk) { $can = $false; $why = 'it needs administrator rights'; $code = 'admin' }
+    if ($can -and $scope -eq 'User' -and $admin -and -not (Test-QpSameUser)) { $can = $false; $why = 'it belongs to another account'; $code = 'account' }
+    [pscustomobject]@{ Scope = $scope; Privilege = $priv; CanRunNow = $can; Refused = $false; Reason = $why; Code = $code }
+}
+
+function Get-QpItemPolicy {
+    <#
+        One choice on screen, summed up from its changes: 'User', 'Machine' or 'Mixed' scope, the strongest
+        privilege among them, and whether it needs administrator rights (which puts the shield on it).
+    #>
+    param([object[]]$Operations)
+    $scopes = @{}; $priv = 'User'; $needs = $false; $can = $true; $refused = $false
+    foreach ($op in @($Operations | Where-Object { $_ })) {
+        $p = Get-QpOperationPolicy $op
+        if ($p.Refused) { $refused = $true; $can = $false; continue }
+        $scopes[$p.Scope] = $true
+        if ($p.Privilege -eq 'Admin') { $priv = 'Admin'; $needs = $true }
+        elseif ($p.Privilege -eq 'RuntimeCheck') {
+            if ($priv -ne 'Admin') { $priv = 'RuntimeCheck' }
+            if (-not $p.CanRunNow -and $p.Code -eq 'admin') { $needs = $true }
+        }
+        if (-not $p.CanRunNow) { $can = $false }
+    }
+    $scope = if ($scopes.User -and $scopes.Machine) { 'Mixed' } elseif ($scopes.User) { 'User' } elseif ($scopes.Machine) { 'Machine' } else { '' }
+    [pscustomobject]@{ Scope = $scope; Privilege = $priv; NeedsAdmin = $needs; CanRunNow = $can; Refused = $refused }
+}
+
+function Get-QpActionOperations {
+    <# The changes one catalog item's actions would make, described. #>
+    param($Actions, [string]$Item = '')
+    foreach ($a in @($Actions | Where-Object { $_ })) {
+        switch ([string]$a.Type) {
+            'Service'         { New-QpOperation -Kind Service -Target $a.Name -Item $Item }
+            'Task'            { New-QpOperation -Kind Task -Target $a.Path -Name $a.Name -Item $Item }
+            'Reg'             { New-QpOperation -Kind Reg -Target $a.Path -Name $a.Name -Item $Item }
+            'Env'             { New-QpOperation -Kind Env -Target $a.Name -Item $Item }
+            'Hosts'           { New-QpOperation -Kind Hosts -Target $script:HostsPath -Name $a.Tag -Item $Item }
+            'VSCodeTelemetry' { New-QpOperation -Kind File -Target (Join-Path ([Environment]::GetFolderPath('ApplicationData')) 'Code\User\settings.json') -Item $Item }
+            default           { New-QpOperation -Kind ('Unknown ' + $a.Type) -Item $Item }
+        }
+    }
+}
+
+# ---- what happened: every change reports one of four outcomes
+
+$script:Outcomes = New-Object System.Collections.ArrayList
+$script:BatchDepth = 0
+
+function New-QpOutcome {
+    <#
+        Changed (it was done, and read back), Unchanged (it was already that way, or not on this PC),
+        Failed (it was tried and did not work), Refused (it was not allowed, so it was not tried).
+    #>
+    param([Parameter(Mandatory)][ValidateSet('Changed', 'Unchanged', 'Failed', 'Refused')][string]$Result, [string]$What = '', [string]$Reason = '')
+    $o = [pscustomobject]@{ Result = $Result; What = $What; Reason = $Reason }
+    [void]$script:Outcomes.Add($o)
+    if ($script:Session -and $Result -eq 'Failed') { $script:Session.Failed++ }
+    return $o
+}
+
+function Enter-QpBatch {
+    # The outermost call starts a fresh count; the ones it calls add to it.
+    if ($script:BatchDepth -eq 0) { $script:Outcomes.Clear() }
+    $script:BatchDepth++
+    return ($script:BatchDepth -eq 1)
+}
+
+function Exit-QpBatch { if ($script:BatchDepth -gt 0) { $script:BatchDepth-- } }
+
+function Get-QpOutcomeSummary {
+    <# What a batch did, counted - for the status line and the details log. Carries QpSummary so the window can find it. #>
+    $c = @{ Changed = 0; Unchanged = 0; Failed = 0; Refused = 0 }
+    foreach ($o in $script:Outcomes) { $c[$o.Result]++ }
+    $bits = @()
+    if ($c.Changed) { $bits += "$($c.Changed) changed" }
+    if ($c.Unchanged) { $bits += "$($c.Unchanged) already that way" }
+    if ($c.Failed) { $bits += "$($c.Failed) didn't work" }
+    if ($c.Refused) { $bits += "$($c.Refused) not done" }
+    $text = if ($bits.Count) { (($bits -join ', ') -replace ', ([^,]+)$', ' and $1') + '.' } else { 'Nothing to do.' }
+    if ($c.Failed -or $c.Refused) { $text += ' Show details says why.' }
+    [pscustomobject]@{
+        QpSummary = $true; Changed = $c.Changed; Unchanged = $c.Unchanged; Failed = $c.Failed; Refused = $c.Refused; Text = $text
+        Problems = @($script:Outcomes | Where-Object { $_.Result -in 'Failed', 'Refused' } | ForEach-Object { '{0}: {1}' -f $_.What, $_.Reason })
+    }
+}
+
+# ---- before anything changes: the whole batch, checked
+
+function Test-QpBatchPlan {
+    <#
+        Every change in a batch, checked before the first one is made: that it is a kind Quietpane makes,
+        that its target is one Quietpane touches, whose it is, what it needs, and that this process may do
+        it for the account it works for - plus that its restore point has somewhere safe to go. One change
+        that fails any of that stops the whole batch, before anything has changed. It never replaces the
+        check each change makes again as it is made.
+    #>
+    param([object[]]$Operations)
+    $refusals = New-Object System.Collections.ArrayList
+    $n = 0
+    foreach ($op in @($Operations | Where-Object { $_ })) {
+        $n++
+        if ($script:OperationKinds -notcontains [string]$op.Kind) {
+            [void]$refusals.Add([pscustomobject]@{ What = (Format-QpOperation $op); Reason = "Quietpane does not make changes of the kind '$($op.Kind)'"; Code = 'kind' })
+            continue
+        }
+        $p = Get-QpOperationPolicy $op
+        if (-not $p.CanRunNow) { [void]$refusals.Add([pscustomobject]@{ What = (Format-QpOperation $op); Reason = $p.Reason; Code = $(if ($p.Refused) { 'target' } else { $p.Code }) }) }
+    }
+    if ($n -and -not $refusals.Count) {
+        $dest = Test-QpRestoreDestination
+        if (-not $dest.Ok) { [void]$refusals.Add([pscustomobject]@{ What = 'the restore point'; Reason = $dest.Reason; Code = 'store' }) }
+    }
+    [pscustomobject]@{ Ok = ($refusals.Count -eq 0); Operations = $n; Refusals = @($refusals) }
+}
+
+function Invoke-QpPreflight {
+    <# Test-QpBatchPlan, said out loud: $true to go ahead; otherwise every reason is logged, and nothing has changed. #>
+    param([object[]]$Operations)
+    $plan = Test-QpBatchPlan -Operations $Operations
+    if ($plan.Ok) { return $true }
+    if (@($plan.Refusals | Where-Object { $_.Code -eq 'account' }).Count) { Write-QpLog (Get-QpAccountMessage) 'WARN' }
+    foreach ($r in $plan.Refusals) {
+        Write-QpLog ('Not done: {0} - {1}.' -f $r.What, $r.Reason) 'WARN'
+        [void](New-QpOutcome 'Refused' $r.What $r.Reason)
+    }
+    Write-QpLog 'Nothing was changed.' 'WARN'
+    return $false
+}
+
+function Assert-QpOperation {
+    <#
+        The check each change makes for itself, just before it is made, whether or not a batch was checked
+        first. $null means go ahead; otherwise the Refused outcome, and nothing has been touched.
+    #>
+    param([Parameter(Mandatory)]$Op)
+    $p = Get-QpOperationPolicy $Op
+    if ($p.CanRunNow) { return $null }
+    $what = Format-QpOperation $Op
+    if ($p.Code -eq 'account') { Write-QpLog (Get-QpAccountMessage) 'WARN' }
+    Write-QpLog ('Not done: {0} - {1}.' -f $what, $p.Reason) 'WARN'
+    return (New-QpOutcome 'Refused' $what $p.Reason)
+}
+
+# ---- the machine store: locked to administrators, checked before every use
+
+$script:MachineVerified = $null
+
+function New-QpAdminOnlySecurity {
+    <# SYSTEM and Administrators, full control, passed down to everything inside; nobody else; nothing inherited from above. #>
+    $s = New-Object Security.AccessControl.DirectorySecurity
+    $s.SetAccessRuleProtection($true, $false)
+    $admins = New-Object Security.Principal.SecurityIdentifier($script:SidAdmins)
+    $system = New-Object Security.Principal.SecurityIdentifier($script:SidSystem)
+    $s.SetOwner($admins)
+    foreach ($id in $system, $admins) {
+        $s.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($id, 'FullControl', 'ContainerInherit, ObjectInherit', 'None', 'Allow')))
+    }
+    return $s
+}
+
+function Test-QpAdminOnlyAcl {
+    <#
+        The permissions as they really are, read back - never what the call that set them reported. Owned
+        by Administrators or SYSTEM; SYSTEM and Administrators with full control; and not one entry for
+        anyone else, inherited or not, whatever it allows. -Protected also requires that nothing above
+        can pass permissions down.
+    #>
+    param([Parameter(Mandatory)]$Security, [switch]$Protected)
+    $problems = New-Object System.Collections.ArrayList
+    $owner = ''
+    try { $owner = $Security.GetOwner([Security.Principal.SecurityIdentifier]).Value } catch { }
+    if ($owner -notin $script:SidAdmins, $script:SidSystem) { [void]$problems.Add("it is owned by $(Get-QpAccountName $owner)") }
+    if ($Protected -and -not $Security.AreAccessRulesProtected) { [void]$problems.Add('it takes permissions from the folder above') }
+    $full = [int][Security.AccessControl.FileSystemRights]::FullControl
+    $seen = @{}
+    foreach ($r in @($Security.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))) {
+        $sid = $r.IdentityReference.Value
+        if ($sid -notin $script:SidAdmins, $script:SidSystem) { [void]$problems.Add("$(Get-QpAccountName $sid) has $($r.AccessControlType) $($r.FileSystemRights)"); continue }
+        if ([string]$r.AccessControlType -ne 'Allow') { [void]$problems.Add("$(Get-QpAccountName $sid) is denied something"); continue }
+        if (([int]$r.FileSystemRights -band $full) -eq $full) { $seen[$sid] = $true }
+    }
+    foreach ($need in $script:SidSystem, $script:SidAdmins) { if (-not $seen[$need]) { [void]$problems.Add("$(Get-QpAccountName $need) lacks full control") } }
+    [pscustomobject]@{ Ok = ($problems.Count -eq 0); Problems = @($problems) }
+}
+
+function Protect-QpMachineStore {
+    <#
+        Runs in every administrator Quietpane before anything in %ProgramData%\Quietpane is read or
+        written. In order: the path is worked out and must be spelled exactly as expected; no folder on
+        the way to it may be a link; a folder that is already there is walked first and must hold no link
+        anywhere (so locking it can never be sent somewhere else); it is locked to SYSTEM and
+        Administrators and owned by Administrators; the lock is read back and must be exactly that; it is
+        walked again; and the 2.1 folders inside it must be owned by Administrators and locked the same.
+        Any of that failing means the store is not used at all in this window, and nothing is deleted.
+    #>
+    param([string]$Root = $script:MachineRoot)
+    $fail = {
+        param($why)
+        Write-QpLog "Quietpane's data folder isn't safe to use - nothing was changed. ($why)" 'ERROR'
+        [pscustomobject]@{ Ok = $false; Reason = "Quietpane's data folder isn't safe to use ($why)."; Root = $Root }
+    }
+    if (-not (Test-QpAdmin)) { return (& $fail 'it is only opened with administrator rights') }
+    $full = Get-QpCanonicalPath $Root
+    if (-not $full) { return (& $fail 'its path is not what Quietpane expects') }
+    if (-not (Test-QpReparseFree $full)) { return (& $fail 'a link or junction is in the way') }
+    if ([IO.File]::Exists($full)) { return (& $fail 'a file is in the way') }
+    try {
+        if ([IO.Directory]::Exists($full)) {
+            $scan = Find-QpReparseInTree $full
+            if (-not $scan.Ok) { return (& $fail $scan.Why) }
+            (New-Object IO.DirectoryInfo $full).SetAccessControl((New-QpAdminOnlySecurity))
+        } else {
+            [void][IO.Directory]::CreateDirectory($full, (New-QpAdminOnlySecurity))
+        }
+    } catch { return (& $fail "Windows would not lock it: $($_.Exception.Message)") }
+    $check = Test-QpAdminOnlyAcl -Security (Get-Acl -LiteralPath $full) -Protected
+    if (-not $check.Ok) { return (& $fail ('its permissions are not right: ' + ($check.Problems -join '; '))) }
+    $scan = Find-QpReparseInTree $full
+    if (-not $scan.Ok) { return (& $fail $scan.Why) }
+    foreach ($child in 'machine', 'machine\points') {
+        $p = Join-Path $full $child
+        if ([IO.File]::Exists($p)) { return (& $fail "a file is in the way of $child") }
+        try { if (-not [IO.Directory]::Exists($p)) { [void][IO.Directory]::CreateDirectory($p) } } catch { return (& $fail "Windows would not make $child") }
+        if ([IO.File]::GetAttributes($p) -band [IO.FileAttributes]::ReparsePoint) { return (& $fail "$child is a link") }
+        $c = Test-QpAdminOnlyAcl -Security (Get-Acl -LiteralPath $p)
+        if (-not $c.Ok) { return (& $fail ("$child is not locked: " + ($c.Problems -join '; '))) }
+    }
+    $script:MachineVerified = $full
+    [pscustomobject]@{ Ok = $true; Reason = ''; Root = $full }
+}
+
+function Get-QpMachineStorePath {
+    <#
+        The only way to a path in the machine store. It refuses without administrator rights, and it
+        checks the store first (Protect-QpMachineStore) in every process that asks. An ordinary Quietpane
+        never reaches %ProgramData%\Quietpane at all - not even to look.
+    #>
+    param([string]$Child = '')
+    if (-not (Test-QpAdmin)) { throw 'Quietpane opens its machine store only with administrator rights.' }
+    if ($script:MachineVerified -ne (Get-QpCanonicalPath $script:MachineRoot)) {
+        $r = Protect-QpMachineStore
+        if (-not $r.Ok) { throw $r.Reason }
+    }
+    $base = Join-Path $script:MachineVerified 'machine'
+    if ($Child) { return (Join-Path $base $Child) }
+    return $base
+}
+
+function Test-QpRestoreDestination {
+    <# Whether a restore point made now has somewhere safe to go. #>
+    if (Test-QpAdmin) {
+        try { [void](Get-QpMachineStorePath 'points'); return [pscustomobject]@{ Ok = $true; Reason = '' } }
+        catch { return [pscustomobject]@{ Ok = $false; Reason = "$($_.Exception.Message)" } }
+    }
+    $root = Get-QpUserStorePath 'restore'
+    if (-not (Test-QpReparseFree $root)) { return [pscustomobject]@{ Ok = $false; Reason = 'your own Quietpane folder is behind a link, so no restore point could be kept' } }
+    return [pscustomobject]@{ Ok = $true; Reason = '' }
+}
+
+# ---- JSON that decides anything is read strictly
+
+function Test-QpJsonKeysUnique {
+    <#
+        Whether every object in a JSON text names each field once. Windows PowerShell's readers quietly
+        keep the last of two fields with the same name, and one of them lets "a" and "A" both through;
+        a file that decides what Quietpane does must not be able to say one thing twice.
+    #>
+    param([string]$Text)
+    Add-Type -AssemblyName System.Web.Extensions
+    $js = New-Object System.Web.Script.Serialization.JavaScriptSerializer
+    $stack = New-Object System.Collections.Stack
+    foreach ($m in [regex]::Matches($Text, '"(?:[^"\\]|\\.)*"|[{}\[\],:]')) {
+        $t = $m.Value
+        switch ($t[0]) {
+            '{' { $stack.Push(@{ Obj = $true; Keys = (New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)); Key = $true }) }
+            '[' { $stack.Push(@{ Obj = $false }) }
+            '}' { if ($stack.Count) { [void]$stack.Pop() } }
+            ']' { if ($stack.Count) { [void]$stack.Pop() } }
+            ',' { if ($stack.Count -and $stack.Peek().Obj) { $stack.Peek().Key = $true } }
+            ':' { if ($stack.Count -and $stack.Peek().Obj) { $stack.Peek().Key = $false } }
+            '"' {
+                if ($stack.Count -and $stack.Peek().Obj -and $stack.Peek().Key) {
+                    $name = [string]$js.DeserializeObject($t)
+                    if (-not $stack.Peek().Keys.Add($name)) { return $false }
+                    $stack.Peek().Key = $false
+                }
+            }
+        }
+    }
+    return $true
+}
+
+function ConvertFrom-QpStrictJson {
+    <#
+        JSON read for checking, not for trusting: at most -MaxBytes, every field named once, and the
+        values kept as their real types (whole numbers, true/false, text, lists, objects) so a checker
+        can tell "1" from 1. Throws on anything malformed.
+    #>
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Text, [int]$MaxBytes = 1MB)
+    Add-Type -AssemblyName System.Web.Extensions
+    if ([Text.Encoding]::UTF8.GetByteCount($Text) -gt $MaxBytes) { throw 'it is larger than Quietpane ever writes' }
+    if (-not (Test-QpJsonKeysUnique $Text)) { throw 'it names the same field twice' }
+    $js = New-Object System.Web.Script.Serialization.JavaScriptSerializer
+    $js.MaxJsonLength = [int]($MaxBytes * 2)
+    $js.RecursionLimit = 12
+    $o = $js.DeserializeObject($Text)
+    return ,$o
+}
+
+function Test-QpJsonShape {
+    <#
+        One value against the type it must have: 'string', 'string?' (text or null), 'bool', 'int' (a
+        whole number written as one - not "1", not 1.0), 'array', 'object'.
+    #>
+    param($Value, [Parameter(Mandatory)][string]$Type)
+    switch ($Type) {
+        'string'  { return ($Value -is [string]) }
+        'string?' { return ($null -eq $Value -or $Value -is [string]) }
+        'bool'    { return ($Value -is [bool]) }
+        'int'     { return ($Value -is [int] -or $Value -is [long]) }
+        'array'   { return ($Value -is [object[]]) }
+        'object'  { return ($Value -is [System.Collections.Generic.Dictionary[string, object]]) }
+    }
+    return $false
+}
+
+function Test-QpJsonFields {
+    <# An object with exactly these fields - none missing, none extra - each of its type. Returns '' or what is wrong. #>
+    param($Object, [Parameter(Mandatory)][System.Collections.IDictionary]$Fields)
+    if (-not (Test-QpJsonShape $Object 'object')) { return 'it is not an object' }
+    foreach ($k in $Object.Keys) { if (-not $Fields.Contains($k)) { return "it has a field Quietpane doesn't write ($k)" } }
+    foreach ($k in $Fields.Keys) {
+        if (-not $Object.ContainsKey($k)) { return "it is missing $k" }
+        if ($Fields[$k] -and -not (Test-QpJsonShape $Object[$k] $Fields[$k])) { return "$k is the wrong type" }
+    }
+    return ''
+}
+
+#endregion
+
 function Get-QpSystemUsage {
     <# Live disk and memory figures for the Home screen. Read-only. #>
     $os = Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue
@@ -359,12 +1201,13 @@ function Get-QpSystemUsage {
 }
 
 function Get-QpTotals {
-    <# Running totals of what this tool has freed on this PC, so the Home screen can show progress. #>
-    $file = Join-Path $script:DataRoot 'totals.json'
+    <# Running totals of what this tool has freed for you, so the Home screen can show progress. Kept in your own store. #>
+    $file = Get-QpUserStorePath 'totals.json'
     $empty = [pscustomobject]@{ SpaceFreedBytes = [int64]0; MemoryFreedBytes = [int64]0; Runs = 0; LastRun = $null }
-    if (-not (Test-Path $file)) { return $empty }
+    $text = Read-QpTextFile -Path $file -MaxBytes 64KB
+    if (-not $text) { return $empty }
     try {
-        $t = Get-Content $file -Raw | ConvertFrom-Json
+        $t = $text | ConvertFrom-Json
         [pscustomobject]@{
             SpaceFreedBytes  = [int64]$t.SpaceFreedBytes
             MemoryFreedBytes = [int64]$t.MemoryFreedBytes
@@ -385,8 +1228,8 @@ function Add-QpTotals {
             Runs             = $t.Runs + [int]([bool]$CountRun)
             LastRun          = Get-QpStamp 'yyyy-MM-dd HH:mm'
         }
-        if (-not (Test-Path $script:DataRoot)) { New-Item -ItemType Directory -Path $script:DataRoot -Force | Out-Null }
-        $new | ConvertTo-Json | Set-Content -Path (Join-Path $script:DataRoot 'totals.json') -Encoding UTF8
+        # A window working for another account keeps no totals for anybody.
+        [void](Write-QpTextFile -Path (Get-QpUserStorePath 'totals.json') -Text ($new | ConvertTo-Json))
     } catch { Write-QpLog "Could not record the totals: $($_.Exception.Message)" 'WARN' }
 }
 
@@ -1205,7 +2048,7 @@ function Get-QpHeatWord {
 
 # The unit temperatures are written in, chosen in Settings. Every reading and every threshold stays in
 # Celsius; only what is written on screen changes.
-$script:TempUnitFile = Join-Path $script:DataRoot 'temperature.txt'
+$script:TempUnitFile = Join-Path $script:UserDataRoot 'temperature.txt'
 $script:TempUnit = $null
 
 function Get-QpTempUnit {
@@ -1213,7 +2056,8 @@ function Get-QpTempUnit {
     param([string]$Path = $script:TempUnitFile)
     if ($script:TempUnit -and $Path -eq $script:TempUnitFile) { return $script:TempUnit }
     $unit = 'C'
-    try { if (Test-Path -LiteralPath $Path) { if (([IO.File]::ReadAllText($Path)).Trim() -eq 'F') { $unit = 'F' } } } catch { }
+    $text = Read-QpTextFile -Path $Path -MaxBytes 64
+    if ($text -and $text.Trim() -eq 'F') { $unit = 'F' }
     if ($Path -eq $script:TempUnitFile) { $script:TempUnit = $unit }
     return $unit
 }
@@ -1226,11 +2070,7 @@ function Set-QpTempUnit {
     #>
     param([Parameter(Mandatory)][ValidateSet('C', 'F')][string]$Unit, [string]$Path = $script:TempUnitFile, [switch]$SessionOnly)
     if ($SessionOnly) { $script:TempUnit = $Unit; return $true }
-    try {
-        $dir = Split-Path -Parent $Path
-        if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
-        [IO.File]::WriteAllText($Path, $Unit)
-    } catch { return $false }
+    if (-not (Write-QpTextFile -Path $Path -Text $Unit)) { return $false }
     if ($Path -eq $script:TempUnitFile) { $script:TempUnit = $Unit }
     return $true
 }
@@ -1687,10 +2527,14 @@ function Get-QpDriveHealth {
             } catch { }
         }
 
-        # Only where the drive itself said nothing. This needs administrator rights, which Quietpane has.
+        # Only where the drive itself said nothing. The drive answers an ordinary account (checked on
+        # real Windows); Windows' own record behind this fallback needs administrator rights, and when
+        # that is the only reason a figure is missing, the window says so instead of "not shared".
+        $needsAdmin = $false
         if ($null -eq $temp -or $null -eq $wear -or $null -eq $hours) {
             $rel = $null
-            try { $rel = $disk | Get-StorageReliabilityCounter -ErrorAction Stop } catch { }
+            try { $rel = $disk | Get-StorageReliabilityCounter -ErrorAction Stop }
+            catch { $needsAdmin = (Test-QpAccessDenied $_.Exception) }
             if ($rel) {
                 if ($null -eq $temp -and [int]$rel.Temperature -gt 0) { $temp = [int]$rel.Temperature }
                 if ($null -eq $wear -and $null -ne $rel.Wear -and "$($rel.Wear)" -ne '') { $wear = [int]$rel.Wear }
@@ -1707,6 +2551,7 @@ function Get-QpDriveHealth {
             PowerOnHours = $hours
             BytesWritten = $written
             FromDrive = $fromDrive                       # $true when the drive answered for itself
+            Availability = $(if ($needsAdmin -and ($null -eq $temp -or $null -eq $wear -or $null -eq $hours)) { 'NeedsAdmin' } else { 'Available' })
         }
     } catch { return $null }
 }
@@ -1793,20 +2638,21 @@ function Update-QpQuietNote {
         being reported until they are put right or you say "that was me" (-Accept). After your own changes
         the window passes -Accept too, so nothing you did yourself is ever reported as "came back".
     #>
-    param([Parameter(Mandatory)]$State, [switch]$Accept, [string]$Path = (Join-Path $script:DataRoot 'quiet-note.json'))
+    param([Parameter(Mandatory)]$State, [switch]$Accept, [string]$Path = (Get-QpUserStorePath 'quiet-note.json'))
     $now = Get-QpQuietSnapshot -State $State
     $win = Get-QpWindowsVersion
     $old = $null
-    if (-not $Accept -and (Test-Path -LiteralPath $Path)) { try { $old = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json } catch { $old = $null } }
     $nothing = [pscustomobject]@{ Count = 0; Privacy = @(); Vendors = @(); Apps = @(); Startup = @(); Since = $null; WindowsBefore = ''; WindowsNow = ''; WindowsUpdated = $false }
+    # The note is yours. A window working for another account neither reads nor writes it.
+    if ((Test-QpPathUnder $Path $script:UserDataRoot) -and -not (Test-QpUserStoreWritable)) { return $nothing }
+    if (-not $Accept) { $text = Read-QpTextFile -Path $Path -MaxBytes 1MB; if ($text) { try { $old = $text | ConvertFrom-Json } catch { $old = $null } } }
     function Save-Note($lists, $since, $winAt) {
         try {
-            $dir = Split-Path $Path -Parent
-            if ($dir -and -not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
-            [pscustomobject]@{
+            $json = [pscustomobject]@{
                 Saved = $since; Windows = $winAt
                 Privacy = @($lists.Privacy); Vendors = @($lists.Vendors); AppsPresent = @($lists.AppsPresent); StartupOff = @($lists.StartupOff)
-            } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $Path -Encoding UTF8
+            } | ConvertTo-Json -Depth 4
+            [void](Write-QpTextFile -Path $Path -Text $json)
         } catch { }
     }
     if (-not $old) {
@@ -1859,36 +2705,377 @@ function Update-QpQuietNote {
 function Invoke-QpPutBack {
     <# Switches off again exactly what came back - nothing else - inside one restore point. #>
     param([string[]]$PrivacyIds, [string[]]$VendorIds, [string[]]$AppNames, [string[]]$StartupIds)
-    if (-not ($PrivacyIds -or $VendorIds -or $AppNames -or $StartupIds)) { Write-QpLog 'Nothing came back - nothing to do.' 'OK'; return }
-    Start-QpSession 'came-back'
-    if ($PrivacyIds) { Invoke-QpPrivacy -Ids $PrivacyIds }
-    if ($VendorIds)  { Invoke-QpVendor -Ids $VendorIds }
-    if ($StartupIds) { Invoke-QpStartup -Ids $StartupIds }
-    if ($AppNames)   { Invoke-QpRemoveApps -Names $AppNames -Deprovision }
-    Stop-QpSession
+    $PrivacyIds = @($PrivacyIds | Where-Object { $_ }); $VendorIds = @($VendorIds | Where-Object { $_ })
+    $AppNames = @($AppNames | Where-Object { $_ }); $StartupIds = @($StartupIds | Where-Object { $_ })
+    if (-not ($PrivacyIds.Count -or $VendorIds.Count -or $AppNames.Count -or $StartupIds.Count)) { Write-QpLog 'Nothing came back - nothing to do.' 'OK'; return }
+    $top = Enter-QpBatch
+    try {
+        $startup = if ($StartupIds.Count) { @(Get-QpStartupItems) } else { @() }
+        $ops = @()
+        foreach ($i in @((Get-QpCatalog privacy).Items | Where-Object { $PrivacyIds -contains $_.Id })) { $ops += @(Get-QpActionOperations $i.Actions -Item $i.Id) }
+        foreach ($v in (Get-QpCatalog vendors).Vendors) { foreach ($i in @($v.Items | Where-Object { $VendorIds -contains $_.Id })) { $ops += @(Get-QpActionOperations @($i.Actions | Where-Object { -not ($_.Name -and (Test-QpNeverTouch $_.Name)) }) -Item $i.Id) } }
+        foreach ($id in $StartupIds) { $ops += @(Get-QpStartupOperations (@($startup | Where-Object { $_.Id -eq $id })[0])) }
+        $ops += @(Get-QpAppOperations -Names $AppNames -Deprovision)
+        if (-not (Invoke-QpPreflight $ops)) { if ($top) { Get-QpOutcomeSummary }; return }
+        Start-QpSession 'came-back'
+        try {
+            if ($PrivacyIds.Count) { $null = Invoke-QpPrivacy -Ids $PrivacyIds }
+            if ($VendorIds.Count)  { $null = Invoke-QpVendor -Ids $VendorIds }
+            if ($StartupIds.Count) { $null = Invoke-QpStartup -Ids $StartupIds -Items $startup }
+            if ($AppNames.Count)   { $null = Invoke-QpRemoveApps -Names $AppNames -Deprovision }
+        } finally { Stop-QpSession }
+        if ($top) { Get-QpOutcomeSummary }
+    } finally { Exit-QpBatch }
 }
 
 #endregion
 
 #region ---------------------------------------------------------------- restore points
 
+# A restore point belongs to one store, and has one scope.
+#
+#   A user point    %LOCALAPPDATA%\Quietpane\restore\<stamp>-<name>. Made by an ordinary Quietpane, it
+#                   holds only changes to your own settings, and only an ordinary Quietpane undoes it -
+#                   an administrator window never replays anything from a folder you can write to.
+#   A machine point %ProgramData%\Quietpane\machine\points\<stamp>-<name>. Made with administrator
+#                   rights inside the locked store; undone only with administrator rights, and its
+#                   changes to your own settings only for the account that made them.
+#
+# Every point is read strictly before anything in it is replayed: its place, its owner and permissions,
+# every field of every entry, and every target against the places Quietpane changes. Restore points made
+# before 2.1 were kept where any account on this PC could write, so none can be shown to be genuine -
+# whatever their permissions say now. They are listed for reference and never replayed.
+
+$script:UndoFields = @{
+    Reg             = [ordered]@{ Type = 'string'; Path = 'string'; Name = 'string'; Existed = 'bool'; Kind = 'string?'; OldValue = '' }
+    StartupApproved = [ordered]@{ Type = 'string'; Path = 'string'; Name = 'string'; Existed = 'bool'; OldBytes = 'string?'; Label = 'string' }
+    ExtBlock        = [ordered]@{ Type = 'string'; Path = 'string'; Name = 'string'; KeyCreated = 'bool'; Label = 'string'; Browser = 'string' }
+    Service         = [ordered]@{ Type = 'string'; Name = 'string'; StartType = 'string'; WasRunning = 'bool' }
+    Task            = [ordered]@{ Type = 'string'; Path = 'string'; Name = 'string' }
+    Env             = [ordered]@{ Type = 'string'; Name = 'string'; OldValue = 'string?' }
+    FileRestore     = [ordered]@{ Type = 'string'; Path = 'string'; Backup = 'string' }
+    FileCreated     = [ordered]@{ Type = 'string'; Path = 'string' }
+    Hosts           = [ordered]@{ Type = 'string'; Tag = 'string' }
+    Recycled        = [ordered]@{ Type = 'string'; Path = 'string'; Items = 'int' }
+    Appx            = [ordered]@{ Type = 'string'; Name = 'string' }
+}
+$script:UndoTopFields = [ordered]@{
+    SchemaVersion = 'int'; Scope = 'string'; OwnerSid = 'string'; RequesterSid = 'string?'; Created = 'string'
+    AppVersion = 'string'; Name = 'string'; Outcome = 'string'; Entries = 'array'
+}
+# The kinds a restore point of your own may hold. Whether each one really is yours to change is then
+# decided by its target (Test-QpUndoEntry): a browser policy, for instance, needs administrator rights.
+$script:UserUndoTypes = @('Reg', 'StartupApproved', 'ExtBlock', 'FileRestore', 'FileCreated', 'Recycled', 'Appx')
+$script:RegKinds = @('String', 'ExpandString', 'DWord', 'QWord', 'Binary', 'MultiString')
+$script:ServiceStartTypes = @('Automatic', 'Manual', 'Disabled', 'Boot', 'System')
+$script:PointFiles = @('state.json', 'log.txt', 'undone.txt', 'hosts.bak')
+$script:ExtBlockKeys = @{
+    Edge   = 'HKCU:\SOFTWARE\Policies\Microsoft\Edge\ExtensionInstallBlocklist'
+    Chrome = 'HKCU:\SOFTWARE\Policies\Google\Chrome\ExtensionInstallBlocklist'
+    Brave  = 'HKCU:\SOFTWARE\Policies\BraveSoftware\Brave\ExtensionInstallBlocklist'
+}
+# The tests register their own registry area here, from inside this module. Nothing outside the module
+# - no window, argument or file - can add to it.
+$script:TestRegRoots = @()
+$script:AllowedRegCache = $null
+
+function Get-QpAllowedRegTargets {
+    <# Every registry value a Quietpane catalog changes, as 'HIVE:\key|name'. Undo may put back these and no others. #>
+    if ($script:AllowedRegCache) { return $script:AllowedRegCache }
+    $set = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    $items = @((Get-QpCatalog privacy).Items) + @(foreach ($v in (Get-QpCatalog vendors).Vendors) { @($v.Items) })
+    foreach ($i in $items) {
+        foreach ($a in @($i.Actions)) {
+            if ($a.Type -ne 'Reg') { continue }
+            $t = ConvertTo-QpRegTarget $a.Path
+            if ($t) { [void]$set.Add($t.Path + '|' + $a.Name) }
+        }
+    }
+    $script:AllowedRegCache = $set
+    return $set
+}
+
+function Get-QpCatalogActions([string]$Type) {
+    $items = @((Get-QpCatalog privacy).Items) + @(foreach ($v in (Get-QpCatalog vendors).Vendors) { @($v.Items) })
+    foreach ($i in $items) { foreach ($a in @($i.Actions)) { if ($a.Type -eq $Type) { $a } } }
+}
+
+function Test-QpUnderRegRoot([string]$Path, [string]$Root) {
+    return ($Path -ieq $Root -or $Path.StartsWith($Root.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase))
+}
+
+function Test-QpAllowedUndoTarget {
+    <# Whether Undo may put back this registry value: one a catalog changes, or one of the few places Quietpane's own switches write. #>
+    param([string]$Type, [string]$Path, [string]$Name)
+    foreach ($r in @($script:TestRegRoots)) { if ($r -and (Test-QpUnderRegRoot $Path $r)) { return $true } }
+    switch ($Type) {
+        'Reg' {
+            if ((Get-QpAllowedRegTargets).Contains("$Path|$Name")) { return $true }
+            if ($Name -ceq 'Value' -and $Path -match '^HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\CapabilityAccessManager\\ConsentStore\\(webcam|microphone|location)(\\[^\\]+){1,2}$') { return $true }
+            if ($Name -ceq 'State' -and $Path -match '^HKCU:\\Software\\Classes\\Local Settings\\Software\\Microsoft\\Windows\\CurrentVersion\\AppModel\\SystemAppData\\[^\\]+\\[^\\]+$') { return $true }
+            return $false
+        }
+        'StartupApproved' {
+            $sa = 'Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved'
+            $known = foreach ($h in 'HKCU', 'HKLM') { foreach ($k in 'Run', 'Run32', 'StartupFolder') { "$($h):\$sa\$k" } }
+            return (@($known) -contains $Path)
+        }
+        'ExtBlock' { return (@($script:ExtBlockKeys.Values) -contains $Path) }
+    }
+    return $false
+}
+
+function Get-QpVsCodeSettingsPath([string]$Sid) {
+    <# The VS Code settings file of the account with this SID, found from Windows - never from a restore point. #>
+    if ($Sid -notmatch '\AS-1-[0-9-]{3,180}\z') { return $null }
+    try {
+        if ($Sid -eq (Get-QpTokenSid)) { $appData = [Environment]::GetFolderPath('ApplicationData') }
+        else {
+            $p = (Get-ItemProperty -LiteralPath "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$Sid" -Name ProfileImagePath -ErrorAction Stop).ProfileImagePath
+            $appData = Join-Path ([Environment]::ExpandEnvironmentVariables([string]$p)) 'AppData\Roaming'
+        }
+        return (Join-Path $appData 'Code\User\settings.json')
+    } catch { return $null }
+}
+
+function Test-QpRegUndoValue($Value, [string]$Kind) {
+    switch ($Kind) {
+        'String'       { return ($Value -is [string] -and $Value.Length -le 32767) }
+        'ExpandString' { return ($Value -is [string] -and $Value.Length -le 32767) }
+        'DWord'        { return (($Value -is [int] -or $Value -is [long]) -and [int64]$Value -ge 0 -and [int64]$Value -le 4294967295) }
+        'QWord'        {
+            if ($Value -is [int] -or $Value -is [long]) { return ([int64]$Value -ge 0) }
+            # Above what a long holds, the reader gives a decimal: it must still be a whole number that fits.
+            return ($Value -is [decimal] -and $Value -eq [decimal]::Truncate($Value) -and $Value -gt [decimal][int64]::MaxValue -and $Value -le [decimal]18446744073709551615)
+        }
+        'Binary'       {
+            if (-not ($Value -is [string]) -or $Value.Length -gt 1MB) { return $false }
+            try { [void][Convert]::FromBase64String($Value); return $true } catch { return $false }
+        }
+        'MultiString'  { return ($Value -is [object[]] -and $Value.Count -le 1000 -and -not @($Value | Where-Object { -not ($_ -is [string]) }).Count) }
+    }
+    return $false
+}
+
+function ConvertTo-QpUndoValue($Value, [string]$Kind) {
+    <# A registry value as the restore point stores it: DWORDs and QWORDs unsigned, binary as base64. #>
+    switch ($Kind) {
+        'DWord'       { return [BitConverter]::ToUInt32([BitConverter]::GetBytes([int32]$Value), 0) }
+        'QWord'       { return [BitConverter]::ToUInt64([BitConverter]::GetBytes([int64]$Value), 0) }
+        'Binary'      { return [Convert]::ToBase64String([byte[]]$Value) }
+        'MultiString' { return ,([string[]]@($Value)) }
+    }
+    return [string]$Value
+}
+
+function ConvertFrom-QpUndoValue($Value, [string]$Kind) {
+    <# Back from the restore point's form to what Windows' registry wants for that kind. #>
+    switch ($Kind) {
+        'DWord'       { return [BitConverter]::ToInt32([BitConverter]::GetBytes([uint32][int64]$Value), 0) }
+        'QWord'       { return [BitConverter]::ToInt64([BitConverter]::GetBytes([uint64][decimal]$Value), 0) }
+        'Binary'      { return ,([Convert]::FromBase64String([string]$Value)) }
+        'MultiString' { return ,([string[]]@($Value)) }
+    }
+    return [string]$Value
+}
+
+function Get-QpRegHive([string]$Hive) {
+    if ($Hive -eq 'HKCU') { return [Microsoft.Win32.Registry]::CurrentUser }
+    return [Microsoft.Win32.Registry]::LocalMachine
+}
+
+function Set-QpRegistryValue {
+    <# One registry value, written with exactly the kind given. Throws when Windows says no. #>
+    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$Name, $Value, [Parameter(Mandatory)][string]$Kind)
+    $t = ConvertTo-QpRegTarget $Path
+    if (-not $t) { throw "Not a registry place Quietpane writes: $Path" }
+    $k = (Get-QpRegHive $t.Hive).CreateSubKey($t.Key)
+    if (-not $k) { throw "Windows would not open $Path." }
+    try { $k.SetValue($Name, $Value, [Microsoft.Win32.RegistryValueKind]$Kind) } finally { $k.Close() }
+}
+
+function Remove-QpRegistryValue {
+    <# Removes one value. $true when it was there and is gone, $false when it was never there; throws when Windows says no. #>
+    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$Name)
+    $t = ConvertTo-QpRegTarget $Path
+    if (-not $t) { throw "Not a registry place Quietpane writes: $Path" }
+    $k = (Get-QpRegHive $t.Hive).OpenSubKey($t.Key, $true)
+    if (-not $k) { return $false }
+    try {
+        if ($null -eq $k.GetValue($Name, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames) -and @($k.GetValueNames()) -notcontains $Name) { return $false }
+        $k.DeleteValue($Name, $true)
+        return $true
+    } finally { $k.Close() }
+}
+
+function Test-QpUndoEntry {
+    <#
+        One restore-point entry, checked as privileged input. Returns '' when it is exactly what Quietpane
+        writes, for a place Quietpane changes, and allowed in a point of this scope; otherwise what is wrong.
+        Its privilege is worked out here from its target - never taken from the file.
+    #>
+    param($Entry, [Parameter(Mandatory)][string]$Scope, [string]$OwnerSid = '')
+    if (-not (Test-QpJsonShape $Entry 'object')) { return 'an entry is not an object' }
+    if (-not $Entry.ContainsKey('Type') -or -not ($Entry['Type'] -is [string])) { return 'an entry has no type' }
+    $type = [string]$Entry['Type']
+    if (@($script:UndoFields.Keys) -cnotcontains $type) { return "it holds a kind of change Quietpane doesn't make ($type)" }
+    $bad = Test-QpJsonFields $Entry $script:UndoFields[$type]
+    if ($bad) { return "a $type entry: $bad" }
+    if ($Scope -eq 'User' -and $script:UserUndoTypes -cnotcontains $type) { return "a $type change doesn't belong among your own settings" }
+    $e = $Entry
+    $name = { param($v, [int]$Max = 260) ($v -is [string]) -and $v.Length -ge 1 -and $v.Length -le $Max -and $v -notmatch '[\x00-\x1F]' }
+    switch ($type) {
+        'Reg' {
+            $t = ConvertTo-QpRegTarget $e.Path
+            if (-not $t -or $t.Path -cne $e.Path) { return "a registry place is not written the way Quietpane writes it ($($e.Path))" }
+            if (-not (& $name $e.Name 255)) { return 'a registry value has no proper name' }
+            if (-not (Test-QpAllowedUndoTarget 'Reg' $t.Path $e.Name)) { return "it names a registry value Quietpane doesn't change ($($e.Path)\$($e.Name))" }
+            if ($e.Existed) {
+                if ($script:RegKinds -cnotcontains [string]$e.Kind) { return "a registry value has an unknown kind ($($e.Kind))" }
+                if (-not (Test-QpRegUndoValue $e.OldValue $e.Kind)) { return "a registry value doesn't fit its kind ($($e.Path)\$($e.Name))" }
+            } else {
+                if ($null -ne $e.Kind -and $script:RegKinds -cnotcontains [string]$e.Kind) { return "a registry value has an unknown kind ($($e.Kind))" }
+                if ($null -ne $e.OldValue) { return 'a value that did not exist still has an old value' }
+            }
+        }
+        'StartupApproved' {
+            $t = ConvertTo-QpRegTarget $e.Path
+            if (-not $t -or $t.Path -cne $e.Path -or -not (Test-QpAllowedUndoTarget 'StartupApproved' $t.Path '')) { return "it names a startup list Quietpane doesn't use ($($e.Path))" }
+            if (-not (& $name $e.Name 260)) { return 'a startup entry has no proper name' }
+            if ($e.Existed) {
+                $b = $null; try { $b = [Convert]::FromBase64String([string]$e.OldBytes) } catch { }
+                if (-not $b -or $b.Length -ne 12) { return 'a startup entry does not hold the 12 bytes Windows uses' }
+            } elseif ($null -ne $e.OldBytes) { return 'a startup entry that did not exist still has old bytes' }
+            if ($e.Label.Length -gt 260) { return 'a startup entry has an overlong label' }
+        }
+        'ExtBlock' {
+            $t = ConvertTo-QpRegTarget $e.Path
+            $testArea = $t -and $t.Path -ceq $e.Path -and @($script:TestRegRoots | Where-Object { $_ -and (Test-QpUnderRegRoot $t.Path $_) }).Count
+            if (-not $testArea) {
+                if (@($script:ExtBlockKeys.Keys) -cnotcontains [string]$e.Browser) { return "it names a browser Quietpane doesn't switch ($($e.Browser))" }
+                if ($e.Path -cne $script:ExtBlockKeys[[string]$e.Browser]) { return "it names a policy key Quietpane doesn't write ($($e.Path))" }
+            }
+            if ($e.Name -notmatch '\A\d{1,6}\z') { return 'an add-on policy line has no proper number' }
+            if ($e.Label.Length -gt 260) { return 'an add-on has an overlong label' }
+        }
+        'Service' {
+            $known = @(Get-QpCatalogActions 'Service' | ForEach-Object { $_.Name })
+            if (-not (& $name $e.Name 256) -or $known -notcontains $e.Name) { return "it names a service Quietpane doesn't change ($($e.Name))" }
+            if ($script:ServiceStartTypes -cnotcontains $e.StartType) { return "a service has an unknown start type ($($e.StartType))" }
+        }
+        'Task' {
+            if ($e.Path -notmatch '\A\\([^\\\x00-\x1F]+\\)*\z' -or -not (& $name $e.Name 260)) { return 'a task is not written the way Quietpane writes it' }
+            $match = @(Get-QpCatalogActions 'Task' | Where-Object { $e.Path -like $_.Path -and $e.Name -like $_.Name })
+            if (-not $match.Count) { return "it names a task Quietpane doesn't switch off ($($e.Path)$($e.Name))" }
+        }
+        'Env' {
+            $known = @(Get-QpCatalogActions 'Env' | ForEach-Object { $_.Name })
+            if ($known -cnotcontains $e.Name) { return "it names an environment variable Quietpane doesn't set ($($e.Name))" }
+            if ($null -ne $e.OldValue -and $e.OldValue.Length -gt 32767) { return 'an environment variable is overlong' }
+        }
+        { $_ -in 'FileRestore', 'FileCreated' } {
+            $want = Get-QpVsCodeSettingsPath $OwnerSid
+            $got = Get-QpCanonicalPath $e.Path
+            if (-not $want -or -not $got -or $got -ine $want) { return "it names a file Quietpane doesn't change ($($e.Path))" }
+            if ($type -eq 'FileRestore' -and $e.Backup -notmatch '\A[A-Za-z0-9][A-Za-z0-9._-]{0,63}\z') { return 'its backup is not a file inside the restore point' }
+        }
+        'Hosts' { if ($e.Tag -notmatch '\AQuietpane-[A-Za-z0-9]{1,40}\z') { return "it names hosts lines Quietpane didn't write ($($e.Tag))" } }
+        'Recycled' {
+            if (-not (& $name $e.Path 1024)) { return 'a note about the Recycle Bin has no place' }
+            if ([int64]$e.Items -lt 0) { return 'a note about the Recycle Bin has a negative count' }
+        }
+        'Appx' { if ($e.Name -notmatch '\A[A-Za-z0-9][A-Za-z0-9._-]{0,199}\z') { return 'an app name is not one Windows uses' } }
+    }
+    # What undoing it needs is worked out from its target, never read from the file.
+    $op = ConvertTo-QpUndoOperation $e
+    if ($op) {
+        $p = Get-QpOperationPolicy $op
+        if ($p.Refused) { return $p.Reason }
+        if ($Scope -eq 'User' -and ($p.Scope -ne 'User' -or $p.Privilege -ne 'User')) { return "a change that needs administrator rights doesn't belong among your own settings ($(Format-QpOperation $op))" }
+    }
+    return ''
+}
+
+function ConvertTo-QpUndoOperation($Entry) {
+    <# The change undoing this entry makes, described - or $null for a note that changes nothing. #>
+    switch ([string]$Entry.Type) {
+        'Reg'             { return (New-QpOperation -Kind Reg -Target $Entry.Path -Name $Entry.Name) }
+        'StartupApproved' { return (New-QpOperation -Kind StartupApproved -Target $Entry.Path -Name $Entry.Name) }
+        'ExtBlock'        { return (New-QpOperation -Kind ExtBlock -Target $Entry.Path -Name $Entry.Name) }
+        'Service'         { return (New-QpOperation -Kind Service -Target $Entry.Name) }
+        'Task'            { return (New-QpOperation -Kind Task -Target $Entry.Path -Name $Entry.Name) }
+        'Env'             { return (New-QpOperation -Kind Env -Target $Entry.Name) }
+        'Hosts'           { return (New-QpOperation -Kind Hosts -Target $script:HostsPath -Name $Entry.Tag) }
+        'FileRestore'     { return (New-QpOperation -Kind File -Target $Entry.Path) }
+        'FileCreated'     { return (New-QpOperation -Kind File -Target $Entry.Path) }
+    }
+    return $null
+}
+
+function Assert-QpUndoEntry {
+    <#
+        Before a change is made: the entry that will undo it, checked exactly as Undo will check it later,
+        by writing it out and reading it back. A change whose undo could not be kept is not made at all.
+    #>
+    param([Parameter(Mandatory)][hashtable]$Entry)
+    if (-not $script:Session) { return }
+    $d = ConvertFrom-QpStrictJson -Text ($Entry | ConvertTo-Json -Depth 4 -Compress) -MaxBytes 1MB
+    $why = Test-QpUndoEntry -Entry $d -Scope $script:Session.Scope -OwnerSid $script:Session.OwnerSid
+    if ($why) { throw "Quietpane could not keep a way to undo this, so it left it alone: $why" }
+}
+
 function Start-QpSession {
+    <#
+        Opens a restore point in this window's own store: yours without administrator rights, the locked
+        machine store with them. Throws when there is nowhere safe to keep it - and then nothing is changed.
+    #>
     param([string]$Name)
+    if ($Name -notmatch '^[a-z0-9][a-z0-9-]{0,39}$') { $Name = 'changes' }
+    if (Test-QpAdmin) {
+        $root = Get-QpMachineStorePath 'points'
+        $scope = 'Machine'
+    } else {
+        $root = Get-QpUserStorePath 'restore'
+        $scope = 'User'
+        if (-not (Test-QpReparseFree $root)) { throw 'Your own Quietpane folder is behind a link, so no restore point could be kept. Nothing was changed.' }
+        if (-not [IO.Directory]::Exists($root)) { [void][IO.Directory]::CreateDirectory($root) }
+    }
     $stamp = Get-QpStamp
-    $path = Join-Path $script:DataRoot "restore\$stamp-$Name"
-    New-Item -ItemType Directory -Path $path -Force | Out-Null
-    $script:Session = @{ Name = $Name; Path = $path; Started = (Get-Date).ToString('s'); Entries = New-Object System.Collections.ArrayList }
+    $path = Join-Path $root "$stamp-$Name"
+    $n = 2
+    while ([IO.Directory]::Exists($path)) { $path = Join-Path $root ('{0}-{1}{2}' -f $stamp, $Name, $n); $n++ }
+    [void][IO.Directory]::CreateDirectory($path)
+    $a = Get-QpActor
+    $script:Session = @{
+        Name = $Name; Path = $path; Started = (Get-Date).ToString('o', [Globalization.CultureInfo]::InvariantCulture)
+        Entries = New-Object System.Collections.ArrayList; Scope = $scope; OwnerSid = $a.TokenSid; RequesterSid = $a.RequesterSid; Failed = 0
+    }
     $script:LogFile = Join-Path $path 'log.txt'
     Write-QpLog "Restore point: $path" 'STEP'
 }
 
 function Save-QpSession {
     if (-not $script:Session) { return }
-    $data = @{ Name = $script:Session.Name; Started = $script:Session.Started; Entries = @($script:Session.Entries) }
-    $data | ConvertTo-Json -Depth 6 | Set-Content -Path (Join-Path $script:Session.Path 'state.json') -Encoding UTF8
+    $s = $script:Session
+    $data = [ordered]@{
+        SchemaVersion = 2
+        Scope         = $s.Scope
+        OwnerSid      = $s.OwnerSid
+        RequesterSid  = $(if ($s.RequesterSid) { $s.RequesterSid } else { $null })
+        Created       = $s.Started
+        AppVersion    = $script:AppVersion
+        Name          = $s.Name
+        Outcome       = $(if ($s.Failed) { 'Partial' } else { 'Complete' })
+        Entries       = @($s.Entries)
+    }
+    if (-not (Write-QpTextFile -Path (Join-Path $s.Path 'state.json') -Text ($data | ConvertTo-Json -Depth 6))) {
+        Write-QpLog 'Could not save the restore point. Nothing more will be changed in this batch.' 'ERROR'
+        throw 'The restore point could not be saved.'
+    }
 }
 
 function Add-QpUndo {
+    <# Records how to undo a change that has just been made - only ever after it has been made and checked. #>
     param([hashtable]$Entry)
     if (-not $script:Session) { return }
     [void]$script:Session.Entries.Add($Entry)
@@ -1907,126 +3094,301 @@ function Stop-QpSession {
         return
     }
     Save-QpSession
-    Write-QpLog ("Finished. {0} change(s) recorded - they can be undone from the Undo tab." -f $script:Session.Entries.Count) 'OK'
+    if ($script:Session.Failed) {
+        Write-QpLog ("Finished, but not everything worked. {0} change(s) were made and recorded, and they can be undone from the Undo tab." -f $script:Session.Entries.Count) 'WARN'
+    } else {
+        Write-QpLog ("Finished. {0} change(s) recorded - they can be undone from the Undo tab." -f $script:Session.Entries.Count) 'OK'
+    }
     $script:Session = $null
     $script:LogFile = $null
 }
 
+function Read-QpRestorePoint {
+    <#
+        One restore point, read as privileged input. Every check has to pass or the whole point is refused
+        with the reason: it is a folder directly inside THIS window's own store; nothing on the way is a
+        link; a machine point, and its state.json, are owned and locked like the store; a user point is
+        owned by you; it holds only files Quietpane puts there; state.json is at most 1 MB, names every
+        field once, has exactly the expected fields of the right types and schema version 2, and at most
+        2,000 entries; and every entry passes Test-QpUndoEntry for its scope.
+    #>
+    param([Parameter(Mandatory)][string]$Path)
+    $bad = { param($why) [pscustomobject]@{ Ok = $false; Reason = $why; Path = $Path; Scope = ''; Name = ''; Count = 0; Entries = @(); Undone = $false; OwnerSid = ''; RequesterSid = '' } }
+    $full = Get-QpCanonicalPath $Path
+    if (-not $full) { return (& $bad 'its folder is not spelled the way Quietpane writes it') }
+    if (Test-QpAdmin) {
+        try { $store = Get-QpMachineStorePath 'points' } catch { return (& $bad $_.Exception.Message) }
+        $scope = 'Machine'
+    } else {
+        $store = Get-QpUserStorePath 'restore'
+        $scope = 'User'
+    }
+    if ([IO.Path]::GetDirectoryName($full) -ine $store.TrimEnd('\')) {
+        if ($scope -eq 'Machine' -and (Test-QpPathUnder $full $script:UserDataRoot)) { return (& $bad 'it is one of your own restore points: undo it from your normal Quietpane window') }
+        return (& $bad "it isn't in this window's own list of restore points")
+    }
+    if (-not [IO.Directory]::Exists($full)) { return (& $bad 'it is not there any more') }
+    if (-not (Test-QpReparseFree $full)) { return (& $bad 'a link or junction is in the way') }
+    $stateFile = Join-Path $full 'state.json'
+    try {
+        if ($scope -eq 'Machine') {
+            foreach ($p in $full, $stateFile) {
+                if (-not [IO.File]::Exists($p) -and -not [IO.Directory]::Exists($p)) { continue }
+                $c = Test-QpAdminOnlyAcl -Security (Get-Acl -LiteralPath $p)
+                if (-not $c.Ok) { return (& $bad ("it is not locked the way Quietpane locks it: " + ($c.Problems -join '; '))) }
+            }
+        } else {
+            $owner = (Get-Acl -LiteralPath $full).GetOwner([Security.Principal.SecurityIdentifier]).Value
+            if ($owner -notin (Get-QpTokenSid), $script:SidAdmins) { return (& $bad "it belongs to $(Get-QpAccountName $owner)") }
+        }
+    } catch { return (& $bad "its permissions can't be read: $($_.Exception.Message)") }
+    $leaves = @()
+    foreach ($entry in [IO.Directory]::GetFileSystemEntries($full)) {
+        $a = [IO.File]::GetAttributes($entry)
+        if ($a -band [IO.FileAttributes]::ReparsePoint) { return (& $bad "a link is inside it ($entry)") }
+        if ($a -band [IO.FileAttributes]::Directory) { return (& $bad "it holds a folder Quietpane didn't put there ($entry)") }
+        $leaves += [IO.Path]::GetFileName($entry)
+    }
+    $text = Read-QpTextFile -Path $stateFile -MaxBytes 1MB
+    if ($null -eq $text) { return (& $bad 'its state.json is missing, too large or behind a link') }
+    try { $d = ConvertFrom-QpStrictJson -Text $text -MaxBytes 1MB } catch { return (& $bad "its state.json can't be read: $($_.Exception.Message)") }
+    $why = Test-QpJsonFields $d $script:UndoTopFields
+    if ($why) { return (& $bad "its state.json: $why") }
+    if ($d.SchemaVersion -ne 2) { return (& $bad "it was written in a form Quietpane doesn't read (version $($d.SchemaVersion))") }
+    if ($d.Scope -cne $scope) { return (& $bad 'it says it belongs somewhere else') }
+    $sid = { param($v) ($v -is [string]) -and $v -match '\AS-1-[0-9-]{3,180}\z' -and $(try { [void](New-Object Security.Principal.SecurityIdentifier($v)); $true } catch { $false }) }
+    if (-not (& $sid $d.OwnerSid)) { return (& $bad 'it has no proper owner') }
+    if ($scope -eq 'User' -and $d.OwnerSid -ne (Get-QpTokenSid)) { return (& $bad "it belongs to $(Get-QpAccountName $d.OwnerSid)") }
+    if ($null -ne $d.RequesterSid -and -not (& $sid $d.RequesterSid)) { return (& $bad 'it names its account wrongly') }
+    if ($d.Created -notmatch '\A\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,7})?(Z|[+-]\d{2}:\d{2})?\z') { return (& $bad 'its date is not written the way Quietpane writes it') }
+    if ($d.AppVersion -notmatch '\A\d{1,4}\.\d{1,4}\.\d{1,6}\z') { return (& $bad 'its version is not written the way Quietpane writes it') }
+    if ($d.Name -notmatch '\A[a-z0-9][a-z0-9-]{0,39}\z' -or -not ([IO.Path]::GetFileName($full)).Contains('-' + $d.Name)) { return (& $bad 'its name does not match its folder') }
+    if ($d.Outcome -cnotin 'Complete', 'Partial') { return (& $bad 'its outcome is not one Quietpane writes') }
+    $entries = @($d.Entries)
+    if ($entries.Count -gt 2000) { return (& $bad 'it holds more changes than Quietpane ever records at once') }
+    $backups = @()
+    foreach ($e in $entries) {
+        $why = Test-QpUndoEntry -Entry $e -Scope $scope -OwnerSid $d.OwnerSid
+        if ($why) { return (& $bad $why) }
+        if ($e['Type'] -ceq 'FileRestore') { $backups += [string]$e['Backup'] }
+    }
+    foreach ($l in $leaves) { if ($script:PointFiles -notcontains $l -and $backups -notcontains $l) { return (& $bad "it holds a file Quietpane didn't put there ($l)") } }
+    foreach ($b in $backups) { if ($leaves -notcontains $b) { return (& $bad "its backup is missing ($b)") } }
+    [pscustomobject]@{
+        Ok = $true; Reason = ''; Path = $full; Scope = $scope; Name = [IO.Path]::GetFileName($full); Count = $entries.Count
+        Entries = $entries; Undone = ($leaves -contains 'undone.txt'); OwnerSid = $d.OwnerSid; RequesterSid = $d.RequesterSid; Outcome = $d.Outcome
+    }
+}
+
+function Get-QpLegacyRestorePoints {
+    <#
+        Restore points made before 2.1, for reference only: their dates and names, from the folder names.
+        Their state.json is never opened - it was written where any account on this PC could write, and a
+        later change of permissions cannot show it wasn't changed in between. Only listed with
+        administrator rights, once the store has been checked; nothing in them is changed or deleted.
+    #>
+    if (-not (Test-QpAdmin)) { return @() }
+    try { [void](Get-QpMachineStorePath) } catch { return @() }
+    $out = New-Object System.Collections.ArrayList
+    foreach ($root in (Join-Path $script:MachineRoot 'restore'), (Join-Path $script:LegacyDataRoot 'restore')) {
+        try {
+            if (-not [IO.Directory]::Exists($root) -or -not (Test-QpReparseFree $root)) { continue }
+            foreach ($d in @([IO.Directory]::GetDirectories($root) | Sort-Object -Descending | Select-Object -First 500)) {
+                if ([IO.File]::GetAttributes($d) -band [IO.FileAttributes]::ReparsePoint) { continue }
+                [void]$out.Add([pscustomobject]@{
+                    Name = [IO.Path]::GetFileName($d); Path = $d; Changes = $null; Undone = $false; Kind = 'Legacy'; CanUndo = $false
+                    Note = "Made by an older Quietpane. It can't be replayed safely, so it's listed for reference only."
+                })
+            }
+        } catch { }
+    }
+    return @($out)
+}
+
 function Get-QpRestorePoints {
-    $roots = @((Join-Path $script:DataRoot 'restore'), (Join-Path $script:LegacyDataRoot 'restore')) | Where-Object { Test-Path $_ }
-    if (-not $roots.Count) { return @() }
-    Get-ChildItem -Path $roots -Directory | Sort-Object Name -Descending | ForEach-Object {
-        $count = 0
-        $state = Join-Path $_.FullName 'state.json'
-        if (Test-Path $state) { try { $count = @((Get-Content $state -Raw | ConvertFrom-Json).Entries | Where-Object { $_ }).Count } catch { } }
-        # A restore point with nothing in it has nothing to undo, so it isn't offered (older versions made some).
-        if ($count -eq 0) { return }
-        [pscustomobject]@{
-            Name    = $_.Name
-            Path    = $_.FullName
-            Changes = $count
-            Undone  = (Test-Path (Join-Path $_.FullName 'undone.txt'))
+    <#
+        The restore points this window can undo, newest first - yours without administrator rights, the
+        machine store's with them. With administrator rights your own points are listed too, to be undone
+        from your normal window, and so are the ones made before 2.1, for reference.
+    #>
+    $out = New-Object System.Collections.ArrayList
+    $admin = Test-QpAdmin
+    $root = $null
+    if ($admin) { try { $root = Get-QpMachineStorePath 'points' } catch { $root = $null } } else { $root = Get-QpUserStorePath 'restore' }
+    if ($root -and [IO.Directory]::Exists($root) -and (Test-QpReparseFree $root)) {
+        foreach ($dir in @([IO.Directory]::GetDirectories($root) | Sort-Object -Descending | Select-Object -First 500)) {
+            $r = Read-QpRestorePoint -Path $dir
+            # A restore point with nothing in it has nothing to undo, so it isn't offered.
+            if ($r.Ok -and $r.Count -eq 0) { continue }
+            [void]$out.Add([pscustomobject]@{
+                Name = [IO.Path]::GetFileName($dir); Path = $dir; Changes = $r.Count; Undone = $r.Undone
+                Kind = $(if ($admin) { 'Machine' } else { 'User' }); CanUndo = $r.Ok; Note = $(if ($r.Ok) { '' } else { "Can't be used: $($r.Reason)." })
+            })
         }
     }
+    if ($admin) {
+        if (Test-QpSameUser) {
+            $own = Get-QpUserStorePath 'restore'
+            try {
+                if ([IO.Directory]::Exists($own) -and (Test-QpReparseFree $own)) {
+                    foreach ($dir in @([IO.Directory]::GetDirectories($own) | Sort-Object -Descending | Select-Object -First 200)) {
+                        [void]$out.Add([pscustomobject]@{ Name = [IO.Path]::GetFileName($dir); Path = $dir; Changes = $null; Undone = $false; Kind = 'User'; CanUndo = $false; Note = 'Undo this from your normal Quietpane window.' })
+                    }
+                }
+            } catch { }
+        }
+        foreach ($l in @(Get-QpLegacyRestorePoints)) { [void]$out.Add($l) }
+    }
+    return @($out)
+}
+
+function Invoke-QpUndoEntry {
+    <# Puts back one change, checked again as it is made, and reports what happened. #>
+    param([Parameter(Mandatory)]$Entry)
+    $e = $Entry
+    $type = [string]$e['Type']
+    $op = ConvertTo-QpUndoOperation $e
+    if ($op) { $refused = Assert-QpOperation $op; if ($refused) { return $refused } }
+    switch ($type) {
+        'Service' {
+            $what = "service $($e.Name)"
+            $svc = Get-Service -Name $e.Name -ErrorAction SilentlyContinue
+            if (-not $svc) { return (New-QpOutcome 'Unchanged' $what 'it is not on this PC any more') }
+            if ([string]$svc.StartType -eq [string]$e.StartType) { Write-QpLog "Service $($e.Name) is already $($e.StartType)" 'OK'; return (New-QpOutcome 'Unchanged' $what) }
+            try { Set-Service -Name $e.Name -StartupType $e.StartType -ErrorAction Stop }
+            catch {
+                $map = @{ Disabled = 'disabled'; Manual = 'demand'; Automatic = 'auto' }
+                $out = & sc.exe config $e.Name start= $map[[string]$e.StartType] 2>&1
+                if ($LASTEXITCODE -ne 0) { throw "Windows refused ($(($out | Out-String).Trim()))" }
+            }
+            if ([string](Get-Service -Name $e.Name).StartType -ne [string]$e.StartType) { throw 'Windows kept it as it was' }
+            if ($e.WasRunning) { Start-Service -Name $e.Name -ErrorAction SilentlyContinue }
+            Write-QpLog "Service $($e.Name) restored to $($e.StartType)" 'OK'
+            return (New-QpOutcome 'Changed' $what)
+        }
+        'Task' {
+            $what = "task $($e.Path)$($e.Name)"
+            $t = @(Get-QpTasksMatching -Path $e.Path -Name $e.Name)
+            if (-not $t.Count) { return (New-QpOutcome 'Unchanged' $what 'it is not on this PC any more') }
+            if ($t[0].State -ne 'Disabled') { return (New-QpOutcome 'Unchanged' $what) }
+            Enable-ScheduledTask -TaskPath $e.Path -TaskName $e.Name -ErrorAction Stop | Out-Null
+            Write-QpLog "Task $($e.Path)$($e.Name) re-enabled" 'OK'
+            return (New-QpOutcome 'Changed' $what)
+        }
+        'Reg' {
+            $what = "$($e.Path)\$($e.Name)"
+            if ($e.Existed) {
+                Set-QpRegistryValue -Path $e.Path -Name $e.Name -Value (ConvertFrom-QpUndoValue $e.OldValue $e.Kind) -Kind $e.Kind
+                Write-QpLog "$what restored" 'OK'
+                return (New-QpOutcome 'Changed' $what)
+            }
+            if (Remove-QpRegistryValue -Path $e.Path -Name $e.Name) { Write-QpLog "$what removed (was not set before)" 'OK'; return (New-QpOutcome 'Changed' $what) }
+            return (New-QpOutcome 'Unchanged' $what)
+        }
+        'StartupApproved' {
+            $what = if ($e.Label) { $e.Label } else { $e.Name }
+            if ($e.Existed) { Set-QpRegistryValue -Path $e.Path -Name $e.Name -Value ([Convert]::FromBase64String([string]$e.OldBytes)) -Kind Binary }
+            else { [void](Remove-QpRegistryValue -Path $e.Path -Name $e.Name) }
+            Write-QpLog "$what will start when you sign in again" 'OK'
+            return (New-QpOutcome 'Changed' $what)
+        }
+        'ExtBlock' {
+            $what = "$($e.Label) in $($e.Browser)"
+            $gone = Remove-QpRegistryValue -Path $e.Path -Name $e.Name
+            if ($e.KeyCreated) {
+                $t = ConvertTo-QpRegTarget $e.Path
+                $k = (Get-QpRegHive $t.Hive).OpenSubKey($t.Key, $false)
+                $empty = $false
+                if ($k) { try { $empty = ($k.ValueCount -eq 0 -and $k.SubKeyCount -eq 0) } finally { $k.Close() } }
+                if ($empty) { (Get-QpRegHive $t.Hive).DeleteSubKey($t.Key, $false) }
+            }
+            Write-QpLog "$($e.Browser) can load $($e.Label) again the next time you open it" 'OK'
+            return (New-QpOutcome $(if ($gone) { 'Changed' } else { 'Unchanged' }) $what)
+        }
+        'Env' {
+            $what = "environment variable $($e.Name)"
+            [Environment]::SetEnvironmentVariable($e.Name, $e.OldValue, 'Machine')
+            if ([Environment]::GetEnvironmentVariable($e.Name, 'Machine') -ne $e.OldValue) { throw 'Windows kept it as it was' }
+            Write-QpLog "Environment variable $($e.Name) restored" 'OK'
+            return (New-QpOutcome 'Changed' $what)
+        }
+        'FileRestore' {
+            $dest = Get-QpCanonicalPath $e.Path
+            $backup = Join-Path $script:UndoPointPath $e.Backup
+            if (-not (Test-QpReparseFree $dest) -or -not (Test-QpReparseFree $backup)) { throw 'a link is in the way' }
+            Copy-Item -LiteralPath $backup -Destination $dest -Force -ErrorAction Stop
+            if ((Get-FileHash -LiteralPath $backup).Hash -ne (Get-FileHash -LiteralPath $dest).Hash) { throw 'the file did not come back as it was' }
+            Write-QpLog "Restored $dest from its backup" 'OK'
+            return (New-QpOutcome 'Changed' $dest)
+        }
+        'FileCreated' {
+            $dest = Get-QpCanonicalPath $e.Path
+            if (-not [IO.File]::Exists($dest)) { return (New-QpOutcome 'Unchanged' $dest) }
+            if (-not (Test-QpReparseFree $dest)) { throw 'a link is in the way' }
+            if (Move-QpToRecycleBin $dest) { Write-QpLog "Moved $dest to the Recycle Bin" 'OK'; return (New-QpOutcome 'Changed' $dest) }
+            throw 'it could not be moved to the Recycle Bin'
+        }
+        'Hosts' { return (Remove-QpHostsBlock -Tag $e.Tag) }
+        'Recycled' {
+            Write-QpLog "Files from $($e.Path) are in the Recycle Bin - restore them there if you need them" 'INFO'
+            return (New-QpOutcome 'Unchanged' "files from $($e.Path)" 'they are in the Recycle Bin')
+        }
+        'Appx' {
+            Write-QpLog "App $($e.Name) was removed - reinstall it from the Microsoft Store if you want it back" 'INFO'
+            return (New-QpOutcome 'Unchanged' "app $($e.Name)" 'reinstall it from the Microsoft Store')
+        }
+    }
+    throw "Quietpane doesn't know how to undo that ($type)"
 }
 
 function Invoke-QpUndo {
     <#
-        Puts back every change in one restore point, newest first. Returns how many changes came back and
-        how many didn't. The restore point is only marked as undone when every change came back, so
+        Puts back every change in one restore point, newest first - after the whole point has been read
+        strictly (Read-QpRestorePoint) and every change in it checked as a batch. Returns how many came
+        back and how many didn't. The point is only marked as undone when every change came back, so
         anything that failed can simply be tried again - putting a setting back twice does no harm.
     #>
     param([Parameter(Mandatory)][string]$Path)
-    $stateFile = Join-Path $Path 'state.json'
-    if (-not (Test-Path $stateFile)) { Write-QpLog "No state.json in $Path" 'ERROR'; return [pscustomobject]@{ Restored = 0; Failed = 1; Readable = $false } }
-    try { $state = Get-Content $stateFile -Raw | ConvertFrom-Json }
-    catch {
-        Write-QpLog "That restore point cannot be read, so nothing was undone from it. Its own folder is still at $Path." 'ERROR'
-        return [pscustomobject]@{ Restored = 0; Failed = 1; Readable = $false }
-    }
-    $entries = @($state.Entries | Where-Object { $_ })
-    [array]::Reverse($entries)
-    Write-QpLog "Undoing $($entries.Count) change(s) from $(Split-Path $Path -Leaf)" 'STEP'
-    $failed = 0
-    foreach ($e in $entries) {
-        try {
-            switch ($e.Type) {
-                'Service' {
-                    try { Set-Service -Name $e.Name -StartupType $e.StartType -ErrorAction Stop }
-                    catch {
-                        $map = @{ Disabled = 'disabled'; Manual = 'demand'; Automatic = 'auto' }
-                        $out = & sc.exe config $e.Name start= $map[[string]$e.StartType] 2>&1
-                        if ($LASTEXITCODE -ne 0) { throw "Windows refused ($(($out | Out-String).Trim()))" }
-                    }
-                    if ($e.WasRunning) { Start-Service -Name $e.Name -ErrorAction SilentlyContinue }
-                    Write-QpLog "Service $($e.Name) restored to $($e.StartType)" 'OK'
-                }
-                'Task' {
-                    Enable-ScheduledTask -TaskPath $e.Path -TaskName $e.Name -ErrorAction Stop | Out-Null
-                    Write-QpLog "Task $($e.Path)$($e.Name) re-enabled" 'OK'
-                }
-                'Reg' {
-                    if ($e.Existed) {
-                        Set-ItemProperty -Path $e.Path -Name $e.Name -Value $e.OldValue -Type $e.Kind -ErrorAction Stop
-                        Write-QpLog "$($e.Path)\$($e.Name) restored to $($e.OldValue)" 'OK'
-                    } else {
-                        Remove-ItemProperty -Path $e.Path -Name $e.Name -ErrorAction SilentlyContinue
-                        Write-QpLog "$($e.Path)\$($e.Name) removed (was not set before)" 'OK'
-                    }
-                }
-                'StartupApproved' {
-                    # Put back exactly what was there before - or nothing, if nothing was.
-                    if ($e.Existed -and $e.OldBytes) {
-                        Set-ItemProperty -Path $e.Path -Name $e.Name -Value ([Convert]::FromBase64String([string]$e.OldBytes)) -Type Binary -ErrorAction Stop
-                    } else {
-                        Remove-ItemProperty -Path $e.Path -Name $e.Name -ErrorAction SilentlyContinue
-                    }
-                    Write-QpLog "$(if ($e.Label) { $e.Label } else { $e.Name }) will start when you sign in again" 'OK'
-                }
-                'ExtBlock' {
-                    # Take the policy line away again, and the list itself if Quietpane made it.
-                    Remove-ItemProperty -Path $e.Path -Name $e.Name -ErrorAction SilentlyContinue
-                    if ($e.KeyCreated) {
-                        $left = $null
-                        try { $left = Get-Item -Path $e.Path -ErrorAction Stop } catch { }
-                        if ($left -and $left.ValueCount -eq 0 -and $left.SubKeyCount -eq 0) { Remove-Item -Path $e.Path -Force -ErrorAction SilentlyContinue }
-                    }
-                    Write-QpLog "$($e.Browser) can load $($e.Label) again the next time you open it" 'OK'
-                }
-                'Env' {
-                    [Environment]::SetEnvironmentVariable($e.Name, $e.OldValue, 'Machine')
-                    Write-QpLog "Environment variable $($e.Name) restored" 'OK'
-                }
-                'FileRestore' {
-                    Copy-Item -LiteralPath $e.Backup -Destination $e.Path -Force
-                    Write-QpLog "Restored $($e.Path) from backup" 'OK'
-                }
-                'FileCreated' {
-                    if (Move-QpToRecycleBin $e.Path) { Write-QpLog "Moved created file $($e.Path) to the Recycle Bin" 'OK' }
-                }
-                'Hosts' {
-                    Remove-QpHostsBlock -Tag $e.Tag
-                }
-                'Recycled' {
-                    Write-QpLog "Files from $($e.Path) are in the Recycle Bin - restore them there if you need them" 'INFO'
-                }
-                'Appx' {
-                    Write-QpLog "App $($e.Name) was removed - reinstall it from the Microsoft Store if you want it back" 'INFO'
-                }
-                default { Write-QpLog "Unknown undo entry type: $($e.Type)" 'WARN' }
-            }
-        } catch {
-            $failed++
-            Write-QpLog "Could not undo $($e.Type) $($e.Name)$($e.Path): $($_.Exception.Message)" 'WARN'
+    $top = Enter-QpBatch
+    try {
+        $leaf = Split-Path $Path -Leaf
+        $refuse = {
+            param($why)
+            Write-QpLog $why 'ERROR'
+            [void](New-QpOutcome 'Refused' "undoing $leaf" $why)
+            [pscustomobject]@{ Restored = 0; Failed = 1; Readable = $false; Refused = $true; Reason = $why }
         }
-    }
-    if ($failed) {
-        Write-QpLog ("{0} of {1} change(s) could not be put back. The rest are back as they were. This restore point stays in the Undo list, so you can try again." -f $failed, $entries.Count) 'WARN'
-    } else {
-        Set-Content -Path (Join-Path $Path 'undone.txt') -Value (Get-Date).ToString('s')
-        Write-QpLog 'Undo finished. Restart the PC to make sure everything is back in effect.' 'OK'
-    }
-    [pscustomobject]@{ Restored = $entries.Count - $failed; Failed = $failed; Readable = $true }
+        foreach ($old in (Join-Path $script:MachineRoot 'restore'), (Join-Path $script:LegacyDataRoot 'restore')) {
+            if (Test-QpPathUnder $Path $old) { return (& $refuse "That restore point was made by an older Quietpane. It can't be replayed safely, so it is listed for reference only. Nothing was undone.") }
+        }
+        $point = Read-QpRestorePoint -Path $Path
+        if (-not $point.Ok) { return (& $refuse "That restore point can't be used, so nothing was undone: $($point.Reason).") }
+        $ops = @(New-QpOperation -Kind Undo -Target $point.Path -Store $point.Scope) + @(foreach ($e in $point.Entries) { ConvertTo-QpUndoOperation $e })
+        if (-not (Invoke-QpPreflight $ops)) { return [pscustomobject]@{ Restored = 0; Failed = 1; Readable = $true; Refused = $true; Reason = 'not allowed here' } }
+        $entries = @($point.Entries)
+        [array]::Reverse($entries)
+        Write-QpLog "Undoing $($entries.Count) change(s) from $leaf" 'STEP'
+        $script:UndoPointPath = $point.Path
+        $failed = 0; $done = 0
+        foreach ($e in $entries) {
+            try {
+                $r = Invoke-QpUndoEntry -Entry $e
+                if ($r.Result -in 'Changed', 'Unchanged') { $done++ } else { $failed++ }
+            } catch {
+                $failed++
+                [void](New-QpOutcome 'Failed' "$($e['Type']) $($e['Name'])$($e['Path'])" $_.Exception.Message)
+                Write-QpLog "Could not undo $($e['Type']) $($e['Name'])$($e['Path']): $($_.Exception.Message)" 'WARN'
+            }
+        }
+        $script:UndoPointPath = $null
+        if ($failed) {
+            Write-QpLog ("{0} of {1} change(s) could not be put back. The rest are back as they were. This restore point stays in the Undo list, so you can try again." -f $failed, $entries.Count) 'WARN'
+        } else {
+            [void](Write-QpTextFile -Path (Join-Path $point.Path 'undone.txt') -Text (Get-Date).ToString('s'))
+            Write-QpLog 'Undo finished. Restart the PC to make sure everything is back in effect.' 'OK'
+        }
+        return [pscustomobject]@{ Restored = $done; Failed = $failed; Readable = $true }
+    } finally { Exit-QpBatch }
 }
 
 #endregion
@@ -2035,40 +3397,61 @@ function Invoke-QpUndo {
 
 function Invoke-QpServiceAction {
     param($Action, [switch]$Preview)
+    $what = "service $($Action.Name)"
     $svc = Get-Service -Name $Action.Name -ErrorAction SilentlyContinue
-    if (-not $svc) { Write-QpLog "Service $($Action.Name) is not on this PC - skipped" 'SKIP'; return }
+    if (-not $svc) { Write-QpLog "Service $($Action.Name) is not on this PC - skipped" 'SKIP'; return (New-QpOutcome 'Unchanged' $what 'it is not on this PC') }
     $current = [string]$svc.StartType
     $target = [string]$Action.StartType
-    if ($current -eq $target) { Write-QpLog "Service $($Action.Name) is already $target" 'OK'; return }
+    if ($current -eq $target) { Write-QpLog "Service $($Action.Name) is already $target" 'OK'; return (New-QpOutcome 'Unchanged' $what) }
     if ($Preview) { Write-QpLog "Would change service $($Action.Name): $current -> $target" 'PREVIEW'; return }
-    Add-QpUndo @{ Type = 'Service'; Name = $Action.Name; StartType = $current; WasRunning = ($svc.Status -eq 'Running') }
-    if ($target -eq 'Disabled') { Stop-Service -Name $Action.Name -Force -ErrorAction SilentlyContinue }
+    $refused = Assert-QpOperation (New-QpOperation -Kind Service -Target $Action.Name)
+    if ($refused) { return $refused }
+    $entry = @{ Type = 'Service'; Name = [string]$Action.Name; StartType = $current; WasRunning = ($svc.Status -eq 'Running') }
     try {
-        Set-Service -Name $Action.Name -StartupType $target -ErrorAction Stop
+        Assert-QpUndoEntry $entry
+        if ($target -eq 'Disabled') { Stop-Service -Name $Action.Name -Force -ErrorAction SilentlyContinue }
+        try {
+            Set-Service -Name $Action.Name -StartupType $target -ErrorAction Stop
+        } catch {
+            $map = @{ Disabled = 'disabled'; Manual = 'demand'; Automatic = 'auto' }
+            & sc.exe config $Action.Name start= $map[$target] | Out-Null
+        }
     } catch {
-        $map = @{ Disabled = 'disabled'; Manual = 'demand'; Automatic = 'auto' }
-        & sc.exe config $Action.Name start= $map[$target] | Out-Null
+        Write-QpLog "Could not change service $($Action.Name): $(Get-QpFailureReason $_.Exception)" 'WARN'
+        return (New-QpOutcome 'Failed' $what $_.Exception.Message)
     }
-    $after = [string](Get-Service -Name $Action.Name).StartType
-    if ($after -eq $target) { Write-QpLog "Service $($Action.Name) -> $target" 'OK' }
-    else { Write-QpLog "Service $($Action.Name) is protected by Windows and could not be changed" 'WARN' }
+    # Only a change Windows actually kept counts, and only that is recorded for Undo.
+    if ([string](Get-Service -Name $Action.Name).StartType -eq $target) {
+        Add-QpUndo $entry
+        Write-QpLog "Service $($Action.Name) -> $target" 'OK'
+        return (New-QpOutcome 'Changed' $what)
+    }
+    Write-QpLog "Service $($Action.Name) is protected by Windows and could not be changed" 'WARN'
+    return (New-QpOutcome 'Failed' $what 'Windows kept it as it was')
 }
 
 function Invoke-QpTaskAction {
     param($Action, [switch]$Preview)
     # Found the quick way; switched off with Disable-ScheduledTask, as always.
     $tasks = @(Get-QpTasksMatching -Path $Action.Path -Name $Action.Name)
-    if ($tasks.Count -eq 0) { Write-QpLog "Task $($Action.Path)$($Action.Name) is not on this PC - skipped" 'SKIP'; return }
+    if ($tasks.Count -eq 0) { Write-QpLog "Task $($Action.Path)$($Action.Name) is not on this PC - skipped" 'SKIP'; return (New-QpOutcome 'Unchanged' "task $($Action.Path)$($Action.Name)" 'it is not on this PC') }
     foreach ($t in $tasks) {
         $id = "$($t.TaskPath)$($t.TaskName)"
-        if ($t.State -eq 'Disabled') { Write-QpLog "Task $id is already disabled" 'OK'; continue }
+        if ($t.State -eq 'Disabled') { Write-QpLog "Task $id is already disabled" 'OK'; New-QpOutcome 'Unchanged' "task $id"; continue }
         if ($Preview) { Write-QpLog "Would disable task $id" 'PREVIEW'; continue }
+        $refused = Assert-QpOperation (New-QpOperation -Kind Task -Target $t.TaskPath -Name $t.TaskName)
+        if ($refused) { $refused; continue }
+        $entry = @{ Type = 'Task'; Path = [string]$t.TaskPath; Name = [string]$t.TaskName }
         try {
-            Disable-ScheduledTask -TaskPath $t.TaskPath -TaskName $t.TaskName -ErrorAction Stop | Out-Null
-            Add-QpUndo @{ Type = 'Task'; Path = $t.TaskPath; Name = $t.TaskName }
+            Assert-QpUndoEntry $entry
+            $after = Disable-ScheduledTask -TaskPath $t.TaskPath -TaskName $t.TaskName -ErrorAction Stop
+            if ([string]$after.State -ne 'Disabled') { throw 'Windows kept it switched on' }
+            Add-QpUndo $entry
             Write-QpLog "Task $id disabled" 'OK'
+            New-QpOutcome 'Changed' "task $id"
         } catch {
             Write-QpLog "Task $id is protected by Windows - left as is" 'WARN'
+            New-QpOutcome 'Failed' "task $id" $_.Exception.Message
         }
     }
 }
@@ -2078,75 +3461,124 @@ function Invoke-QpRegAction {
     $kind = if ($Action.Kind) { $Action.Kind } else { 'DWord' }
     $label = "$($Action.Path)\$($Action.Name)"
     $cur = Get-QpRegValue -Path $Action.Path -Name $Action.Name
-    if ($cur.Exists -and ("$($cur.Value)" -eq "$($Action.Value)")) { Write-QpLog "$label is already $($Action.Value)" 'OK'; return }
+    if ($cur.Exists -and ("$($cur.Value)" -eq "$($Action.Value)")) { Write-QpLog "$label is already $($Action.Value)" 'OK'; return (New-QpOutcome 'Unchanged' $label) }
     if ($Preview) {
         $from = if ($cur.Exists) { $cur.Value } else { '(not set)' }
         Write-QpLog "Would set $label : $from -> $($Action.Value)" 'PREVIEW'
         return
     }
-    # Undo puts back the old value with its OLD type: text stays text, even where the new value is a number.
-    $oldKind = if ($cur.Exists -and $cur.Kind -in 'String', 'ExpandString', 'Binary', 'DWord', 'MultiString', 'QWord') { $cur.Kind } else { $kind }
-    Add-QpUndo @{ Type = 'Reg'; Path = $Action.Path; Name = $Action.Name; Existed = $cur.Exists; OldValue = $cur.Value; Kind = $oldKind }
+    $refused = Assert-QpOperation (New-QpOperation -Kind Reg -Target $Action.Path -Name $Action.Name)
+    if ($refused) { return $refused }
     try {
-        if (-not (Test-Path -Path $Action.Path)) { New-Item -Path $Action.Path -Force | Out-Null }
+        # Undo puts back the old value with its OLD type: text stays text, even where the new value is a number.
+        $oldKind = if ($cur.Exists -and $cur.Kind -in $script:RegKinds) { $cur.Kind } else { $kind }
+        $old = $null
+        if ($cur.Exists) { $old = ConvertTo-QpUndoValue $cur.Value $oldKind }
+        $entry = @{ Type = 'Reg'; Path = (ConvertTo-QpRegTarget $Action.Path).Path; Name = [string]$Action.Name; Existed = [bool]$cur.Exists; Kind = $oldKind; OldValue = $old }
+        Assert-QpUndoEntry $entry
+        if (-not (Test-Path -Path $Action.Path)) { New-Item -Path $Action.Path -Force -ErrorAction Stop | Out-Null }
         Set-ItemProperty -Path $Action.Path -Name $Action.Name -Value $Action.Value -Type $kind -ErrorAction Stop
-        Write-QpLog "$label = $($Action.Value)" 'OK'
     } catch {
-        Write-QpLog "Could not set $label : $($_.Exception.Message)" 'ERROR'
+        Write-QpLog "Could not set $label : $(Get-QpFailureReason $_.Exception)" 'ERROR'
+        return (New-QpOutcome 'Failed' $label $_.Exception.Message)
     }
+    $now = Get-QpRegValue -Path $Action.Path -Name $Action.Name
+    if ($now.Exists -and "$($now.Value)" -eq "$($Action.Value)") {
+        Add-QpUndo $entry
+        Write-QpLog "$label = $($Action.Value)" 'OK'
+        return (New-QpOutcome 'Changed' $label)
+    }
+    Write-QpLog "Windows kept $label as it was." 'WARN'
+    return (New-QpOutcome 'Failed' $label 'Windows kept it as it was')
 }
 
 function Invoke-QpEnvAction {
     param($Action, [switch]$Preview)
+    $what = "environment variable $($Action.Name)"
     $cur = [Environment]::GetEnvironmentVariable($Action.Name, 'Machine')
-    if ($cur -eq $Action.Value) { Write-QpLog "$($Action.Name) is already $($Action.Value)" 'OK'; return }
+    if ($cur -eq $Action.Value) { Write-QpLog "$($Action.Name) is already $($Action.Value)" 'OK'; return (New-QpOutcome 'Unchanged' $what) }
     if ($Preview) { Write-QpLog "Would set environment variable $($Action.Name)=$($Action.Value)" 'PREVIEW'; return }
-    Add-QpUndo @{ Type = 'Env'; Name = $Action.Name; OldValue = $cur }
-    [Environment]::SetEnvironmentVariable($Action.Name, $Action.Value, 'Machine')
+    $refused = Assert-QpOperation (New-QpOperation -Kind Env -Target $Action.Name)
+    if ($refused) { return $refused }
+    $entry = @{ Type = 'Env'; Name = [string]$Action.Name; OldValue = $cur }
+    try {
+        Assert-QpUndoEntry $entry
+        [Environment]::SetEnvironmentVariable($Action.Name, $Action.Value, 'Machine')
+    } catch {
+        Write-QpLog "Could not set $($Action.Name): $(Get-QpFailureReason $_.Exception)" 'WARN'
+        return (New-QpOutcome 'Failed' $what $_.Exception.Message)
+    }
+    if ([Environment]::GetEnvironmentVariable($Action.Name, 'Machine') -ne $Action.Value) {
+        Write-QpLog "Windows kept $($Action.Name) as it was." 'WARN'
+        return (New-QpOutcome 'Failed' $what 'Windows kept it as it was')
+    }
+    Add-QpUndo $entry
     Write-QpLog "Environment variable $($Action.Name)=$($Action.Value)" 'OK'
+    return (New-QpOutcome 'Changed' $what)
 }
 
 function Invoke-QpVSCodeTelemetry {
     param([switch]$Preview)
-    $codeRoot = Join-Path $env:APPDATA 'Code'
-    if (-not (Test-Path $codeRoot)) { Write-QpLog 'VS Code is not installed for this user - skipped' 'SKIP'; return }
+    $codeRoot = Join-Path ([Environment]::GetFolderPath('ApplicationData')) 'Code'
+    $what = 'VS Code telemetry'
+    if (-not (Test-Path $codeRoot)) { Write-QpLog 'VS Code is not installed for this user - skipped' 'SKIP'; return (New-QpOutcome 'Unchanged' $what 'VS Code is not installed') }
     $userDir = Join-Path $codeRoot 'User'
     $file = Join-Path $userDir 'settings.json'
     $setting = '"telemetry.telemetryLevel": "off"'
-    if (Test-Path $file) {
+    $raw = $null
+    if (Test-Path -LiteralPath $file) {
         $raw = Get-Content -LiteralPath $file -Raw
-        if ($raw -match '"telemetry\.telemetryLevel"\s*:\s*"off"') { Write-QpLog 'VS Code telemetry is already off' 'OK'; return }
-        if ($raw -match '"telemetry\.telemetryLevel"') { Write-QpLog 'VS Code has telemetry.telemetryLevel set to another value - set it to "off" in VS Code settings' 'WARN'; return }
+        if ($raw -match '"telemetry\.telemetryLevel"\s*:\s*"off"') { Write-QpLog 'VS Code telemetry is already off' 'OK'; return (New-QpOutcome 'Unchanged' $what) }
+        if ($raw -match '"telemetry\.telemetryLevel"') { Write-QpLog 'VS Code has telemetry.telemetryLevel set to another value - set it to "off" in VS Code settings' 'WARN'; return (New-QpOutcome 'Unchanged' $what 'it is set to something else in VS Code') }
         if ($Preview) { Write-QpLog "Would add $setting to $file" 'PREVIEW'; return }
-        $backup = Join-Path $script:Session.Path 'vscode-settings.json.bak'
-        Copy-Item -LiteralPath $file -Destination $backup -Force
-        Add-QpUndo @{ Type = 'FileRestore'; Path = $file; Backup = $backup }
-        $new = ([regex]'\{').Replace($raw, "{`r`n    $setting,", 1)
-        Set-Content -LiteralPath $file -Value $new -Encoding UTF8
-    } else {
-        if ($Preview) { Write-QpLog "Would create $file with $setting" 'PREVIEW'; return }
-        New-Item -ItemType Directory -Path $userDir -Force | Out-Null
-        Set-Content -LiteralPath $file -Value "{`r`n    $setting`r`n}" -Encoding UTF8
-        Add-QpUndo @{ Type = 'FileCreated'; Path = $file }
+    } elseif ($Preview) { Write-QpLog "Would create $file with $setting" 'PREVIEW'; return }
+    $refused = Assert-QpOperation (New-QpOperation -Kind File -Target $file)
+    if ($refused) { return $refused }
+    try {
+        if (-not (Test-QpReparseFree $file)) { throw 'the settings file is behind a link' }
+        if ($null -ne $raw) {
+            $entry = @{ Type = 'FileRestore'; Path = $file; Backup = 'vscode-settings.json.bak' }
+            Assert-QpUndoEntry $entry
+            Copy-Item -LiteralPath $file -Destination (Join-Path $script:Session.Path $entry.Backup) -Force -ErrorAction Stop
+            $new = ([regex]'\{').Replace($raw, "{`r`n    $setting,", 1)
+            Set-Content -LiteralPath $file -Value $new -Encoding UTF8 -ErrorAction Stop
+        } else {
+            $entry = @{ Type = 'FileCreated'; Path = $file }
+            Assert-QpUndoEntry $entry
+            New-Item -ItemType Directory -Path $userDir -Force -ErrorAction Stop | Out-Null
+            Set-Content -LiteralPath $file -Value "{`r`n    $setting`r`n}" -Encoding UTF8 -ErrorAction Stop
+        }
+    } catch {
+        Write-QpLog "Could not change VS Code's settings: $(Get-QpFailureReason $_.Exception)" 'WARN'
+        return (New-QpOutcome 'Failed' $what $_.Exception.Message)
     }
+    if ((Get-Content -LiteralPath $file -Raw) -notmatch '"telemetry\.telemetryLevel"\s*:\s*"off"') { return (New-QpOutcome 'Failed' $what 'the setting did not stick') }
+    Add-QpUndo $entry
     Write-QpLog 'VS Code telemetry turned off' 'OK'
+    return (New-QpOutcome 'Changed' $what)
 }
 
 function Invoke-QpAction {
     param($Action, [switch]$Preview)
     switch ($Action.Type) {
-        'Service'         { Invoke-QpServiceAction -Action $Action -Preview:$Preview }
-        'Task'            { Invoke-QpTaskAction -Action $Action -Preview:$Preview }
-        'Reg'             { Invoke-QpRegAction -Action $Action -Preview:$Preview }
-        'Env'             { Invoke-QpEnvAction -Action $Action -Preview:$Preview }
-        'Hosts'           { Add-QpHostsBlock -HostNames $Action.Hosts -Tag $Action.Tag -Preview:$Preview }
-        'VSCodeTelemetry' { Invoke-QpVSCodeTelemetry -Preview:$Preview }
-        default           { Write-QpLog "Unknown action type '$($Action.Type)'" 'WARN' }
+        'Service'         { return (Invoke-QpServiceAction -Action $Action -Preview:$Preview) }
+        'Task'            { return (Invoke-QpTaskAction -Action $Action -Preview:$Preview) }
+        'Reg'             { return (Invoke-QpRegAction -Action $Action -Preview:$Preview) }
+        'Env'             { return (Invoke-QpEnvAction -Action $Action -Preview:$Preview) }
+        'Hosts'           { return (Add-QpHostsBlock -HostNames $Action.Hosts -Tag $Action.Tag -Preview:$Preview) }
+        'VSCodeTelemetry' { return (Invoke-QpVSCodeTelemetry -Preview:$Preview) }
     }
+    Write-QpLog "Unknown action type '$($Action.Type)'" 'WARN'
+    return (New-QpOutcome 'Refused' "$($Action.Type)" 'Quietpane does not make changes of that kind')
 }
 
 function Test-QpActionApplied {
-    # Returns $true (done), $false (not done) or $null (not applicable on this PC).
+    <#
+        $true (done), $false (not done), $null (not on this PC) - or the text 'Unknown' when this account
+        can't see well enough to say. Windows hides some system tasks from an ordinary account, so a task
+        that can't be seen without administrator rights might still be there: that is Unknown, never
+        "not on this PC" and never "already off".
+    #>
     param($Action)
     switch ($Action.Type) {
         'Service' {
@@ -2156,7 +3588,7 @@ function Test-QpActionApplied {
         }
         'Task' {
             $tasks = @(Get-QpTasksMatching -Path $Action.Path -Name $Action.Name)
-            if ($tasks.Count -eq 0) { return $null }
+            if ($tasks.Count -eq 0) { if (Test-QpAdmin) { return $null } else { return 'Unknown' } }
             return (@($tasks | Where-Object { $_.State -ne 'Disabled' }).Count -eq 0)
         }
         'Reg' {
@@ -2169,8 +3601,9 @@ function Test-QpActionApplied {
             return (@($Action.Hosts | Where-Object { -not (Test-QpHostBlocked -Lines $lines -HostName $_) }).Count -eq 0)
         }
         'VSCodeTelemetry' {
-            $file = Join-Path $env:APPDATA 'Code\User\settings.json'
-            if (-not (Test-Path (Join-Path $env:APPDATA 'Code'))) { return $null }
+            $appData = [Environment]::GetFolderPath('ApplicationData')
+            $file = Join-Path $appData 'Code\User\settings.json'
+            if (-not (Test-Path (Join-Path $appData 'Code'))) { return $null }
             if (-not (Test-Path $file)) { return $false }
             return ((Get-Content -LiteralPath $file -Raw) -match '"telemetry\.telemetryLevel"\s*:\s*"off"')
         }
@@ -2178,18 +3611,24 @@ function Test-QpActionApplied {
     return $null
 }
 
+function Get-QpItemStatus {
+    <# One item's status from its actions: Applied, Partial, NotApplied, NotApplicable - or NeedsAdmin when some of it can't be seen without administrator rights. #>
+    param($Actions)
+    $states = @($Actions | ForEach-Object { Test-QpActionApplied $_ })
+    # Careful: in PowerShell, $true -eq 'Unknown' is true. The type is checked first.
+    if (@($states | Where-Object { $_ -is [string] -and $_ -eq 'Unknown' }).Count) { return 'NeedsAdmin' }
+    $relevant = @($states | Where-Object { $null -ne $_ })
+    if ($relevant.Count -eq 0) { return 'NotApplicable' }
+    $done = @($relevant | Where-Object { $_ -is [bool] -and $_ }).Count
+    if ($done -eq $relevant.Count) { return 'Applied' }
+    if ($done -gt 0) { return 'Partial' }
+    return 'NotApplied'
+}
+
 function Get-QpPrivacyStatus {
-    # Returns a hashtable Id -> 'Applied' | 'Partial' | 'NotApplied' | 'NotApplicable'
+    # Returns a hashtable Id -> 'Applied' | 'Partial' | 'NotApplied' | 'NotApplicable' | 'NeedsAdmin'
     $result = @{}
-    foreach ($item in (Get-QpCatalog privacy).Items) {
-        $states = @($item.Actions | ForEach-Object { Test-QpActionApplied $_ })
-        $relevant = @($states | Where-Object { $null -ne $_ })
-        if ($relevant.Count -eq 0) { $result[$item.Id] = 'NotApplicable'; continue }
-        $done = @($relevant | Where-Object { $_ }).Count
-        if ($done -eq $relevant.Count) { $result[$item.Id] = 'Applied' }
-        elseif ($done -gt 0) { $result[$item.Id] = 'Partial' }
-        else { $result[$item.Id] = 'NotApplied' }
-    }
+    foreach ($item in (Get-QpCatalog privacy).Items) { $result[$item.Id] = Get-QpItemStatus $item.Actions }
     return $result
 }
 
@@ -2197,13 +3636,24 @@ function Invoke-QpPrivacy {
     param([string[]]$Ids, [switch]$Preview)
     $items = @((Get-QpCatalog privacy).Items | Where-Object { $Ids -contains $_.Id })
     if ($items.Count -eq 0) { Write-QpLog 'Nothing selected.' 'WARN'; return }
-    $own = (-not $Preview) -and (-not $script:Session)   # join an existing restore point (one-click) if there is one
-    if ($Preview) { Write-QpLog 'PREVIEW - nothing will be changed.' 'STEP' } elseif ($own) { Start-QpSession 'privacy' }
-    foreach ($item in $items) {
-        Write-QpLog $item.Title 'STEP'
-        foreach ($a in $item.Actions) { Invoke-QpAction -Action $a -Preview:$Preview }
-    }
-    if ($Preview) { Write-QpLog 'Preview finished. Nothing was changed.' 'OK' } elseif ($own) { Stop-QpSession }
+    $top = Enter-QpBatch
+    try {
+        if (-not $Preview) {
+            # The whole batch is checked before its first change; each change checks itself again.
+            $ops = @(foreach ($item in $items) { Get-QpActionOperations $item.Actions -Item $item.Id })
+            if (-not (Invoke-QpPreflight $ops)) { if ($top) { Get-QpOutcomeSummary }; return }
+        }
+        $own = (-not $Preview) -and (-not $script:Session)   # join an existing restore point (one-click) if there is one
+        if ($Preview) { Write-QpLog 'PREVIEW - nothing will be changed.' 'STEP' } elseif ($own) { Start-QpSession 'privacy' }
+        try {
+            foreach ($item in $items) {
+                Write-QpLog $item.Title 'STEP'
+                foreach ($a in $item.Actions) { $null = Invoke-QpAction -Action $a -Preview:$Preview }
+            }
+        } finally { if ($own) { Stop-QpSession } }
+        if ($Preview) { Write-QpLog 'Preview finished. Nothing was changed.' 'OK' }
+        elseif ($top) { Get-QpOutcomeSummary }
+    } finally { Exit-QpBatch }
 }
 
 #endregion
@@ -2230,35 +3680,63 @@ function Get-QpBloatApps {
     }
 }
 
+function Get-QpAppOperations {
+    <# Removing Store apps for you is yours to do; keeping them off new accounts changes the whole PC. #>
+    param([string[]]$Names, [switch]$Deprovision)
+    foreach ($n in @($Names | Where-Object { $_ })) { New-QpOperation -Kind AppxUser -Target $n }
+    if ($Deprovision -and @($Names | Where-Object { $_ }).Count) { New-QpOperation -Kind AppxProvisioned -Target 'new user accounts' }
+}
+
 function Invoke-QpRemoveApps {
     param([string[]]$Names, [switch]$Deprovision, [switch]$Preview)
-    if (-not $Names) { Write-QpLog 'Nothing selected.' 'WARN'; return }
-    $own = (-not $Preview) -and (-not $script:Session)
-    if ($Preview) { Write-QpLog 'PREVIEW - nothing will be changed.' 'STEP' } elseif ($own) { Start-QpSession 'apps' }
-    foreach ($n in $Names) {
-        if (Test-QpProtectedApp $n) { Write-QpLog "$n is protected and will not be removed" 'WARN'; continue }
-        $pkgs = @(Get-AppxPackage -Name $n -ErrorAction SilentlyContinue)
-        if ($pkgs.Count -eq 0) { Write-QpLog "$n is not installed - skipped" 'SKIP'; continue }
-        if ($Preview) { Write-QpLog "Would remove $n" 'PREVIEW'; continue }
-        foreach ($p in $pkgs) {
-            try {
-                Remove-AppxPackage -Package $p.PackageFullName -ErrorAction Stop
-                Add-QpUndo @{ Type = 'Appx'; Name = $n }
-                Write-QpLog "Removed $n" 'OK'
-            } catch {
-                Write-QpLog "Could not remove $n : $($_.Exception.Message)" 'WARN'
+    $Names = @($Names | Where-Object { $_ })
+    if (-not $Names.Count) { Write-QpLog 'Nothing selected.' 'WARN'; return }
+    $top = Enter-QpBatch
+    try {
+        if (-not $Preview -and -not (Invoke-QpPreflight @(Get-QpAppOperations -Names $Names -Deprovision:$Deprovision))) { if ($top) { Get-QpOutcomeSummary }; return }
+        $own = (-not $Preview) -and (-not $script:Session)
+        if ($Preview) { Write-QpLog 'PREVIEW - nothing will be changed.' 'STEP' } elseif ($own) { Start-QpSession 'apps' }
+        try {
+            foreach ($n in $Names) {
+                if (Test-QpProtectedApp $n) { Write-QpLog "$n is protected and will not be removed" 'WARN'; [void](New-QpOutcome 'Refused' "app $n" 'it is on the protected list'); continue }
+                $pkgs = @(Get-AppxPackage -Name $n -ErrorAction SilentlyContinue)
+                if ($pkgs.Count -eq 0) { Write-QpLog "$n is not installed - skipped" 'SKIP'; [void](New-QpOutcome 'Unchanged' "app $n" 'it is not installed') }
+                elseif ($Preview) { Write-QpLog "Would remove $n" 'PREVIEW' }
+                elseif (-not (Assert-QpOperation (New-QpOperation -Kind AppxUser -Target $n))) {
+                    foreach ($p in $pkgs) {
+                        try {
+                            $entry = @{ Type = 'Appx'; Name = $n }
+                            Assert-QpUndoEntry $entry
+                            Remove-AppxPackage -Package $p.PackageFullName -ErrorAction Stop
+                            if (@(Get-AppxPackage -Name $n -ErrorAction SilentlyContinue | Where-Object { $_.PackageFullName -eq $p.PackageFullName }).Count) { throw 'it is still installed' }
+                            Add-QpUndo $entry
+                            Write-QpLog "Removed $n" 'OK'
+                            [void](New-QpOutcome 'Changed' "app $n")
+                        } catch {
+                            Write-QpLog "Could not remove $n : $($_.Exception.Message)" 'WARN'
+                            [void](New-QpOutcome 'Failed' "app $n" $_.Exception.Message)
+                        }
+                    }
+                }
+                if ($Deprovision -and -not $Preview) {
+                    # Keeping it off new accounts changes the whole PC, so it is checked on its own - and a
+                    # failure to even ask is a failure, not a silent nothing.
+                    if (Assert-QpOperation (New-QpOperation -Kind AppxProvisioned -Target 'new user accounts')) { continue }
+                    try {
+                        foreach ($pp in @(Get-AppxProvisionedPackage -Online -ErrorAction Stop | Where-Object DisplayName -eq $n)) {
+                            Remove-AppxProvisionedPackage -Online -PackageName $pp.PackageName -ErrorAction Stop | Out-Null
+                            Write-QpLog "$n will not be reinstalled for new user accounts" 'OK'
+                            [void](New-QpOutcome 'Changed' "$n for new accounts")
+                        }
+                    } catch {
+                        Write-QpLog "Could not keep $n off new user accounts: $(Get-QpFailureReason $_.Exception)" 'WARN'
+                        [void](New-QpOutcome 'Failed' "$n for new accounts" $_.Exception.Message)
+                    }
+                }
             }
-        }
-        if ($Deprovision) {
-            Get-AppxProvisionedPackage -Online -ErrorAction SilentlyContinue | Where-Object DisplayName -eq $n | ForEach-Object {
-                try {
-                    Remove-AppxProvisionedPackage -Online -PackageName $_.PackageName -ErrorAction Stop | Out-Null
-                    Write-QpLog "$n will not be reinstalled for new user accounts" 'OK'
-                } catch { }
-            }
-        }
-    }
-    if ($Preview) { Write-QpLog 'Preview finished. Nothing was changed.' 'OK' } elseif ($own) { Stop-QpSession }
+        } finally { if ($own) { Stop-QpSession } }
+        if ($Preview) { Write-QpLog 'Preview finished. Nothing was changed.' 'OK' } elseif ($top) { Get-QpOutcomeSummary }
+    } finally { Exit-QpBatch }
 }
 
 #endregion
@@ -2447,9 +3925,14 @@ function Get-QpBootRecord {
         either, this is simply $null and the rest of the feature carries on without it.
     #>
     param([int]$MaxEvents = 120)
+    $script:BootRecordStatus = 'Available'
     try {
         $events = @(Get-WinEvent -LogName 'Microsoft-Windows-Diagnostics-Performance/Operational' -MaxEvents $MaxEvents -ErrorAction Stop)
-    } catch { return $null }
+    } catch {
+        # Not being allowed to read it is not the same as there being nothing to read.
+        $script:BootRecordStatus = if (Test-QpAccessDenied $_.Exception) { 'NeedsAdmin' } else { 'Unavailable' }
+        return $null
+    }
     if (-not $events.Count) { return $null }
     function Read-Fields($Event) {
         $f = @{}
@@ -2569,34 +4052,71 @@ function Invoke-QpStartup {
     param([string[]]$Ids, [switch]$Preview, $Items)
     if (-not $Ids) { Write-QpLog 'Nothing selected.' 'WARN'; return }
     $all = if ($null -ne $Items) { @($Items) } else { @(Get-QpStartupItems) }
-    $own = $false   # set once this call opens its own restore point
-    if ($Preview) { Write-QpLog 'PREVIEW - nothing will be changed.' 'STEP' }
-    foreach ($id in $Ids) {
-        $it = @($all | Where-Object { $_.Id -eq $id }) | Select-Object -First 1
-        if (-not $it) { Write-QpLog "$id is not there any more - skipped" 'SKIP'; continue }
-        if ($it.Keep) { Write-QpLog "$($it.Name) stays on: $($it.KeepWhy)" 'WARN'; continue }
-        if ($it.Locked) { Write-QpLog "$($it.Name) is set by a policy on this PC, so it can't be changed here." 'WARN'; continue }
-        if (-not $it.On) { Write-QpLog "$($it.Name) is already switched off" 'OK'; continue }
-        if ($Preview) { Write-QpLog "Would stop $($it.Name) starting when you sign in" 'PREVIEW'; continue }
-        # The restore point is opened at the first real change, so refusals never leave an empty one in Undo.
-        if (-not $script:Session) { Start-QpSession 'startup'; $own = $true }
-        try {
-            if ($it.Kind -eq 'App') {
-                $old = [int](Get-ItemProperty -Path $it.StatePath -Name State -ErrorAction Stop).State
-                Add-QpUndo @{ Type = 'Reg'; Path = $it.StatePath; Name = 'State'; Existed = $true; OldValue = $old; Kind = 'DWord' }
-                Set-ItemProperty -Path $it.StatePath -Name State -Value 1 -Type DWord -ErrorAction Stop
-            } else {
-                $cur = Get-QpRegValue -Path $it.ApprovedPath -Name $it.ApprovedName
-                $oldBytes = if ($cur.Exists -and $cur.Value -is [byte[]]) { [Convert]::ToBase64String($cur.Value) } else { '' }
-                Add-QpUndo @{ Type = 'StartupApproved'; Path = $it.ApprovedPath; Name = $it.ApprovedName; Existed = [bool]$cur.Exists; OldBytes = $oldBytes; Label = $it.Name }
-                Set-QpStartupApproved -Path $it.ApprovedPath -Name $it.ApprovedName -On $false
-            }
-            Write-QpLog "$($it.Name) won't start when you sign in any more. It still opens normally when you start it." 'OK'
-        } catch {
-            Write-QpLog "Could not switch off $($it.Name): $(Get-QpFailureReason $_.Exception)" 'WARN'
+    $top = Enter-QpBatch
+    try {
+        $picked = @(foreach ($id in $Ids) { @($all | Where-Object { $_.Id -eq $id }) | Select-Object -First 1 })
+        if (-not $Preview) {
+            $ops = @(foreach ($it in $picked) { if ($it -and $it.On -and -not $it.Keep -and -not $it.Locked) { Get-QpStartupOperations $it } })
+            if (-not (Invoke-QpPreflight $ops)) { if ($top) { Get-QpOutcomeSummary }; return }
         }
+        $own = $false   # set once this call opens its own restore point
+        if ($Preview) { Write-QpLog 'PREVIEW - nothing will be changed.' 'STEP' }
+        try {
+            foreach ($id in $Ids) {
+                $it = @($all | Where-Object { $_.Id -eq $id }) | Select-Object -First 1
+                if (-not $it) { Write-QpLog "$id is not there any more - skipped" 'SKIP'; [void](New-QpOutcome 'Unchanged' $id 'it is not there any more'); continue }
+                if ($it.Keep) { Write-QpLog "$($it.Name) stays on: $($it.KeepWhy)" 'WARN'; [void](New-QpOutcome 'Refused' $it.Name $it.KeepWhy); continue }
+                if ($it.Locked) { Write-QpLog "$($it.Name) is set by a policy on this PC, so it can't be changed here." 'WARN'; [void](New-QpOutcome 'Refused' $it.Name 'a policy on this PC decides'); continue }
+                if (-not $it.On) { Write-QpLog "$($it.Name) is already switched off" 'OK'; [void](New-QpOutcome 'Unchanged' $it.Name); continue }
+                if ($Preview) { Write-QpLog "Would stop $($it.Name) starting when you sign in" 'PREVIEW'; continue }
+                $op = @(Get-QpStartupOperations $it)[0]
+                if (Assert-QpOperation $op) { continue }
+                # The restore point is opened at the first real change, so refusals never leave an empty one in Undo.
+                if (-not $script:Session) { Start-QpSession 'startup'; $own = $true }
+                try {
+                    if ($it.Kind -eq 'App') {
+                        $old = [int](Get-ItemProperty -Path $it.StatePath -Name State -ErrorAction Stop).State
+                        $entry = @{ Type = 'Reg'; Path = $op.Target; Name = 'State'; Existed = $true; OldValue = (ConvertTo-QpUndoValue $old 'DWord'); Kind = 'DWord' }
+                        Assert-QpUndoEntry $entry
+                        Set-ItemProperty -Path $it.StatePath -Name State -Value 1 -Type DWord -ErrorAction Stop
+                        if ([int](Get-ItemProperty -Path $it.StatePath -Name State -ErrorAction Stop).State -ne 1) { throw 'Windows kept it switched on' }
+                    } else {
+                        $cur = Get-QpRegValue -Path $it.ApprovedPath -Name $it.ApprovedName
+                        if ($cur.Exists -and -not ($cur.Value -is [byte[]] -and $cur.Value.Length -eq 12)) {
+                            Write-QpLog "$($it.Name) has a startup setting Quietpane doesn't recognise, so it was left alone. Task Manager can switch it off." 'WARN'
+                            [void](New-QpOutcome 'Refused' $it.Name 'an unusual startup setting'); continue
+                        }
+                        $oldBytes = if ($cur.Exists) { [Convert]::ToBase64String($cur.Value) } else { $null }
+                        $entry = @{ Type = 'StartupApproved'; Path = $op.Target; Name = [string]$it.ApprovedName; Existed = [bool]$cur.Exists; OldBytes = $oldBytes; Label = [string]$it.Name }
+                        Assert-QpUndoEntry $entry
+                        Set-QpStartupApproved -Path $it.ApprovedPath -Name $it.ApprovedName -On $false
+                        $now = Get-QpRegValue -Path $it.ApprovedPath -Name $it.ApprovedName
+                        if (-not ($now.Exists -and $now.Value -is [byte[]] -and ($now.Value[0] -band 1))) { throw 'Windows kept it switched on' }
+                    }
+                    Add-QpUndo $entry
+                    Write-QpLog "$($it.Name) won't start when you sign in any more. It still opens normally when you start it." 'OK'
+                    [void](New-QpOutcome 'Changed' $it.Name)
+                } catch {
+                    Write-QpLog "Could not switch off $($it.Name): $(Get-QpFailureReason $_.Exception)" 'WARN'
+                    [void](New-QpOutcome 'Failed' $it.Name $_.Exception.Message)
+                }
+            }
+        } finally { if ($own) { Stop-QpSession } }
+        if ($Preview) { Write-QpLog 'Preview finished. Nothing was changed.' 'OK' } elseif ($top) { Get-QpOutcomeSummary }
+    } finally { Exit-QpBatch }
+}
+
+function Get-QpStartupOperations {
+    <# What switching one startup item off changes: a Store app's own switch, or Task Manager's list for the rest. #>
+    param($Item)
+    if (-not $Item) { return }
+    if ($Item.Kind -eq 'App') {
+        $t = ConvertTo-QpRegTarget $Item.StatePath
+        New-QpOperation -Kind Reg -Target $(if ($t) { $t.Path } else { [string]$Item.StatePath }) -Name 'State' -Item $Item.Id
+    } else {
+        $t = ConvertTo-QpRegTarget $Item.ApprovedPath
+        New-QpOperation -Kind StartupApproved -Target $(if ($t) { $t.Path } else { [string]$Item.ApprovedPath }) -Name $Item.ApprovedName -Item $Item.Id
     }
-    if ($Preview) { Write-QpLog 'Preview finished. Nothing was changed.' 'OK' } elseif ($own) { Stop-QpSession }
 }
 
 #endregion
@@ -2766,36 +4286,71 @@ function Invoke-QpDeviceAccess {
     $Ids = @($Ids | Where-Object { $_ })
     if (-not $Ids.Count) { Write-QpLog 'Nothing selected.' 'WARN'; return }
     $devices = if ($null -ne $Use) { @($Use) } else { @(Get-QpDeviceUse) }
-    $own = $false   # set once this call opens its own restore point
-    if ($Preview) { Write-QpLog 'PREVIEW - nothing will be changed.' 'STEP' }
-    foreach ($id in $Ids) {
-        $d = @($devices | Where-Object { $_.Kind -eq ($id -split '\|')[0] }) | Select-Object -First 1
-        if (-not $d) { Write-QpLog "$id is not there any more - skipped" 'SKIP'; continue }
-        if ($id -eq $d.DesktopId) {
-            $label = 'all desktop programs'; $key = $d.DesktopKey; $already = -not $d.DesktopOn
-        } else {
-            $a = @($d.Apps | Where-Object { $_.Id -eq $id }) | Select-Object -First 1
-            if (-not $a) { Write-QpLog "$id is not there any more - skipped" 'SKIP'; continue }
-            if ($a.Type -ne 'App') { Write-QpLog "Windows can't stop one desktop program at a time - $($a.Name) left as is." 'WARN'; continue }
-            if ($a.Locked) { Write-QpLog "$($a.Name) is part of Windows, so Windows decides its $($d.Name) access." 'WARN'; continue }
-            $label = $a.Name; $key = $a.RegPath; $already = ($a.Setting -eq 'Deny')
+    $top = Enter-QpBatch
+    try {
+        if (-not $Preview) {
+            $ops = @(foreach ($id in $Ids) { Get-QpDeviceOperations -Id $id -Use $devices })
+            if (-not (Invoke-QpPreflight $ops)) { if ($top) { Get-QpOutcomeSummary }; return }
         }
-        $opening = $label.Substring(0, 1).ToUpper() + $label.Substring(1)   # the same, to start a sentence
-        if ($already) { Write-QpLog "$opening already can't use the $($d.Name)" 'OK'; continue }
-        if ($Preview) { Write-QpLog "Would stop $label using the $($d.Name)" 'PREVIEW'; continue }
-        # The restore point is opened at the first real change, so refusals never leave an empty one in Undo.
-        if (-not $script:Session) { Start-QpSession 'devices'; $own = $true }
+        $own = $false   # set once this call opens its own restore point
+        if ($Preview) { Write-QpLog 'PREVIEW - nothing will be changed.' 'STEP' }
         try {
-            $cur = Get-QpRegValue -Path $key -Name 'Value'
-            Add-QpUndo @{ Type = 'Reg'; Path = $key; Name = 'Value'; Existed = [bool]$cur.Exists; OldValue = $cur.Value; Kind = 'String' }
-            if (-not (Test-Path -Path $key)) { New-Item -Path $key -Force | Out-Null }
-            Set-ItemProperty -Path $key -Name 'Value' -Value 'Deny' -Type String -ErrorAction Stop
-            Write-QpLog "$opening can't use the $($d.Name) any more. Settings shows it switched off too, and Undo turns it back on." 'OK'
-        } catch {
-            Write-QpLog "Could not switch off $label for the $($d.Name): $(Get-QpFailureReason $_.Exception)" 'WARN'
-        }
+            foreach ($id in $Ids) {
+                $d = @($devices | Where-Object { $_.Kind -eq ($id -split '\|')[0] }) | Select-Object -First 1
+                if (-not $d) { Write-QpLog "$id is not there any more - skipped" 'SKIP'; [void](New-QpOutcome 'Unchanged' $id 'it is not there any more'); continue }
+                if ($id -eq $d.DesktopId) {
+                    $label = 'all desktop programs'; $key = $d.DesktopKey; $already = -not $d.DesktopOn
+                } else {
+                    $a = @($d.Apps | Where-Object { $_.Id -eq $id }) | Select-Object -First 1
+                    if (-not $a) { Write-QpLog "$id is not there any more - skipped" 'SKIP'; [void](New-QpOutcome 'Unchanged' $id 'it is not there any more'); continue }
+                    if ($a.Type -ne 'App') { Write-QpLog "Windows can't stop one desktop program at a time - $($a.Name) left as is." 'WARN'; [void](New-QpOutcome 'Refused' $a.Name 'Windows has no switch for one desktop program'); continue }
+                    if ($a.Locked) { Write-QpLog "$($a.Name) is part of Windows, so Windows decides its $($d.Name) access." 'WARN'; [void](New-QpOutcome 'Refused' $a.Name 'Windows decides'); continue }
+                    $label = $a.Name; $key = $a.RegPath; $already = ($a.Setting -eq 'Deny')
+                }
+                $opening = $label.Substring(0, 1).ToUpper() + $label.Substring(1)   # the same, to start a sentence
+                if ($already) { Write-QpLog "$opening already can't use the $($d.Name)" 'OK'; [void](New-QpOutcome 'Unchanged' $label); continue }
+                if ($Preview) { Write-QpLog "Would stop $label using the $($d.Name)" 'PREVIEW'; continue }
+                $t = ConvertTo-QpRegTarget $key
+                if (Assert-QpOperation (New-QpOperation -Kind Reg -Target $(if ($t) { $t.Path } else { $key }) -Name 'Value')) { continue }
+                # The restore point is opened at the first real change, so refusals never leave an empty one in Undo.
+                if (-not $script:Session) { Start-QpSession 'devices'; $own = $true }
+                try {
+                    $cur = Get-QpRegValue -Path $key -Name 'Value'
+                    $kind = if ($cur.Exists -and $cur.Kind -in $script:RegKinds) { $cur.Kind } else { 'String' }
+                    $old = $null
+                    if ($cur.Exists) { $old = ConvertTo-QpUndoValue $cur.Value $kind }
+                    $entry = @{ Type = 'Reg'; Path = $t.Path; Name = 'Value'; Existed = [bool]$cur.Exists; OldValue = $old; Kind = $kind }
+                    Assert-QpUndoEntry $entry
+                    if (-not (Test-Path -Path $key)) { New-Item -Path $key -Force -ErrorAction Stop | Out-Null }
+                    Set-ItemProperty -Path $key -Name 'Value' -Value 'Deny' -Type String -ErrorAction Stop
+                    if ((Get-QpRegValue -Path $key -Name 'Value').Value -ne 'Deny') { throw 'Windows kept it switched on' }
+                    Add-QpUndo $entry
+                    Write-QpLog "$opening can't use the $($d.Name) any more. Settings shows it switched off too, and Undo turns it back on." 'OK'
+                    [void](New-QpOutcome 'Changed' "$label ($($d.Name))")
+                } catch {
+                    Write-QpLog "Could not switch off $label for the $($d.Name): $(Get-QpFailureReason $_.Exception)" 'WARN'
+                    [void](New-QpOutcome 'Failed' "$label ($($d.Name))" $_.Exception.Message)
+                }
+            }
+        } finally { if ($own) { Stop-QpSession } }
+        if ($Preview) { Write-QpLog 'Preview finished. Nothing was changed.' 'OK' } elseif ($top) { Get-QpOutcomeSummary }
+    } finally { Exit-QpBatch }
+}
+
+function Get-QpDeviceOperations {
+    <# What switching one app (or all desktop programs) off a camera, microphone or location changes. #>
+    param([string]$Id, $Use)
+    $d = @($Use | Where-Object { $_ -and $_.Kind -eq ($Id -split '\|')[0] }) | Select-Object -First 1
+    if (-not $d) { return }
+    $key = $null
+    if ($Id -eq $d.DesktopId) { $key = $d.DesktopKey }
+    else {
+        $a = @($d.Apps | Where-Object { $_.Id -eq $Id }) | Select-Object -First 1
+        if ($a -and $a.Type -eq 'App' -and -not $a.Locked) { $key = $a.RegPath }
     }
-    if ($Preview) { Write-QpLog 'Preview finished. Nothing was changed.' 'OK' } elseif ($own) { Stop-QpSession }
+    if (-not $key) { return }
+    $t = ConvertTo-QpRegTarget $key
+    New-QpOperation -Kind Reg -Target $(if ($t) { $t.Path } else { [string]$key }) -Name 'Value' -Item $Id
 }
 
 #endregion
@@ -3156,35 +4711,62 @@ function Invoke-QpExtension {
     $Ids = @($Ids | Where-Object { $_ })
     if (-not $Ids.Count) { Write-QpLog 'Nothing selected.' 'WARN'; return }
     $list = if ($null -ne $Extensions) { @($Extensions) } else { @(Get-QpBrowserExtensions) }
-    $own = $false
-    if ($Preview) { Write-QpLog 'PREVIEW - nothing will be changed.' 'STEP' }
-    foreach ($id in $Ids) {
-        $e = @($list | Where-Object { $_.Id -eq $id }) | Select-Object -First 1
-        if (-not $e) { Write-QpLog "$id is not there any more - skipped" 'SKIP'; continue }
-        if ($e.BuiltIn) { Write-QpLog "$($e.Name) is part of $($e.Browser) itself, so it stays." 'WARN'; continue }
-        if ($e.Locked) { Write-QpLog "$($e.Name) is set by a policy on this PC, so it stays as it is." 'WARN'; continue }
-        if (-not $e.PolicyRoot) { Write-QpLog "Quietpane cannot switch $($e.Browser) add-ons off. Remove $($e.Name) in $($e.Browser) itself, under its add-ons page." 'WARN'; continue }
-        if ($e.Blocked) { Write-QpLog "$($e.Browser) is already told not to load $($e.Name)" 'OK'; continue }
-        if ($Preview) { Write-QpLog "Would stop $($e.Browser) loading $($e.Name)" 'PREVIEW'; continue }
-        # The restore point is opened at the first real change, so refusals never leave an empty one in Undo.
-        if (-not $script:Session) { Start-QpSession 'browser-add-ons'; $own = $true }
-        try {
-            $key = Join-Path $e.PolicyRoot 'ExtensionInstallBlocklist'
-            $made = -not (Test-Path -Path $key)
-            if ($made) { New-Item -Path $key -Force | Out-Null }
-            $slot = Get-QpExtensionSlot -Key $key
-            Add-QpUndo @{ Type = 'ExtBlock'; Path = $key; Name = $slot; KeyCreated = $made; Label = $e.Name; Browser = $e.Browser }
-            Set-ItemProperty -Path $key -Name $slot -Value $e.ExtId -Type String -ErrorAction Stop
-            Write-QpLog "$($e.Browser) will not load $($e.Name) any more. It says an administrator blocked it, which is you; Undo puts it back and it works again." 'OK'
-        } catch {
-            Write-QpLog "Could not switch off $($e.Name): $(Get-QpFailureReason $_.Exception)" 'WARN'
+    $top = Enter-QpBatch
+    try {
+        if (-not $Preview) {
+            $ops = @(foreach ($id in $Ids) { Get-QpExtensionOperations -Id $id -Extensions $list })
+            if (-not (Invoke-QpPreflight $ops)) { if ($top) { Get-QpOutcomeSummary }; return }
         }
-    }
-    if ($Preview) { Write-QpLog 'Preview finished. Nothing was changed.' 'OK' }
-    elseif ($own) {
-        Write-QpLog 'The browser picks this up on its own; close it and open it again if you want to see it straight away.' 'INFO'
-        Stop-QpSession
-    }
+        $own = $false
+        if ($Preview) { Write-QpLog 'PREVIEW - nothing will be changed.' 'STEP' }
+        try {
+            foreach ($id in $Ids) {
+                $e = @($list | Where-Object { $_.Id -eq $id }) | Select-Object -First 1
+                if (-not $e) { Write-QpLog "$id is not there any more - skipped" 'SKIP'; [void](New-QpOutcome 'Unchanged' $id 'it is not there any more'); continue }
+                if ($e.BuiltIn) { Write-QpLog "$($e.Name) is part of $($e.Browser) itself, so it stays." 'WARN'; [void](New-QpOutcome 'Refused' $e.Name 'it is part of the browser'); continue }
+                if ($e.Locked) { Write-QpLog "$($e.Name) is set by a policy on this PC, so it stays as it is." 'WARN'; [void](New-QpOutcome 'Refused' $e.Name 'a policy on this PC decides'); continue }
+                if (-not $e.PolicyRoot) { Write-QpLog "Quietpane cannot switch $($e.Browser) add-ons off. Remove $($e.Name) in $($e.Browser) itself, under its add-ons page." 'WARN'; [void](New-QpOutcome 'Refused' $e.Name 'Quietpane has no switch for this browser'); continue }
+                if ($e.Blocked) { Write-QpLog "$($e.Browser) is already told not to load $($e.Name)" 'OK'; [void](New-QpOutcome 'Unchanged' $e.Name); continue }
+                if ($Preview) { Write-QpLog "Would stop $($e.Browser) loading $($e.Name)" 'PREVIEW'; continue }
+                $key = Join-Path $e.PolicyRoot 'ExtensionInstallBlocklist'
+                $t = ConvertTo-QpRegTarget $key
+                if (Assert-QpOperation (New-QpOperation -Kind ExtBlock -Target $(if ($t) { $t.Path } else { $key }))) { continue }
+                # The restore point is opened at the first real change, so refusals never leave an empty one in Undo.
+                if (-not $script:Session) { Start-QpSession 'browser-add-ons'; $own = $true }
+                try {
+                    $made = -not (Test-Path -Path $key)
+                    $slot = if ($made) { '1' } else { Get-QpExtensionSlot -Key $key }
+                    $entry = @{ Type = 'ExtBlock'; Path = $t.Path; Name = [string]$slot; KeyCreated = $made; Label = [string]$e.Name; Browser = [string]$e.Browser }
+                    Assert-QpUndoEntry $entry
+                    if ($made) { New-Item -Path $key -Force -ErrorAction Stop | Out-Null }
+                    Set-ItemProperty -Path $key -Name $slot -Value $e.ExtId -Type String -ErrorAction Stop
+                    if ((Get-QpRegValue -Path $key -Name $slot).Value -ne $e.ExtId) { throw 'Windows kept it as it was' }
+                    Add-QpUndo $entry
+                    Write-QpLog "$($e.Browser) will not load $($e.Name) any more. It says an administrator blocked it, which is you; Undo puts it back and it works again." 'OK'
+                    [void](New-QpOutcome 'Changed' "$($e.Name) in $($e.Browser)")
+                } catch {
+                    Write-QpLog "Could not switch off $($e.Name): $(Get-QpFailureReason $_.Exception)" 'WARN'
+                    [void](New-QpOutcome 'Failed' "$($e.Name) in $($e.Browser)" $_.Exception.Message)
+                }
+            }
+        } finally {
+            if ($own) {
+                Write-QpLog 'The browser picks this up on its own; close it and open it again if you want to see it straight away.' 'INFO'
+                Stop-QpSession
+            }
+        }
+        if ($Preview) { Write-QpLog 'Preview finished. Nothing was changed.' 'OK' } elseif ($top) { Get-QpOutcomeSummary }
+    } finally { Exit-QpBatch }
+}
+
+function Get-QpExtensionOperations {
+    <# Switching an add-on off writes a policy under your own settings - which Windows keeps for administrators to write. #>
+    param([string]$Id, $Extensions)
+    $e = @($Extensions | Where-Object { $_ -and $_.Id -eq $Id }) | Select-Object -First 1
+    if (-not $e -or -not $e.PolicyRoot -or $e.BuiltIn -or $e.Locked) { return }
+    $key = Join-Path $e.PolicyRoot 'ExtensionInstallBlocklist'
+    $t = ConvertTo-QpRegTarget $key
+    New-QpOperation -Kind ExtBlock -Target $(if ($t) { $t.Path } else { $key }) -Item $Id
 }
 
 #endregion
@@ -3199,15 +4781,38 @@ function Resolve-QpPaths {
     }
 }
 
+function Get-QpCleanupOperations {
+    <#
+        Where one clean-up item would move things from, described. Worked out from the catalog's own
+        patterns - so a folder that doesn't exist yet is still judged by where it would be - up to the
+        first part with a wildcard in it.
+    #>
+    param($Item)
+    foreach ($pat in @($Item.Paths)) {
+        $expanded = [Environment]::ExpandEnvironmentVariables([string]$pat)
+        $parts = @($expanded.TrimEnd('\').Split('\'))
+        $keep = @()
+        foreach ($p in $parts) { if ([Management.Automation.WildcardPattern]::ContainsWildcardCharacters($p)) { break }; $keep += $p }
+        $base = ($keep -join '\')
+        if ($base -match '^[A-Za-z]:$') { $base += '\' }
+        New-QpOperation -Kind Cleanup -Target $base -Item $Item.Id
+    }
+}
+
 function Get-QpCleanupTargets {
     foreach ($item in (Get-QpCatalog cleanup).Items) {
         $paths = @(Resolve-QpPaths $item.Paths)
         # Only count what Clean-up would actually move (respects the MinAgeHours safety rule).
         $cutoff = if ($item.MinAgeHours) { (Get-Date).AddHours(-[double]$item.MinAgeHours) } else { $null }
         $size = 0
+        # A folder this account may not look inside is "needs administrator rights to see" - never "0 KB,
+        # nothing to clean", which would be a guess dressed up as a fact.
+        $availability = 'Available'
         foreach ($p in $paths) {
+            try { [void][IO.Directory]::GetFileSystemEntries($p) }
+            catch { $availability = if (Test-QpAccessDenied $_.Exception) { 'NeedsAdmin' } else { 'Unavailable' }; continue }
             if ($cutoff) {
-                foreach ($c in @(Get-ChildItem -LiteralPath $p -Force -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -lt $cutoff })) {
+                foreach ($c in @(Get-ChildItem -LiteralPath $p -Force -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -lt $cutoff -and -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) })) {
                     $size += if ($c.PSIsContainer) { Get-QpSize @($c.FullName) } else { $c.Length }
                 }
             } else {
@@ -3215,56 +4820,75 @@ function Get-QpCleanupTargets {
             }
         }
         [pscustomobject]@{
-            Id          = $item.Id
-            Title       = $item.Title
-            Description = $item.Description
-            Recommended = [bool]$item.Recommended
-            Paths       = $paths
-            SizeBytes   = $size
+            Id           = $item.Id
+            Title        = $item.Title
+            Description  = $item.Description
+            Recommended  = [bool]$item.Recommended
+            Paths        = $paths
+            SizeBytes    = $(if ($availability -eq 'Available') { $size } else { $null })
+            Availability = $availability
         }
     }
 }
 
 function Invoke-QpCleanup {
-    param([string[]]$Ids, [switch]$Preview)
-    $items = @((Get-QpCatalog cleanup).Items | Where-Object { $Ids -contains $_.Id })
+    # -Catalog is for the tests: their own folders, never the real ones.
+    param([string[]]$Ids, [switch]$Preview, [object[]]$Catalog = $null)
+    $source = if ($null -ne $Catalog) { @($Catalog) } else { @((Get-QpCatalog cleanup).Items) }
+    $items = @($source | Where-Object { $Ids -contains $_.Id })
     if ($items.Count -eq 0) { Write-QpLog 'Nothing selected.' 'WARN'; return }
-    $own = (-not $Preview) -and (-not $script:Session)
-    if ($Preview) { Write-QpLog 'PREVIEW - nothing will be moved.' 'STEP' } elseif ($own) { Start-QpSession 'cleanup' }
-    $total = 0
-    foreach ($item in $items) {
-        Write-QpLog $item.Title 'STEP'
-        if ($item.RequiresClosed -and (Get-Process -Name $item.RequiresClosed -ErrorAction SilentlyContinue)) {
-            Write-QpLog "Close $($item.RequiresClosed) first - skipped" 'WARN'
-            continue
+    $top = Enter-QpBatch
+    try {
+        if (-not $Preview) {
+            $ops = @(foreach ($item in $items) { Get-QpCleanupOperations $item })
+            if (-not (Invoke-QpPreflight $ops)) { return [pscustomobject]@{ BytesFreed = [int64]0; Refused = $true } }
         }
-        $cutoff = if ($item.MinAgeHours) { (Get-Date).AddHours(-[double]$item.MinAgeHours) } else { $null }
-        foreach ($root in @(Resolve-QpPaths $item.Paths)) {
-            $children = @(Get-ChildItem -LiteralPath $root -Force -ErrorAction SilentlyContinue)
-            if ($cutoff) { $children = @($children | Where-Object { $_.LastWriteTime -lt $cutoff }) }
-            $moved = 0; $bytes = 0
-            foreach ($c in $children) {
-                $size = if ($c.PSIsContainer) { Get-QpSize @($c.FullName) } else { $c.Length }
-                if ($Preview) { $moved++; $bytes += $size; continue }
-                if (Move-QpToRecycleBin -Path $c.FullName -SizeBytes $size) { $moved++; $bytes += $size }
+        $own = (-not $Preview) -and (-not $script:Session)
+        if ($Preview) { Write-QpLog 'PREVIEW - nothing will be moved.' 'STEP' } elseif ($own) { Start-QpSession 'cleanup' }
+        $total = 0
+        try {
+            foreach ($item in $items) {
+                Write-QpLog $item.Title 'STEP'
+                if ($item.RequiresClosed -and (Get-Process -Name $item.RequiresClosed -ErrorAction SilentlyContinue)) {
+                    Write-QpLog "Close $($item.RequiresClosed) first - skipped" 'WARN'
+                    [void](New-QpOutcome 'Refused' $item.Title "close $($item.RequiresClosed) first")
+                    continue
+                }
+                $cutoff = if ($item.MinAgeHours) { (Get-Date).AddHours(-[double]$item.MinAgeHours) } else { $null }
+                foreach ($root in @(Resolve-QpPaths $item.Paths)) {
+                    if (-not $Preview -and (Assert-QpOperation (New-QpOperation -Kind Cleanup -Target $root))) { continue }
+                    if (-not (Test-QpReparseFree $root)) { Write-QpLog "$root is behind a link, so it was left alone." 'WARN'; [void](New-QpOutcome 'Refused' $root 'it is behind a link'); continue }
+                    # Links inside are never followed or moved: what they point at belongs somewhere else.
+                    $children = @(Get-ChildItem -LiteralPath $root -Force -ErrorAction SilentlyContinue | Where-Object { -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) })
+                    if ($cutoff) { $children = @($children | Where-Object { $_.LastWriteTime -lt $cutoff }) }
+                    $moved = 0; $bytes = 0
+                    foreach ($c in $children) {
+                        $size = if ($c.PSIsContainer) { Get-QpSize @($c.FullName) } else { $c.Length }
+                        if ($Preview) { $moved++; $bytes += $size; continue }
+                        if (Move-QpToRecycleBin -Path $c.FullName -SizeBytes $size) { $moved++; $bytes += $size }
+                    }
+                    $total += $bytes
+                    if ($Preview) {
+                        Write-QpLog ("Would move {0} item(s), {1}, from {2}" -f $moved, (Format-QpBytes $bytes), $root) 'PREVIEW'
+                    } else {
+                        Write-QpLog ("Moved {0} item(s), {1}, from {2} to the Recycle Bin (items in use were skipped)" -f $moved, (Format-QpBytes $bytes), $root) 'OK'
+                        if ($moved) {
+                            Add-QpUndo @{ Type = 'Recycled'; Path = [string]$root; Items = [int]$moved }
+                            [void](New-QpOutcome 'Changed' $root)
+                        } else { [void](New-QpOutcome 'Unchanged' $root) }
+                    }
+                }
             }
-            $total += $bytes
-            if ($Preview) {
-                Write-QpLog ("Would move {0} item(s), {1}, from {2}" -f $moved, (Format-QpBytes $bytes), $root) 'PREVIEW'
-            } else {
-                Write-QpLog ("Moved {0} item(s), {1}, from {2} to the Recycle Bin (items in use were skipped)" -f $moved, (Format-QpBytes $bytes), $root) 'OK'
-                if ($moved) { Add-QpUndo @{ Type = 'Recycled'; Path = $root; Items = $moved } }
-            }
+        } finally { if ($own) { Stop-QpSession } }
+        if ($Preview) {
+            Write-QpLog ("Preview finished. About {0} could be freed." -f (Format-QpBytes $total)) 'OK'
+        } else {
+            Write-QpLog ("About {0} moved to the Recycle Bin. Empty the Recycle Bin yourself when you are happy - clean-up never deletes anything for good." -f (Format-QpBytes $total)) 'OK'
+            Add-QpTotals -SpaceBytes $total
         }
-    }
-    if ($Preview) {
-        Write-QpLog ("Preview finished. About {0} could be freed." -f (Format-QpBytes $total)) 'OK'
-    } else {
-        Write-QpLog ("About {0} moved to the Recycle Bin. Empty the Recycle Bin yourself when you are happy - clean-up never deletes anything for good." -f (Format-QpBytes $total)) 'OK'
-        Add-QpTotals -SpaceBytes $total
-        if ($own) { Stop-QpSession }
-    }
-    [pscustomobject]@{ BytesFreed = [int64]$total }
+        [pscustomobject]@{ BytesFreed = [int64]$total }
+        if ($top -and -not $Preview) { Get-QpOutcomeSummary }
+    } finally { Exit-QpBatch }
 }
 
 #endregion
@@ -3413,9 +5037,9 @@ function Get-QpConnections {
 #
 # Shortcuts and the sign-in start never point at the folder you unzipped: folders get moved, renamed
 # and deleted, and a shortcut can't follow them. They open Quietpane's own copy in Program Files
-# instead, made the first time you ask for either. Program Files is also the only safe home for
-# something that starts with administrator rights, because ordinary programs can't change what is in
-# it. When you take both away again, the copy goes to the Recycle Bin.
+# instead, made the first time you ask for either. Program Files is also the safe home for it: only an
+# administrator can change what is in it, so what a shortcut or the sign-in start opens can't be swapped
+# by an ordinary program. When you take both away again, the copy goes to the Recycle Bin.
 
 $script:AppUserModelId = 'KomodoWorks.Quietpane'
 $script:InstallRoot = Join-Path $(if ($env:ProgramW6432) { $env:ProgramW6432 } else { $env:ProgramFiles }) 'Quietpane'
@@ -3548,9 +5172,9 @@ function Get-QpAppVersion([string]$Root) {
 # Two protections matter more than the convenience. First, a ZIP from the internet carries Windows' mark
 # saying so, and everything unzipped from it inherits that mark - it is what makes SmartScreen look at
 # a file before it runs. Windows' own "Extract All" copies the mark across; so does this. Second, this
-# window runs with administrator rights. Starting the new version from it directly would hand those
-# rights to whatever was inside the ZIP without anyone being asked, so the new version is started the
-# way a double-click starts it - by the signed-in user, through Explorer - and Windows asks as usual.
+# window may be running with administrator rights. Starting the new version from it directly would hand
+# those rights to whatever was inside the ZIP without anyone being asked, so the new version is started
+# the way a double-click starts it - by the signed-in user, through Explorer - with that user's own rights.
 
 $script:UpdateMaxZipBytes = 10MB       # the real download is a quarter of a megabyte
 $script:UpdateMaxUnpackedBytes = 50MB  # and unpacks to about one megabyte
@@ -3710,10 +5334,12 @@ function Install-QpCopy {
     <#
         Makes Quietpane's own copy in Program Files, or brings it up to date. It only moves forward:
         opening an older Quietpane never replaces a newer copy. Files are copied over the old ones and
-        nothing is deleted. Needs administrator rights, like the rest of the app.
+        nothing is deleted. Needs administrator rights: Program Files is locked to administrators.
     #>
     param([string]$From = (Split-Path $PSScriptRoot -Parent), [string]$To = $script:InstallRoot)
     if (Test-QpSamePath $From $To) { return [pscustomobject]@{ Ok = $true; Changed = $false; Note = '' } }
+    $refused = Assert-QpOperation (New-QpOperation -Kind ProgramFilesCopy -Target $To)
+    if ($refused) { return [pscustomobject]@{ Ok = $false; Changed = $false; Note = "Quietpane's own copy in Program Files needs administrator rights, so nothing was changed." } }
     $fromVersion = Get-QpAppVersion $From
     if (-not $fromVersion) { return [pscustomobject]@{ Ok = $false; Changed = $false; Note = 'Quietpane could not find its own files, so nothing was changed.' } }
     $toVersion = Get-QpAppVersion $To
@@ -3749,6 +5375,7 @@ function Remove-QpCopy {
     #>
     param([string]$InstallRoot = $script:InstallRoot)
     if (-not (Test-Path -LiteralPath $InstallRoot)) { return 'None' }
+    if (Assert-QpOperation (New-QpOperation -Kind ProgramFilesCopy -Target $InstallRoot)) { return 'Failed' }
     # Only ever a folder that really is a copy of Quietpane.
     if (-not (Get-QpAppVersion $InstallRoot)) { Write-QpLog "$InstallRoot does not look like Quietpane, so it was left alone." 'WARN'; return 'Failed' }
     if (Test-QpSamePath (Split-Path $PSScriptRoot -Parent) $InstallRoot) { return 'Later' }
@@ -3764,6 +5391,7 @@ function Start-QpCopyRemoval {
         the same way any other tidy-up does. It never acts on any other folder.
     #>
     $root = $script:InstallRoot
+    if (-not (Test-QpAdmin)) { return $false }
     if (-not (Test-Path -LiteralPath $root) -or $root -match '[''"]' -or -not (Get-QpAppVersion $root)) { return $false }
     # Too big for the bin would mean Windows deletes it for good, so it would stay instead.
     $limit = Get-QpRecycleBinLimit $root
@@ -3856,6 +5484,8 @@ function New-QpShortcuts {
     #>
     param([string]$InstallRoot = $script:InstallRoot)
     $p = Get-QpShortcutPaths -InstallRoot $InstallRoot
+    $ops = @((New-QpOperation -Kind ProgramFilesCopy -Target $InstallRoot), (New-QpOperation -Kind Shortcut -Target $p.StartMenu), (New-QpOperation -Kind Shortcut -Target $p.Desktop))
+    if (-not (Invoke-QpPreflight $ops)) { return [pscustomobject]@{ Ok = $false; Note = 'That needs administrator rights, or belongs to another account, so nothing was changed.' } }
     $copy = Install-QpCopy -To $InstallRoot
     if (-not $copy.Ok) { return [pscustomobject]@{ Ok = $false; Note = $copy.Note } }
     Initialize-QpShortcut
@@ -3872,6 +5502,8 @@ function Remove-QpShortcuts {
     <# Takes the Start menu and desktop shortcuts away again. They go to the Recycle Bin, like everything else. #>
     param([string]$InstallRoot = $script:InstallRoot, [string]$TaskName = $script:SignInTaskName)
     $p = Get-QpShortcutPaths -InstallRoot $InstallRoot
+    $ops = @((New-QpOperation -Kind Shortcut -Target $p.StartMenu), (New-QpOperation -Kind Shortcut -Target $p.Desktop), (New-QpOperation -Kind ProgramFilesCopy -Target $InstallRoot))
+    if (-not (Invoke-QpPreflight $ops)) { return [pscustomobject]@{ Ok = $false; Note = 'That needs administrator rights, or belongs to another account, so nothing was changed.'; Copy = $null } }
     $own = @(Get-QpOwnShortcuts -Paths $p)
     $gone = 0
     foreach ($l in @($own | Where-Object { $_.Kind -ne 'Pinned' })) {
@@ -3957,11 +5589,13 @@ function Test-QpOwnSignInTask($Task) {
 
 function New-QpSignInTask {
     <#
-        A task in Task Scheduler rather than a Run entry, because Quietpane needs administrator rights:
-        this way Windows doesn't ask you for them every time you sign in. Only describes the task;
-        Register-QpSignInTask is what hands it to Windows.
+        A task in Task Scheduler that opens Quietpane on the taskbar when you sign in - with your own,
+        ordinary rights (RunLevel Limited), never an administrator's. It is registered for the account
+        Quietpane works for, which must be the account running it: a window working for someone else
+        never makes one. Only describes the task; Register-QpSignInTask is what hands it to Windows.
     #>
     param([string]$Script, [switch]$Watch)
+    if (-not (Test-QpSameUser)) { throw 'The start at sign-in has to be set from your own account.' }
     $user = [Security.Principal.WindowsIdentity]::GetCurrent().Name
     $trigger = New-ScheduledTaskTrigger -AtLogOn -User $user
     $trigger.Delay = 'PT20S'   # let Windows finish signing you in first
@@ -3970,7 +5604,7 @@ function New-QpSignInTask {
     $parts = @{
         Action      = Get-QpSignInAction $Script -Watch:$Watch
         Trigger     = $trigger
-        Principal   = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Highest
+        Principal   = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Limited
         Settings    = $settings
         Description = $(if ($Watch) { 'Opens Quietpane on the taskbar when you sign in, and checks once for anything Windows switched back on. Change this in Quietpane > Settings.' }
                         else { 'Opens Quietpane on the taskbar when you sign in. Switch it off in Quietpane > Settings.' })
@@ -3992,7 +5626,11 @@ function Enable-QpSignInStart {
         without -Watch is how that choice is changed.
     #>
     param([string]$InstallRoot = $script:InstallRoot, [string]$Name = $script:SignInTaskName, [switch]$Watch)
-    if (-not (Test-QpAdmin)) { return [pscustomobject]@{ Ok = $false; Note = 'Quietpane needs administrator rights for this, so nothing was changed.' } }
+    $ops = @((New-QpOperation -Kind ProgramFilesCopy -Target $InstallRoot), (New-QpOperation -Kind SignInTask -Target $Name))
+    if (-not (Invoke-QpPreflight $ops)) {
+        $why = if ((Test-QpAdmin) -and -not (Test-QpSameUser)) { 'The start at sign-in has to be set from your own account, so nothing was changed.' } else { 'Quietpane needs administrator rights for this, so nothing was changed.' }
+        return [pscustomobject]@{ Ok = $false; Note = $why }
+    }
     $copy = Install-QpCopy -To $InstallRoot
     if (-not $copy.Ok) { return [pscustomobject]@{ Ok = $false; Note = $copy.Note } }
     try { Register-QpSignInTask -Script (Join-Path $InstallRoot 'Quietpane.ps1') -Name $Name -Watch:$Watch }
@@ -4010,6 +5648,9 @@ function Enable-QpSignInStart {
 
 function Disable-QpSignInStart {
     param([string]$InstallRoot = $script:InstallRoot, [string]$Name = $script:SignInTaskName)
+    if (-not (Invoke-QpPreflight @((New-QpOperation -Kind SignInTask -Target $Name)))) {
+        return [pscustomobject]@{ Ok = $false; Note = 'Quietpane needs administrator rights for this, or it belongs to another account, so nothing was changed.'; Copy = $null }
+    }
     if (Get-QpSignInTask -Name $Name) {
         # Quietpane's own task goes completely. (Other programs' tasks are only ever switched off.)
         try { Unregister-ScheduledTask -TaskPath '\' -TaskName $Name -Confirm:$false -ErrorAction Stop }
@@ -4030,25 +5671,42 @@ function Sync-QpInstall {
         start, it does nothing at all.
     #>
     param([string]$InstallRoot = $script:InstallRoot, [string]$Name = $script:SignInTaskName, $Paths = $null)
+    $result = [pscustomobject]@{ InUse = $false; Ok = $true; Updated = $false; Repaired = 0; Migrated = $false }
+    # An administrator window working for someone else leaves everyone's shortcuts and sign-in alone.
+    if ((Test-QpAdmin) -and -not (Test-QpSameUser)) { return $result }
     $p = if ($Paths) { $Paths } else { Get-QpShortcutPaths -InstallRoot $InstallRoot }
     $links = @(Get-QpOwnShortcuts -Paths $p)
     $task = Get-QpSignInTask -Name $Name
-    $result = [pscustomobject]@{ InUse = ($links.Count -gt 0 -or $null -ne $task); Ok = $true; Updated = $false; Repaired = 0 }
+    $result.InUse = ($links.Count -gt 0 -or $null -ne $task)
     if (-not $result.InUse) { return $result }
-    $copy = Install-QpCopy -From $p.AppRoot -To $InstallRoot
-    if (-not $copy.Ok) { $result.Ok = $false; return $result }
-    $result.Updated = $copy.Changed
-    if ($copy.Note) { Write-QpLog $copy.Note 'INFO' }
+    if ((Get-QpOperationPolicy (New-QpOperation -Kind ProgramFilesCopy -Target $InstallRoot)).CanRunNow) {
+        $copy = Install-QpCopy -From $p.AppRoot -To $InstallRoot
+        if (-not $copy.Ok) { $result.Ok = $false; return $result }
+        $result.Updated = $copy.Changed
+        if ($copy.Note) { Write-QpLog $copy.Note 'INFO' }
+    } elseif (-not (Test-QpSamePath $p.AppRoot $InstallRoot) -and ((Compare-QpVersion ([string](Get-QpAppVersion $p.AppRoot)) ([string](Get-QpAppVersion $InstallRoot))) -gt 0 -or -not (Get-QpAppVersion $InstallRoot))) {
+        # Without administrator rights the copy in Program Files can't be brought up to date, so the
+        # shortcuts are left pointing where they are until it has been.
+        Write-QpLog "Quietpane's own copy in Program Files will be brought up to date the next time you use admin rights in Quietpane." 'INFO'
+        return $result
+    }
     foreach ($l in $links) {
         if (Test-QpSamePath $l.Script $p.Script) { continue }
         try { Set-QpShortcut $l.Path $p; $result.Repaired++; Write-QpLog "This shortcut now opens Quietpane's own copy: $($l.Path)" 'OK' }
         catch { Write-QpLog "Could not update the shortcut at $($l.Path) : $(Get-QpFailureReason $_.Exception)" 'WARN' }
     }
-    if ($task) {
+    if ($task -and (Test-QpAdmin)) {
         $opens = Get-QpLinkScript ((@($task.Actions) | ForEach-Object { $_.Arguments }) -join ' ')
-        if (-not (Test-QpSamePath $opens $p.Script) -and (Test-QpAdmin)) {
-            try { Register-QpSignInTask -Script $p.Script -Name $Name -Watch:(Test-QpTaskWatches $task); $result.Repaired++; Write-QpLog "Starting at sign-in now opens Quietpane's own copy." 'OK' }
-            catch { Write-QpLog "Could not update the sign-in start: $(Get-QpFailureReason $_.Exception)" 'WARN' }
+        # Before 2.1 the sign-in task ran Quietpane with administrator rights. It is set up again to run
+        # with your own rights, the next time an administrator window opens for the same account.
+        $highest = "$($task.Principal.RunLevel)" -eq 'Highest'
+        if ((-not (Test-QpSamePath $opens $p.Script)) -or $highest) {
+            try {
+                Register-QpSignInTask -Script $p.Script -Name $Name -Watch:(Test-QpTaskWatches $task)
+                $result.Repaired++
+                if ($highest) { $result.Migrated = $true; Write-QpLog 'Starting at sign-in now opens Quietpane with your own rights, not administrator rights.' 'OK' }
+                else { Write-QpLog "Starting at sign-in now opens Quietpane's own copy." 'OK' }
+            } catch { Write-QpLog "Could not update the sign-in start: $(Get-QpFailureReason $_.Exception)" 'WARN' }
         }
     }
     return $result
@@ -4151,7 +5809,9 @@ function Get-QpSpaceUse {
     Initialize-QpSpaceScanner
     $Root = $Root.TrimEnd('\') + '\'
     $isSystem = $Root -like ($env:SystemDrive + '\*')
-    $skip = @(if ($isSystem) { $env:WINDIR })
+    # Quietpane's own machine store is never walked: it is locked to administrators, and an ordinary
+    # Quietpane doesn't so much as look inside it.
+    $skip = @(if ($isSystem) { $env:WINDIR }) + @($script:MachineRoot)
     $cloud = @($env:OneDrive, $env:OneDriveConsumer, $env:OneDriveCommercial | Where-Object { $_ } | Select-Object -Unique)
     $started = Get-Date
     $tick = [Func[string, long, bool]]{
@@ -4268,9 +5928,13 @@ function Invoke-QpSpaceRecycle {
     $advice = Get-QpSpaceAdvice -Path $Path -Installed (Get-QpInstallPlaces) -NearProgram $NearProgram
     if (-not $advice.CanRecycle) {
         Write-QpLog "$name stays where it is: $($advice.Why)" 'WARN'
+        [void](New-QpOutcome 'Refused' $name $advice.Why)
         return [pscustomobject]@{ Ok = $false; Note = $advice.Why }
     }
-    if (-not (Test-Path -LiteralPath $Path)) { return [pscustomobject]@{ Ok = $false; Note = 'It is not there any more. Look again to bring the list up to date.' } }
+    if (-not (Test-Path -LiteralPath $Path)) { [void](New-QpOutcome 'Unchanged' $name 'it is not there any more'); return [pscustomobject]@{ Ok = $false; Note = 'It is not there any more. Look again to bring the list up to date.' } }
+    $refused = Assert-QpOperation (New-QpOperation -Kind Recycle -Target $Path)
+    if ($refused) { return [pscustomobject]@{ Ok = $false; Note = "It wasn't moved: $($refused.Reason)." } }
+    if (-not (Test-QpReparseFree $Path)) { [void](New-QpOutcome 'Refused' $name 'it is behind a link'); return [pscustomobject]@{ Ok = $false; Note = 'It is a link, or behind one, so Quietpane left it alone.' } }
     if ($SizeBytes -lt 0) { $SizeBytes = if (Test-Path -LiteralPath $Path -PathType Container) { Get-QpSize @($Path) } else { (Get-Item -LiteralPath $Path -Force).Length } }
     $limit = Get-QpRecycleBinLimit $Path
     if ($limit -le 0 -or $SizeBytes -gt $limit) {
@@ -4283,13 +5947,15 @@ function Invoke-QpSpaceRecycle {
     if ($own) { Start-QpSession 'space' }
     try {
         if (Move-QpToRecycleBin -Path $Path -SizeBytes $SizeBytes) {
-            Add-QpUndo @{ Type = 'Recycled'; Path = $Path; Items = 1 }
+            Add-QpUndo @{ Type = 'Recycled'; Path = [string]$Path; Items = 1 }
             Add-QpTotals -SpaceBytes $SizeBytes
             Write-QpLog ("Moved {0} ({1}) to the Recycle Bin. It stays there until you empty the bin, so you can still put it back." -f $name, (Format-QpBytes $SizeBytes)) 'OK'
+            [void](New-QpOutcome 'Changed' $name)
             return [pscustomobject]@{ Ok = $true; Note = '' }
         }
-        $note = 'It could not be moved - something may be using it. Close it and try again. Anything that did move is in the Recycle Bin.'
+        $note = 'It could not be moved - something may be using it, or Windows would not allow it. Close it and try again. Anything that did move is in the Recycle Bin.'
         Write-QpLog "$name : $note" 'WARN'
+        [void](New-QpOutcome 'Failed' $name $note)
         return [pscustomobject]@{ Ok = $false; Note = $note }
     } finally { if ($own) { Stop-QpSession } }
 }
@@ -4498,6 +6164,9 @@ function Invoke-QpEasyWin {
         Write-QpLog ('Preview finished. {0} file(s), {1}. Nothing was changed.' -f $items.Count, (Format-QpBytes (($items | Measure-Object -Property Bytes -Sum).Sum))) 'OK'
         return [pscustomobject]@{ Moved = 0; Bytes = [int64]0; Failed = 0 }
     }
+    if (-not (Invoke-QpPreflight @(foreach ($i in $items) { New-QpOperation -Kind Recycle -Target ([string]$i.Path) }))) {
+        return [pscustomobject]@{ Moved = 0; Bytes = [int64]0; Failed = $items.Count }
+    }
     $own = -not $script:Session
     if ($own) { Start-QpSession 'space-tidy' }
     $moved = 0; $failed = 0; $bytes = [int64]0
@@ -4525,22 +6194,47 @@ function Add-QpHostsBlock {
     param([string[]]$HostNames, [string]$Tag, [switch]$Preview)
     $lines = @(Get-Content -Path $script:HostsPath -ErrorAction SilentlyContinue)
     $missing = @($HostNames | Where-Object { -not (Test-QpHostBlocked -Lines $lines -HostName $_) })
-    if ($missing.Count -eq 0) { Write-QpLog 'All listed servers are already blocked' 'OK'; return }
+    if ($missing.Count -eq 0) { Write-QpLog 'All listed servers are already blocked' 'OK'; return (New-QpOutcome 'Unchanged' 'the hosts file') }
     if ($Preview) { foreach ($m in $missing) { Write-QpLog "Would block $m" 'PREVIEW' }; return }
-    Copy-Item -Path $script:HostsPath -Destination (Join-Path $script:Session.Path 'hosts.bak') -Force
-    Add-QpUndo @{ Type = 'Hosts'; Tag = $Tag }
-    $add = @('') + @($missing | ForEach-Object { "0.0.0.0 $_  # $Tag" })
-    Add-Content -Path $script:HostsPath -Value $add -Encoding ASCII
-    foreach ($m in $missing) { Write-QpLog "Blocked $m" 'OK' }
+    $refused = Assert-QpOperation (New-QpOperation -Kind Hosts -Target $script:HostsPath -Name $Tag)
+    if ($refused) { return $refused }
+    $entry = @{ Type = 'Hosts'; Tag = [string]$Tag }
+    try {
+        Assert-QpUndoEntry $entry
+        if (-not (Test-QpReparseFree $script:HostsPath)) { throw 'the hosts file is behind a link' }
+        Copy-Item -Path $script:HostsPath -Destination (Join-Path $script:Session.Path 'hosts.bak') -Force -ErrorAction Stop
+        $add = @('') + @($missing | ForEach-Object { "0.0.0.0 $_  # $Tag" })
+        Add-Content -Path $script:HostsPath -Value $add -Encoding ASCII -ErrorAction Stop
+    } catch {
+        Write-QpLog "Could not change the hosts file: $(Get-QpFailureReason $_.Exception)" 'WARN'
+        return (New-QpOutcome 'Failed' 'the hosts file' $_.Exception.Message)
+    }
+    # Read back: every line has to be there before it counts, and before Undo is told about it.
+    $now = @(Get-Content -Path $script:HostsPath -ErrorAction SilentlyContinue)
+    $still = @($missing | Where-Object { -not (Test-QpHostBlocked -Lines $now -HostName $_) })
+    if ($still.Count -eq $missing.Count) { return (New-QpOutcome 'Failed' 'the hosts file' 'the new lines are not there') }
+    Add-QpUndo $entry
+    foreach ($m in $missing) { if ($still -notcontains $m) { Write-QpLog "Blocked $m" 'OK' } }
+    if ($still.Count) { return (New-QpOutcome 'Failed' 'the hosts file' ('not blocked: ' + ($still -join ', '))) }
+    return (New-QpOutcome 'Changed' 'the hosts file')
 }
 
 function Remove-QpHostsBlock {
+    <# Takes out only the lines carrying this tag - lines Quietpane wrote itself - and nothing else. #>
     param([string]$Tag)
-    $lines = @(Get-Content -Path $script:HostsPath -ErrorAction SilentlyContinue)
-    $keep = @($lines | Where-Object { $_ -notmatch [regex]::Escape("# $Tag") })
-    Set-Content -Path $script:HostsPath -Value $keep -Encoding ASCII
+    if ($Tag -notmatch '\AQuietpane-[A-Za-z0-9]{1,40}\z') { return (New-QpOutcome 'Refused' 'the hosts file' 'that is not a tag Quietpane writes') }
+    $refused = Assert-QpOperation (New-QpOperation -Kind Hosts -Target $script:HostsPath -Name $Tag)
+    if ($refused) { return $refused }
+    $lines = @(Get-Content -Path $script:HostsPath -ErrorAction Stop)
+    $mark = '#\s' + [regex]::Escape($Tag) + '\s*$'
+    $keep = @($lines | Where-Object { $_ -notmatch $mark })
+    if ($keep.Count -eq $lines.Count) { return (New-QpOutcome 'Unchanged' 'the hosts file') }
+    if (-not (Test-QpReparseFree $script:HostsPath)) { throw 'the hosts file is behind a link' }
+    Set-Content -Path $script:HostsPath -Value $keep -Encoding ASCII -ErrorAction Stop
+    if (@(Get-Content -Path $script:HostsPath -ErrorAction Stop | Where-Object { $_ -match $mark }).Count) { throw 'the lines are still there' }
     & ipconfig.exe /flushdns | Out-Null
     Write-QpLog "Removed hosts entries tagged '$Tag'" 'OK'
+    return (New-QpOutcome 'Changed' 'the hosts file')
 }
 
 function Test-QpNeverTouch {
@@ -4574,10 +6268,11 @@ function Get-QpInstalledPrograms {
     if ($script:InstalledPrograms) { return $script:InstalledPrograms }
     # Read straight from the registry: a few hundred keys through Get-ItemProperty is the slow part otherwise.
     # (commas, not new lines: arrays on separate lines would run together into one list)
+    # Where each one is registered is kept (HKLM for everyone, HKCU for you alone): it says whose it is.
     $sources = @(
-        @([Microsoft.Win32.Registry]::LocalMachine, 'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall'),
-        @([Microsoft.Win32.Registry]::LocalMachine, 'SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall'),
-        @([Microsoft.Win32.Registry]::CurrentUser, 'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall')
+        @([Microsoft.Win32.Registry]::LocalMachine, 'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall', 'HKLM'),
+        @([Microsoft.Win32.Registry]::LocalMachine, 'SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall', 'HKLM'),
+        @([Microsoft.Win32.Registry]::CurrentUser, 'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall', 'HKCU')
     )
     $script:InstalledPrograms = @(
         foreach ($s in $sources) {
@@ -4600,6 +6295,7 @@ function Get-QpInstalledPrograms {
                             Uninstall = $(if ($quiet) { $quiet } else { [string]$k.GetValue('UninstallString') })
                             Quiet     = [bool]$quiet
                             Key       = $name
+                            Hive      = $s[2]
                         }
                     } catch { } finally { if ($k) { $k.Close() } }
                 }
@@ -4621,11 +6317,8 @@ function Get-QpVendorStatus {
         $items = foreach ($item in @($v.Items)) {
             $blocked = @($item.Actions | Where-Object { $_.Name -and (Test-QpNeverTouch $_.Name) })
             if ($blocked.Count) { continue }
-            $states = @($item.Actions | ForEach-Object { Test-QpActionApplied $_ })
-            $relevant = @($states | Where-Object { $null -ne $_ })
-            if ($relevant.Count -eq 0) { continue }   # nothing of this item exists here - don't mention it
-            $done = @($relevant | Where-Object { $_ }).Count
-            $status = if ($done -eq $relevant.Count) { 'Applied' } elseif ($done -gt 0) { 'Partial' } else { 'NotApplied' }
+            $status = Get-QpItemStatus $item.Actions
+            if ($status -eq 'NotApplicable') { continue }   # nothing of this item exists here - don't mention it
             [pscustomobject]@{
                 Id = $item.Id; VendorId = $v.Id; Title = $item.Title; Description = $item.Description
                 Recommended = [bool]$item.Recommended; Status = $status
@@ -4634,7 +6327,7 @@ function Get-QpVendorStatus {
         $junk = foreach ($j in @($v.Junk)) {
             foreach ($p in @($programs | Where-Object { $_.Name -match $j.Match -and $_.Uninstall })) {
                 if (Test-QpNeverTouch $p.Name) { continue }
-                [pscustomobject]@{ VendorId = $v.Id; Title = $j.Title; Why = $j.Why; Name = $p.Name; Key = $p.Key; Uninstall = $p.Uninstall; Quiet = $p.Quiet }
+                [pscustomobject]@{ VendorId = $v.Id; Title = $j.Title; Why = $j.Why; Name = $p.Name; Key = $p.Key; Uninstall = $p.Uninstall; Quiet = $p.Quiet; Hive = $p.Hive }
             }
         }
         $items = @($items); $junk = @($junk)
@@ -4653,24 +6346,33 @@ function Invoke-QpVendor {
     if (-not $Ids) { Write-QpLog 'Pick at least one thing first.' 'WARN'; return }
     $items = @(foreach ($v in (Get-QpCatalog vendors).Vendors) { foreach ($i in @($v.Items)) { if ($Ids -contains $i.Id) { $i } } })
     if ($items.Count -eq 0) { Write-QpLog 'Pick at least one thing first.' 'WARN'; return }
-    $own = (-not $Preview) -and (-not $script:Session)
-    if ($Preview) { Write-QpLog 'PREVIEW - nothing will be changed.' 'STEP' } elseif ($own) { Start-QpSession 'brands' }
-    $touchedHosts = $false
-    foreach ($item in $items) {
-        Write-QpLog $item.Title 'STEP'
-        foreach ($a in $item.Actions) {
-            if ($a.Name -and (Test-QpNeverTouch $a.Name)) { Write-QpLog "$($a.Name) is on the protected list - left alone" 'SKIP'; continue }
-            if ($a.Type -eq 'Hosts') { $touchedHosts = $true }
-            Invoke-QpAction -Action $a -Preview:$Preview
+    $top = Enter-QpBatch
+    try {
+        if (-not $Preview) {
+            $ops = @(foreach ($item in $items) { Get-QpActionOperations @($item.Actions | Where-Object { -not ($_.Name -and (Test-QpNeverTouch $_.Name)) }) -Item $item.Id })
+            if (-not (Invoke-QpPreflight $ops)) { if ($top) { Get-QpOutcomeSummary }; return }
         }
-    }
-    if ($Preview) {
-        Write-QpLog 'Preview finished. Nothing was changed.' 'OK'
-    } else {
-        if ($touchedHosts) { & ipconfig.exe /flushdns | Out-Null }
-        Write-QpLog 'The apps themselves still open and work. Run this again after a big brand-software update.' 'INFO'
-        if ($own) { Stop-QpSession }
-    }
+        $own = (-not $Preview) -and (-not $script:Session)
+        if ($Preview) { Write-QpLog 'PREVIEW - nothing will be changed.' 'STEP' } elseif ($own) { Start-QpSession 'brands' }
+        $touchedHosts = $false
+        try {
+            foreach ($item in $items) {
+                Write-QpLog $item.Title 'STEP'
+                foreach ($a in $item.Actions) {
+                    if ($a.Name -and (Test-QpNeverTouch $a.Name)) { Write-QpLog "$($a.Name) is on the protected list - left alone" 'SKIP'; continue }
+                    if ($a.Type -eq 'Hosts') { $touchedHosts = $true }
+                    $null = Invoke-QpAction -Action $a -Preview:$Preview
+                }
+            }
+        } finally { if ($own) { Stop-QpSession } }
+        if ($Preview) {
+            Write-QpLog 'Preview finished. Nothing was changed.' 'OK'
+        } else {
+            if ($touchedHosts) { & ipconfig.exe /flushdns | Out-Null }
+            Write-QpLog 'The apps themselves still open and work. Run this again after a big brand-software update.' 'INFO'
+            if ($top) { Get-QpOutcomeSummary }
+        }
+    } finally { Exit-QpBatch }
 }
 
 function Split-QpUninstallCommand {
@@ -4700,18 +6402,38 @@ function Invoke-QpVendorUninstall {
     $all = Get-QpVendorStatus
     $targets = @(foreach ($v in $all) { foreach ($j in $v.Junk) { if ($Keys -contains $j.Key) { $j } } })
     if ($targets.Count -eq 0) { Write-QpLog 'Nothing to remove.' 'WARN'; return }
-    foreach ($t in $targets) {
-        Write-QpLog "Removing $($t.Name) using its own uninstaller (this cannot be undone)" 'STEP'
-        try {
-            $run = Split-QpUninstallCommand $t.Uninstall
-            $p = if ($run.Arguments) { Start-Process -FilePath $run.Program -ArgumentList $run.Arguments -PassThru -Wait -ErrorAction Stop } else { Start-Process -FilePath $run.Program -PassThru -Wait -ErrorAction Stop }
-            Write-QpLog "$($t.Name): uninstaller finished (exit code $($p.ExitCode))" 'OK'
-        } catch {
-            Write-QpLog "$($t.Name) could not be removed automatically: $($_.Exception.Message). You can remove it from Settings > Apps." 'WARN'
+    $top = Enter-QpBatch
+    try {
+        $ops = @(foreach ($t in $targets) { New-QpOperation -Kind Uninstall -Name $t.Name -Hive $t.Hive -Command $t.Uninstall -Item $t.Key })
+        if (-not (Invoke-QpPreflight $ops)) { if ($top) { Get-QpOutcomeSummary }; return }
+        foreach ($t in $targets) {
+            # Read again just before it runs: what runs must be exactly what was checked.
+            $script:InstalledPrograms = $null
+            $now = @(Get-QpInstalledPrograms | Where-Object { $_.Key -eq $t.Key -and $_.Hive -eq $t.Hive })[0]
+            if (-not $now -or $now.Uninstall -cne $t.Uninstall) {
+                Write-QpLog "$($t.Name) changed since Quietpane looked, so it was left alone. Look again and try once more." 'WARN'
+                [void](New-QpOutcome 'Refused' "uninstalling $($t.Name)" 'its uninstaller changed since it was checked')
+                continue
+            }
+            if (Assert-QpOperation (New-QpOperation -Kind Uninstall -Name $t.Name -Hive $t.Hive -Command $now.Uninstall)) { continue }
+            Write-QpLog "Removing $($t.Name) using its own uninstaller (this cannot be undone)" 'STEP'
+            try {
+                $run = Split-QpUninstallCommand $now.Uninstall
+                $p = if ($run.Arguments) { Start-Process -FilePath $run.Program -ArgumentList $run.Arguments -PassThru -Wait -ErrorAction Stop } else { Start-Process -FilePath $run.Program -PassThru -Wait -ErrorAction Stop }
+                Write-QpLog "$($t.Name): uninstaller finished (exit code $($p.ExitCode))" 'OK'
+                $script:InstalledPrograms = $null
+                if (@(Get-QpInstalledPrograms | Where-Object { $_.Key -eq $t.Key -and $_.Hive -eq $t.Hive }).Count) {
+                    [void](New-QpOutcome 'Failed' "uninstalling $($t.Name)" 'it is still listed as installed - its uninstaller may still be running, so look again in a minute')
+                } else { [void](New-QpOutcome 'Changed' "uninstalling $($t.Name)") }
+            } catch {
+                Write-QpLog "$($t.Name) could not be removed automatically: $($_.Exception.Message). You can remove it from Settings > Apps." 'WARN'
+                [void](New-QpOutcome 'Failed' "uninstalling $($t.Name)" $_.Exception.Message)
+            }
         }
-    }
-    $script:InstalledPrograms = $null
-    Write-QpLog 'Removed programs can be installed again from the maker''s website.' 'INFO'
+        $script:InstalledPrograms = $null
+        Write-QpLog 'Removed programs can be installed again from the maker''s website.' 'INFO'
+        if ($top) { Get-QpOutcomeSummary }
+    } finally { Exit-QpBatch }
 }
 
 #endregion
@@ -4738,7 +6460,7 @@ function Get-QpState {
     try {
         # Read once, then cost it: what signing in costs is about these very items.
         $startup = Read-Part 'what starts at sign-in' { @(Get-QpStartupItems) } @()
-        @{
+        $state = @{
             Privacy  = Read-Part 'the privacy settings' { Get-QpPrivacyStatus } @{}
             Vendors  = Read-Part 'the brand extras' { @(Get-QpVendorStatus) } @()
             Apps     = Read-Part 'the installed apps' { @(Get-QpBloatApps) } @()
@@ -4746,7 +6468,7 @@ function Get-QpState {
             SignIn   = Read-Part 'what signing in costs' {
                 $times = Get-QpSignInTime
                 $record = Get-QpBootRecord
-                [pscustomobject]@{ Times = $times; Record = $record; Costs = @(Get-QpSignInCost -Items $startup -Record $record -Times $times) }
+                [pscustomobject]@{ Times = $times; Record = $record; RecordStatus = $script:BootRecordStatus; Costs = @(Get-QpSignInCost -Items $startup -Record $record -Times $times) }
             } $null
             Devices  = Read-Part 'camera, microphone and location use' { @(Get-QpDeviceUse) } @()
             Addons   = Read-Part 'your browser add-ons' { @(Get-QpBrowserExtensions) } @()
@@ -4754,7 +6476,43 @@ function Get-QpState {
             Restore  = Read-Part 'the restore points' { @(Get-QpRestorePoints) } @()
             Problems = @($problems)
         }
+        # What needs administrator rights: worked out here, by the same rules the changes themselves obey,
+        # so the shields on screen always match what the engine will allow.
+        $state.Policy = Read-Part 'what needs administrator rights' { Get-QpOptionPolicies -State $state } @{}
+        # What couldn't be seen without administrator rights - kept apart from what went wrong.
+        $limited = @()
+        if (@($state.Privacy.Values | Where-Object { $_ -eq 'NeedsAdmin' }).Count -or @($state.Vendors | ForEach-Object { @($_.Items) } | Where-Object { $_.Status -eq 'NeedsAdmin' }).Count) { $limited += 'system tasks Windows hides' }
+        if (@($state.Cleanup | Where-Object { $_ -and $_.Availability -eq 'NeedsAdmin' }).Count) { $limited += "the size of Windows' own temporary files" }
+        if ($state.SignIn -and $state.SignIn.RecordStatus -eq 'NeedsAdmin') { $limited += "Windows' own restart timing" }
+        $state.Limited = @($limited)
+        $state
     } finally { Stop-QpStateCache }
+}
+
+function Get-QpOptionPolicies {
+    <#
+        For every choice on screen, whether it needs administrator rights and whose it is, keyed
+        '<list>|<id>' the way the window keys its tick boxes. Computed from the operations each choice
+        would make - the same ones the engine checks when it is pressed.
+    #>
+    param([Parameter(Mandatory)]$State)
+    $map = @{}
+    foreach ($i in (Get-QpCatalog privacy).Items) { $map["privacy|$($i.Id)"] = Get-QpItemPolicy @(Get-QpActionOperations $i.Actions -Item $i.Id) }
+    foreach ($v in (Get-QpCatalog vendors).Vendors) {
+        foreach ($i in @($v.Items)) { $map["vendors|$($i.Id)"] = Get-QpItemPolicy @(Get-QpActionOperations @($i.Actions | Where-Object { -not ($_.Name -and (Test-QpNeverTouch $_.Name)) }) -Item $i.Id) }
+    }
+    foreach ($v in @($State.Vendors | Where-Object { $_ })) {
+        foreach ($j in @($v.Junk)) { $map["junk|$($j.Key)"] = Get-QpItemPolicy @(New-QpOperation -Kind Uninstall -Name $j.Name -Hive $j.Hive -Command $j.Uninstall) }
+    }
+    foreach ($a in @($State.Apps | Where-Object { $_ })) { $map["apps|$($a.Name)"] = Get-QpItemPolicy @(Get-QpAppOperations -Names $a.Name) }
+    $map['deprovision'] = Get-QpItemPolicy @(New-QpOperation -Kind AppxProvisioned -Target 'new user accounts')
+    foreach ($s in @($State.Startup | Where-Object { $_ })) { $map["startup|$($s.Id)"] = Get-QpItemPolicy @(Get-QpStartupOperations $s) }
+    foreach ($d in @($State.Devices | Where-Object { $_ })) {
+        foreach ($id in @(@($d.Apps | ForEach-Object { $_.Id }) + @($d.DesktopId) | Where-Object { $_ })) { $map["devices|$id"] = Get-QpItemPolicy @(Get-QpDeviceOperations -Id $id -Use @($d)) }
+    }
+    foreach ($e in @($State.Addons | Where-Object { $_ })) { $map["extensions|$($e.Id)"] = Get-QpItemPolicy @(Get-QpExtensionOperations -Id $e.Id -Extensions @($e)) }
+    foreach ($c in (Get-QpCatalog cleanup).Items) { $map["cleanup|$($c.Id)"] = Get-QpItemPolicy @(Get-QpCleanupOperations $c) }
+    return $map
 }
 
 function Get-QpRecommendedPlan {
@@ -4797,35 +6555,54 @@ function Invoke-QpRecommended {
         Write-QpLog 'Nothing to do - this PC already has every recommended setting.' 'OK'
         return [pscustomobject]@{ Nothing = $true }
     }
-    Start-QpSession 'one-click'
-    $restore = $script:Session.Path
-    $before = Get-QpSystemUsage
-    if ($plan.PrivacyIds.Count) { Invoke-QpPrivacy -Ids $plan.PrivacyIds }
-    if ($plan.VendorIds.Count)  { Invoke-QpVendor -Ids $plan.VendorIds }
-    if ($plan.AppNames.Count)   { Invoke-QpRemoveApps -Names $plan.AppNames -Deprovision }
-    $freed = 0
-    if ($plan.CleanupIds.Count) {
-        $r = @(Invoke-QpCleanup -Ids $plan.CleanupIds) | Where-Object { $_ -and $_.PSObject.Properties['BytesFreed'] } | Select-Object -Last 1
-        if ($r) { $freed = $r.BytesFreed }
-    }
-    $entries = @($script:Session.Entries)
-    # Services and startup items that were switched off release memory straight away; a restart frees more.
-    Start-Sleep -Seconds 2
-    $after = Get-QpSystemUsage
-    $memFreed = [int64][Math]::Max(0, $before.MemUsed - $after.MemUsed)
-    if ($memFreed -gt 0) { Write-QpLog ("Memory in use dropped by about {0}. A restart usually frees more." -f (Format-QpBytes $memFreed)) 'OK' }
-    Add-QpTotals -MemoryBytes $memFreed -CountRun
-    $summary = [pscustomobject]@{
-        Nothing       = $false
-        Settings      = $plan.PrivacyIds.Count
-        AppsRemoved   = @($entries | Where-Object { $_.Type -eq 'Appx' }).Count
-        BrandsQuieted = @($plan.VendorNames)
-        BytesFreed    = [int64]$freed
-        MemoryFreed   = $memFreed
-        RestorePoint  = $(if ($entries.Count) { $restore } else { $null })   # nothing changed means nothing to undo
-    }
-    Stop-QpSession
-    return $summary
+    $top = Enter-QpBatch
+    try {
+        # Everything it is about to do, checked as one batch before the first change.
+        $ops = @()
+        foreach ($i in @((Get-QpCatalog privacy).Items | Where-Object { $plan.PrivacyIds -contains $_.Id })) { $ops += @(Get-QpActionOperations $i.Actions -Item $i.Id) }
+        foreach ($v in (Get-QpCatalog vendors).Vendors) { foreach ($i in @($v.Items | Where-Object { $plan.VendorIds -contains $_.Id })) { $ops += @(Get-QpActionOperations @($i.Actions | Where-Object { -not ($_.Name -and (Test-QpNeverTouch $_.Name)) }) -Item $i.Id) } }
+        $ops += @(Get-QpAppOperations -Names $plan.AppNames -Deprovision)
+        foreach ($c in @((Get-QpCatalog cleanup).Items | Where-Object { $plan.CleanupIds -contains $_.Id })) { $ops += @(Get-QpCleanupOperations $c) }
+        if (-not (Invoke-QpPreflight $ops)) {
+            $s = Get-QpOutcomeSummary
+            return [pscustomobject]@{ Nothing = $false; Refused = $true; Settings = 0; AppsRemoved = 0; BrandsQuieted = @(); BytesFreed = [int64]0; MemoryFreed = [int64]0; RestorePoint = $null; Changed = 0; Failed = 0; RefusedCount = $s.Refused; Text = $s.Text }
+        }
+        Start-QpSession 'one-click'
+        $restore = $script:Session.Path
+        $before = Get-QpSystemUsage
+        $freed = 0
+        try {
+            if ($plan.PrivacyIds.Count) { $null = Invoke-QpPrivacy -Ids $plan.PrivacyIds }
+            if ($plan.VendorIds.Count)  { $null = Invoke-QpVendor -Ids $plan.VendorIds }
+            if ($plan.AppNames.Count)   { $null = Invoke-QpRemoveApps -Names $plan.AppNames -Deprovision }
+            if ($plan.CleanupIds.Count) {
+                $r = @(Invoke-QpCleanup -Ids $plan.CleanupIds) | Where-Object { $_ -and $_.PSObject.Properties['BytesFreed'] } | Select-Object -Last 1
+                if ($r) { $freed = $r.BytesFreed }
+            }
+        } catch {
+            Write-QpLog "Stopped part way: $($_.Exception.Message). What was done is in the restore point." 'ERROR'
+            [void](New-QpOutcome 'Failed' 'Quiet my PC now' $_.Exception.Message)
+        }
+        $entries = @($script:Session.Entries)
+        # Services and startup items that were switched off release memory straight away; a restart frees more.
+        Start-Sleep -Seconds 2
+        $after = Get-QpSystemUsage
+        $memFreed = [int64][Math]::Max(0, $before.MemUsed - $after.MemUsed)
+        if ($memFreed -gt 0) { Write-QpLog ("Memory in use dropped by about {0}. A restart usually frees more." -f (Format-QpBytes $memFreed)) 'OK' }
+        Add-QpTotals -MemoryBytes $memFreed -CountRun
+        Stop-QpSession
+        $s = Get-QpOutcomeSummary
+        return [pscustomobject]@{
+            Nothing       = $false
+            Settings      = $plan.PrivacyIds.Count
+            AppsRemoved   = @($entries | Where-Object { $_.Type -eq 'Appx' }).Count
+            BrandsQuieted = @($plan.VendorNames)
+            BytesFreed    = [int64]$freed
+            MemoryFreed   = $memFreed
+            RestorePoint  = $(if ($entries.Count) { $restore } else { $null })   # nothing changed means nothing to undo
+            Changed = $s.Changed; Failed = $s.Failed; RefusedCount = $s.Refused; Text = $s.Text
+        }
+    } finally { Exit-QpBatch }
 }
 
 #endregion
@@ -5041,23 +6818,41 @@ function Invoke-QpThreatScan {
     [pscustomobject]@{ Ran = $true; Findings = @(Get-QpDefenderFindings); State = $state; Seconds = [int]$sw.Elapsed.TotalSeconds }
 }
 
+function Get-QpStoreFile([string]$Name) {
+    <# A file in this window's own store: the locked machine store with administrator rights, your own store without. #>
+    if (Test-QpAdmin) { return (Get-QpMachineStorePath $Name) }
+    return (Get-QpUserStorePath $Name)
+}
+
 function Write-QpAudit {
     <# Append-only record of everything Quietpane did to a threat, including failures. #>
     param([string]$FindingId, [string]$Action, [string]$Result, [string]$Object = '', [string]$Note = '')
     try {
-        if (-not (Test-Path $script:DataRoot)) { New-Item -ItemType Directory -Path $script:DataRoot -Force | Out-Null }
+        $file = Get-QpStoreFile 'audit.log'
+        if ((Test-QpPathUnder $file $script:UserDataRoot) -and -not (Test-QpUserStoreWritable)) { return }
+        $dir = Split-Path $file -Parent
+        if (-not [IO.Directory]::Exists($dir)) { [void][IO.Directory]::CreateDirectory($dir) }
+        if (-not (Test-QpReparseFree $file)) { throw 'the log is behind a link' }
         $line = [pscustomobject]@{
             Time = (Get-Date).ToString('s'); FindingId = $FindingId; Action = $Action; Result = $Result
             Object = $Object; Note = $Note; User = "$env:USERDOMAIN\$env:USERNAME"
         } | ConvertTo-Json -Compress
-        Add-Content -Path (Join-Path $script:DataRoot 'audit.log') -Value $line -Encoding UTF8
+        [IO.File]::AppendAllText($file, $line + "`r`n", (New-Object Text.UTF8Encoding $false))
     } catch { Write-QpLog "Could not write the audit log: $($_.Exception.Message)" 'WARN' }
 }
 
 function Get-QpAllowList {
-    $file = Join-Path $script:DataRoot 'allowed.json'
-    if (-not (Test-Path $file)) { return @() }
-    try { return @(Get-Content $file -Raw | ConvertFrom-Json) } catch { return @() }
+    <# "Leave it for now" choices: this window's own store, plus - with administrator rights for the same account - your own. #>
+    $files = @()
+    try { $files += Get-QpStoreFile 'allowed.json' } catch { }
+    if ((Test-QpAdmin) -and (Test-QpSameUser)) { $files += Get-QpUserStorePath 'allowed.json' }
+    $fields = [ordered]@{ FindingId = 'string'; ThreatName = 'string?'; Path = 'string?'; Allowed = 'string' }
+    foreach ($f in $files) {
+        $text = Read-QpTextFile -Path $f -MaxBytes 1MB
+        if (-not $text) { continue }
+        try { $d = ConvertFrom-QpStrictJson -Text $text -MaxBytes 1MB } catch { Write-QpLog "Your ""leave it for now"" list could not be read: $($_.Exception.Message)" 'WARN'; continue }
+        foreach ($e in @($d)) { if (-not (Test-QpJsonFields $e $fields)) { [pscustomobject]@{ FindingId = $e.FindingId; ThreatName = $e.ThreatName; Path = $e.Path; Allowed = $e.Allowed } } }
+    }
 }
 
 function Add-QpAllow {
@@ -5066,11 +6861,13 @@ function Add-QpAllow {
         Defender exclusion and never weakens any future scan. The item keeps showing up, marked Allowed.
     #>
     param([string]$FindingId, [string]$ThreatName, [string]$Path)
-    $all = @(Get-QpAllowList | Where-Object { $_.FindingId -ne $FindingId })
-    $all += [pscustomobject]@{ FindingId = $FindingId; ThreatName = $ThreatName; Path = $Path; Allowed = (Get-Date).ToString('s') }
     try {
-        if (-not (Test-Path $script:DataRoot)) { New-Item -ItemType Directory -Path $script:DataRoot -Force | Out-Null }
-        $all | ConvertTo-Json -Depth 4 | Set-Content -Path (Join-Path $script:DataRoot 'allowed.json') -Encoding UTF8
+        $file = Get-QpStoreFile 'allowed.json'
+        $mine = @()
+        $text = Read-QpTextFile -Path $file -MaxBytes 1MB
+        if ($text) { $mine = @(ConvertFrom-QpStrictJson -Text $text -MaxBytes 1MB | Where-Object { $_['FindingId'] -ne $FindingId } | ForEach-Object { [pscustomobject]@{ FindingId = $_['FindingId']; ThreatName = $_['ThreatName']; Path = $_['Path']; Allowed = $_['Allowed'] } }) }
+        $mine += [pscustomobject]@{ FindingId = $FindingId; ThreatName = $ThreatName; Path = $Path; Allowed = (Get-Date).ToString('s') }
+        if (-not (Write-QpTextFile -Path $file -Text (ConvertTo-Json -InputObject @($mine) -Depth 4))) { throw 'it could not be saved' }
         Write-QpLog "Left in place on purpose: $ThreatName. It is still on this PC, and Quietpane will keep showing it." 'WARN'
         Write-QpAudit -FindingId $FindingId -Action 'Allow' -Result 'Recorded' -Object $Path -Note 'Quietpane note only - no Defender exclusion was created'
     } catch { Write-QpLog "Could not record that choice: $($_.Exception.Message)" 'WARN' }
@@ -5081,7 +6878,7 @@ function Get-QpFailureReason {
     param($Ex)
     $name = if ($Ex) { $Ex.GetType().Name } else { '' }
     switch -Regex ($name) {
-        'UnauthorizedAccessException' { return 'Windows would not allow it. Quietpane needs administrator rights, or the file is protected.' }
+        'UnauthorizedAccessException' { return 'Windows would not allow it. It needs administrator rights, or the file is protected.' }
         'FileNotFoundException|DirectoryNotFoundException' { return 'It is not there any more. Run the check again.' }
         'IOException' { return 'The file is in use, so it could not be moved. Close whatever is using it, or restart and try again.' }
         default { return $(if ($Ex) { $Ex.Message } else { 'It did not work.' }) }
@@ -5089,21 +6886,93 @@ function Get-QpFailureReason {
 }
 
 function Get-QpQuarantineRoot {
-    <# The quarantine folder, locked down the first time it is needed. #>
-    $root = Join-Path $script:DataRoot 'quarantine'
-    if (-not (Test-Path $root)) {
-        New-Item -ItemType Directory -Path $root -Force | Out-Null
-        try {
-            # Only SYSTEM and administrators may look inside. Inheritance off, so a wide-open
-            # ProgramData permission cannot leak in.
-            & icacls.exe $root /inheritance:r /grant:r 'SYSTEM:(OI)(CI)F' 'Administrators:(OI)(CI)F' | Out-Null
-        } catch { Write-QpLog "Could not lock down the quarantine folder: $($_.Exception.Message)" 'WARN' }
+    <#
+        The quarantine folder, checked on every single use: administrator rights; the machine store
+        checked first; no link on the way; owned by Administrators or SYSTEM (a folder someone else made
+        is never adopted); nothing inside it that is a link; then locked to SYSTEM and Administrators -
+        explicitly, taking nothing from the folder above, so it stays stricter than the store around it
+        whatever happens to that - and the lock read back. Any of that failing stops what was asked.
+
+        It is machine\quarantine, made inside the locked store. The quarantine folder older versions kept
+        at the top of %ProgramData%\Quietpane sat where any account could write, and on a real PC it
+        turned out to belong to an ordinary account, so it is only ever listed (Get-QpLegacyQuarantine).
+    #>
+    if (-not (Test-QpAdmin)) { throw "Quietpane's quarantine is only opened with administrator rights." }
+    $root = Get-QpMachineStorePath 'quarantine'
+    if (-not (Test-QpReparseFree $root)) { throw "The quarantine folder is behind a link, so it wasn't used." }
+    if ([IO.File]::Exists($root)) { throw 'A file is in the way of the quarantine folder.' }
+    if (-not [IO.Directory]::Exists($root)) {
+        [void][IO.Directory]::CreateDirectory($root, (New-QpAdminOnlySecurity))
+    } else {
+        $owner = (Get-Acl -LiteralPath $root).GetOwner([Security.Principal.SecurityIdentifier]).Value
+        if ($owner -notin $script:SidAdmins, $script:SidSystem) { throw "The quarantine folder belongs to $(Get-QpAccountName $owner), so it wasn't used." }
+        $scan = Find-QpReparseInTree $root 5000
+        if (-not $scan.Ok) { throw "The quarantine folder isn't safe to use: $($scan.Why)." }
+        (New-Object IO.DirectoryInfo $root).SetAccessControl((New-QpAdminOnlySecurity))
     }
+    $check = Test-QpAdminOnlyAcl -Security (Get-Acl -LiteralPath $root) -Protected
+    if (-not $check.Ok) { throw ("The quarantine folder isn't locked the way it should be: " + ($check.Problems -join '; ')) }
     return $root
 }
 
+$script:QuarantineFieldsV1 = [ordered]@{
+    Id = 'string'; OriginalPath = 'string'; FileName = 'string'; Size = 'int'; Sha256 = 'string?'; ThreatName = 'string?'
+    Family = 'string?'; Severity = 'string?'; Source = 'string?'; Confidence = 'string?'; QuarantinedAt = 'string'; Status = 'string'
+    CreationTime = 'string'; LastWriteTime = 'string'; Attributes = 'string'
+}
+$script:QuarantineFieldsV2 = [ordered]@{ SchemaVersion = 'int' }
+foreach ($k in $script:QuarantineFieldsV1.Keys) { $script:QuarantineFieldsV2[$k] = $script:QuarantineFieldsV1[$k] }
+$script:QuarantineFieldsV2['QuarantinedBySid'] = 'string'
+
+function Read-QpQuarantineItem {
+    <#
+        One quarantined item, read as privileged input: its folder is a plain folder directly inside the
+        quarantine; it and its two files are owned by Administrators or SYSTEM (an ordinary account cannot
+        make something owned by Administrators, which is what makes an item from before 2.1 trustworthy);
+        it holds meta.json and payload.bin and nothing else; and meta.json is at most 64 KB, names every
+        field once, and is exactly Quietpane's version 1 (2.0) or version 2 form.
+    #>
+    param([Parameter(Mandatory)][string]$Folder, [Parameter(Mandatory)][string]$Root)
+    $id = [IO.Path]::GetFileName($Folder)
+    $bad = { param($why) [pscustomobject]@{ Ok = $false; Reason = $why; Id = $id; Folder = $Folder; FileName = $id; OriginalPath = ''; HasPayload = $false } }
+    try {
+        if ([IO.Path]::GetDirectoryName($Folder) -ine $Root.TrimEnd('\')) { return (& $bad 'it is not inside the quarantine') }
+        if ([IO.File]::GetAttributes($Folder) -band [IO.FileAttributes]::ReparsePoint) { return (& $bad 'it is a link') }
+        $leaves = @()
+        foreach ($e in [IO.Directory]::GetFileSystemEntries($Folder)) {
+            $a = [IO.File]::GetAttributes($e)
+            if ($a -band ([IO.FileAttributes]::ReparsePoint -bor [IO.FileAttributes]::Directory)) { return (& $bad 'it holds something Quietpane did not put there') }
+            $leaves += [IO.Path]::GetFileName($e)
+        }
+        foreach ($l in $leaves) { if ($l -notin 'meta.json', 'payload.bin') { return (& $bad "it holds a file Quietpane did not put there ($l)") } }
+        if ($leaves -notcontains 'meta.json') { return (& $bad 'its description is missing') }
+        $text = Read-QpTextFile -Path (Join-Path $Folder 'meta.json') -MaxBytes 64KB
+        if ($null -eq $text) { return (& $bad 'its description is too large or behind a link') }
+        $m = ConvertFrom-QpStrictJson -Text $text -MaxBytes 64KB
+        $fields = if ((Test-QpJsonShape $m 'object') -and $m.ContainsKey('SchemaVersion')) { $script:QuarantineFieldsV2 } else { $script:QuarantineFieldsV1 }
+        $why = Test-QpJsonFields $m $fields
+        if ($why) { return (& $bad "its description: $why") }
+        if ($m.ContainsKey('SchemaVersion') -and $m.SchemaVersion -ne 2) { return (& $bad "its description is in a form Quietpane doesn't read (version $($m.SchemaVersion))") }
+        if ($m.Id -cne $id) { return (& $bad 'its description is for a different item') }
+        if ($m.FileName -cne [IO.Path]::GetFileName([string]$m.OriginalPath)) { return (& $bad 'its description does not add up') }
+        if ($m.Size -lt 0) { return (& $bad 'its description has a negative size') }
+        if ($m.Sha256 -and $m.Sha256 -notmatch '\A[0-9A-Fa-f]{64}\z') { return (& $bad 'its fingerprint is not written the way Quietpane writes it') }
+        # Both must hold; the owner is what shows an ordinary account didn't make it.
+        foreach ($p in @($Folder) + @($leaves | ForEach-Object { Join-Path $Folder $_ })) {
+            $owner = (Get-Acl -LiteralPath $p).GetOwner([Security.Principal.SecurityIdentifier]).Value
+            if ($owner -notin $script:SidAdmins, $script:SidSystem) { return (& $bad "it belongs to $(Get-QpAccountName $owner)") }
+        }
+        [pscustomobject]@{
+            Ok = $true; Reason = ''; Id = $m.Id; FileName = $m.FileName; OriginalPath = $m.OriginalPath; Size = [int64]$m.Size
+            Sha256 = [string]$m.Sha256; ThreatName = $m.ThreatName; Severity = $m.Severity; Source = $m.Source
+            QuarantinedAt = $m.QuarantinedAt; Folder = $Folder; HasPayload = ($leaves -contains 'payload.bin')
+            CreationTime = $m.CreationTime; LastWriteTime = $m.LastWriteTime; Version = $(if ($m.ContainsKey('SchemaVersion')) { 2 } else { 1 })
+        }
+    } catch { return (& $bad "it can't be read: $($_.Exception.Message)") }
+}
+
 function Test-QpProtectedPath {
-    <# Places Quietpane will never move, recycle or delete, whatever a finding says. #>
+    <# Places Quietpane will never move, recycle, delete or restore into, whatever a finding says. #>
     param([string]$Path)
     if (-not $Path) { return $true }
     $p = ''
@@ -5115,7 +6984,7 @@ function Test-QpProtectedPath {
         (Join-Path $env:WINDIR 'System32'), (Join-Path $env:WINDIR 'SysWOW64'), (Join-Path $env:WINDIR 'WinSxS')
         (Join-Path $env:SystemDrive '\Program Files\WindowsApps')
         $env:ProgramFiles, ${env:ProgramFiles(x86)}
-        $script:DataRoot
+        $script:MachineRoot, $script:UserDataRoot, $script:LegacyDataRoot
     ) | Where-Object { $_ }
     foreach ($root in $protected) {
         if ($p -eq $root -or $p.StartsWith(($root.TrimEnd('\') + '\'), [StringComparison]::OrdinalIgnoreCase)) { return $true }
@@ -5129,11 +6998,26 @@ function Test-QpFindingStillTrue {
     if (-not $Finding.Path) { return [pscustomobject]@{ Ok = $false; Why = 'This finding has no file attached, so there is nothing to act on.' } }
     if (-not (Test-Path -LiteralPath $Finding.Path -PathType Leaf)) { return [pscustomobject]@{ Ok = $false; Why = 'That file is not there any more. Run the check again.' } }
     if (Test-QpProtectedPath $Finding.Path) { return [pscustomobject]@{ Ok = $false; Why = 'That file lives in a protected Windows folder. Quietpane will not touch it - use Windows Security instead.' } }
+    if (-not (Test-QpReparseFree $Finding.Path)) { return [pscustomobject]@{ Ok = $false; Why = 'That file is a link, or behind one, so Quietpane will not touch it.' } }
     if ($Finding.Sha256) {
         $now = Get-QpFileHash $Finding.Path
         if ($now -and $now -ne $Finding.Sha256) { return [pscustomobject]@{ Ok = $false; Why = 'That file has changed since the check ran, so it may not be the same thing. Run the check again.' } }
     }
     return [pscustomobject]@{ Ok = $true; Why = '' }
+}
+
+function Copy-QpFileFresh {
+    <#
+        Copies a file's bytes into a file that did not exist a moment ago. A new file takes its owner and
+        permissions from where it lands; a moved one keeps the ones it came with, so whoever could read it
+        before still could. CreateNew also means nothing already there is ever overwritten.
+    #>
+    param([Parameter(Mandatory)][string]$From, [Parameter(Mandatory)][string]$To)
+    $in = [IO.File]::Open($From, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+    try {
+        $out = New-Object IO.FileStream($To, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+        try { $in.CopyTo($out) } finally { $out.Dispose() }
+    } finally { $in.Dispose() }
 }
 
 function Invoke-QpQuarantine {
@@ -5142,39 +7026,47 @@ function Invoke-QpQuarantine {
         to put it back. The original folder, name, times and hash are recorded.
     #>
     param([Parameter(Mandatory)]$Finding)
+    $refused = Assert-QpOperation (New-QpOperation -Kind Quarantine -Target ([string]$Finding.Path))
+    if ($refused) { return [pscustomobject]@{ Ok = $false; Status = 'Failed'; Note = 'Quarantine needs administrator rights. Press it again and say yes when Windows asks.' } }
     $check = Test-QpFindingStillTrue $Finding
     if (-not $check.Ok) { return [pscustomobject]@{ Ok = $false; Status = 'Failed'; Note = $check.Why } }
-    $root = Get-QpQuarantineRoot
-    # The quarantine folder is deliberately locked to administrators. Check we can write before moving anything.
-    try {
-        $probe = Join-Path $root ('.write-test-' + [guid]::NewGuid().ToString('N'))
-        New-Item -ItemType Directory -Path $probe -Force -ErrorAction Stop | Out-Null
-        Remove-Item -LiteralPath $probe -Force -ErrorAction SilentlyContinue
-    } catch {
-        return [pscustomobject]@{ Ok = $false; Status = 'Failed'; Note = 'The quarantine folder is locked to administrators, and Quietpane is not running as one. Start it with "Start Quietpane", which asks Windows for permission.' }
-    }
+    try { $root = Get-QpQuarantineRoot } catch { return [pscustomobject]@{ Ok = $false; Status = 'Failed'; Note = "$($_.Exception.Message) Nothing was moved." } }
+    $hash = if ($Finding.Sha256) { $Finding.Sha256 } else { Get-QpFileHash $Finding.Path }
+    if (-not $hash) { return [pscustomobject]@{ Ok = $false; Status = 'Failed'; Note = 'Quietpane could not read the file to fingerprint it, so it was left where it is.' } }
     $id = '{0}-{1}' -f (Get-QpStamp), $Finding.Id
     $dir = Join-Path $root $id
     try {
-        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        if ([IO.Directory]::Exists($dir)) { throw 'An item with that name is already in quarantine.' }
+        [void][IO.Directory]::CreateDirectory($dir)
         $src = Get-Item -LiteralPath $Finding.Path -Force
-        $hash = if ($Finding.Sha256) { $Finding.Sha256 } else { Get-QpFileHash $Finding.Path }
-        $meta = [pscustomobject]@{
-            Id = $id; OriginalPath = $src.FullName; FileName = $src.Name; Size = $src.Length
+        $meta = [ordered]@{
+            SchemaVersion = 2; Id = $id; OriginalPath = $src.FullName; FileName = $src.Name; Size = $src.Length
             Sha256 = $hash; ThreatName = $Finding.ThreatName; Family = $Finding.Family
             Severity = $Finding.Severity; Source = $Finding.Source; Confidence = $Finding.Confidence
             QuarantinedAt = (Get-Date).ToString('s'); Status = 'Quarantined'
             CreationTime = $src.CreationTime.ToString('o'); LastWriteTime = $src.LastWriteTime.ToString('o')
-            Attributes = "$($src.Attributes)"
+            Attributes = "$($src.Attributes)"; QuarantinedBySid = (Get-QpTokenSid)
         }
-        $meta | ConvertTo-Json -Depth 4 | Set-Content -Path (Join-Path $dir 'meta.json') -Encoding UTF8
-        Move-Item -LiteralPath $src.FullName -Destination (Join-Path $dir 'payload.bin') -Force -ErrorAction Stop
-        Set-ItemProperty -LiteralPath (Join-Path $dir 'payload.bin') -Name Attributes -Value 'Normal' -ErrorAction SilentlyContinue
+        foreach ($k in 'ThreatName', 'Family', 'Severity', 'Source', 'Confidence') { if ($null -ne $meta[$k]) { $meta[$k] = [string]$meta[$k] } }
+        if (-not (Write-QpTextFile -Path (Join-Path $dir 'meta.json') -Text ($meta | ConvertTo-Json -Depth 4))) { throw 'Its description could not be written.' }
+        $payload = Join-Path $dir 'payload.bin'
+        Copy-QpFileFresh -From $src.FullName -To $payload
+        if ((Get-QpFileHash $payload) -ne $hash) { throw 'The file changed as it was copied.' }
+        # Only once the locked copy is proven the same does the original go.
+        if ($src.Attributes -band [IO.FileAttributes]::ReadOnly) { [IO.File]::SetAttributes($src.FullName, ($src.Attributes -band -bnot [IO.FileAttributes]::ReadOnly)) }
+        [IO.File]::Delete($src.FullName)
         Write-QpLog "Quarantined $($src.Name). It cannot run from there, and you can put it back any time." 'OK'
         Write-QpAudit -FindingId $Finding.Id -Action 'Quarantine' -Result 'Quarantined' -Object $src.FullName -Note $id
         [pscustomobject]@{ Ok = $true; Status = 'Quarantined'; Note = "Moved into Quietpane's quarantine. You can restore it from the Safety scan tab."; QuarantineId = $id }
     } catch {
-        Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue
+        # Only ever what this call itself made, and never through a link - and the copy only while the
+        # original is still where it was.
+        try {
+            if ([IO.Directory]::Exists($dir) -and -not ([IO.File]::GetAttributes($dir) -band [IO.FileAttributes]::ReparsePoint) -and ([IO.File]::Exists([string]$Finding.Path) -or -not [IO.File]::Exists((Join-Path $dir 'payload.bin')))) {
+                foreach ($f in [IO.Directory]::GetFiles($dir)) { [IO.File]::Delete($f) }
+                [IO.Directory]::Delete($dir)
+            }
+        } catch { }
         $why = Get-QpFailureReason $_.Exception
         Write-QpLog "Could not quarantine $($Finding.Path): $why" 'ERROR'
         Write-QpAudit -FindingId $Finding.Id -Action 'Quarantine' -Result 'Failed' -Object $Finding.Path -Note $_.Exception.Message
@@ -5182,69 +7074,107 @@ function Invoke-QpQuarantine {
     }
 }
 
-function Get-QpQuarantineItems {
-    $root = Join-Path $script:DataRoot 'quarantine'
-    if (-not (Test-Path $root)) { return @() }
-    @(Get-ChildItem -Path $root -Directory -ErrorAction SilentlyContinue | Sort-Object Name -Descending | ForEach-Object {
-        $metaFile = Join-Path $_.FullName 'meta.json'
-        if (-not (Test-Path $metaFile)) { return }
+function Get-QpLegacyQuarantine {
+    <#
+        Files quarantined before 2.1, for reference only, named from their folder names. Their folder sat
+        where any account on this PC could write (and could be owned by one), so nothing in them is
+        opened, put back or deleted by Quietpane - they stay exactly where they are. Only listed with
+        administrator rights, once the store has been checked.
+    #>
+    if (-not (Test-QpAdmin)) { return @() }
+    try { [void](Get-QpMachineStorePath) } catch { return @() }
+    $out = New-Object System.Collections.ArrayList
+    foreach ($root in (Join-Path $script:MachineVerified 'quarantine'), (Join-Path $script:LegacyDataRoot 'quarantine')) {
         try {
-            $m = Get-Content $metaFile -Raw | ConvertFrom-Json
-            $payload = Join-Path $_.FullName 'payload.bin'
-            [pscustomobject]@{
-                Id = $m.Id; FileName = $m.FileName; OriginalPath = $m.OriginalPath; Size = [int64]$m.Size
-                Sha256 = $m.Sha256; ThreatName = $m.ThreatName; Severity = $m.Severity; Source = $m.Source
-                QuarantinedAt = $m.QuarantinedAt; Folder = $_.FullName; HasPayload = (Test-Path $payload)
+            if (-not [IO.Directory]::Exists($root) -or -not (Test-QpReparseFree $root)) { continue }
+            foreach ($d in @([IO.Directory]::GetDirectories($root) | Sort-Object -Descending | Select-Object -First 500)) {
+                if ([IO.File]::GetAttributes($d) -band [IO.FileAttributes]::ReparsePoint) { continue }
+                $name = [IO.Path]::GetFileName($d)
+                [void]$out.Add([pscustomobject]@{
+                    Ok = $false; Legacy = $true; Id = $name; FileName = $name; Folder = $d; OriginalPath = ''; HasPayload = $false
+                    Reason = "an older Quietpane kept it in a folder it can't vouch for. It is still in $d"
+                })
             }
         } catch { }
-    })
+    }
+    return @($out)
+}
+
+function Get-QpQuarantineItems {
+    <#
+        What is in quarantine - with administrator rights only. An ordinary Quietpane never looks: it
+        shows a button that asks for them instead. Items that don't pass Read-QpQuarantineItem are listed
+        as ones that can't be checked, and nothing is done to them; so are the ones from before 2.1.
+    #>
+    if (-not (Test-QpAdmin)) { return @() }
+    $items = @()
+    try {
+        $root = Get-QpQuarantineRoot
+        $items = @([IO.Directory]::GetDirectories($root) | Sort-Object -Descending | Select-Object -First 500 | ForEach-Object { Read-QpQuarantineItem -Folder $_ -Root $root })
+    } catch { Write-QpLog $_.Exception.Message 'WARN' }
+    return @($items) + @(Get-QpLegacyQuarantine)
 }
 
 function Restore-QpQuarantineItem {
-    <# Puts a quarantined file back exactly where it was, but only if it is still byte-for-byte the same. #>
+    <#
+        Puts a quarantined file back exactly where it was - only if the item checks out, it is still
+        byte-for-byte the same, where it goes is a sensible place on a local drive (not Windows, not
+        Program Files, not Quietpane's own folders, not another account's files), the folder it goes
+        back into is there and no link is on the way, and nothing is already there.
+    #>
     param([Parameter(Mandatory)][string]$Id)
+    if (Assert-QpOperation (New-QpOperation -Kind Quarantine -Target $Id)) { return [pscustomobject]@{ Ok = $false; Status = 'Failed'; Note = 'That needs administrator rights.' } }
     $item = @(Get-QpQuarantineItems | Where-Object { $_.Id -eq $Id }) | Select-Object -First 1
     if (-not $item) { return [pscustomobject]@{ Ok = $false; Status = 'Failed'; Note = 'That quarantined item is no longer there.' } }
+    if (-not $item.Ok) { return [pscustomobject]@{ Ok = $false; Status = 'Failed'; Note = "That item can't be checked, so Quietpane left it alone: $($item.Reason)." } }
     $payload = Join-Path $item.Folder 'payload.bin'
-    if (-not (Test-Path $payload)) { return [pscustomobject]@{ Ok = $false; Status = 'Failed'; Note = 'The quarantined file is missing.' } }
-    if ($item.Sha256) {
-        $now = Get-QpFileHash $payload
-        if ($now -and $now -ne $item.Sha256) {
-            Write-QpAudit -FindingId $Id -Action 'Restore' -Result 'Failed' -Object $item.OriginalPath -Note 'hash mismatch'
-            return [pscustomobject]@{ Ok = $false; Status = 'Failed'; Note = 'The quarantined file does not match what was stored, so it was left alone.' }
-        }
+    if (-not $item.HasPayload) { return [pscustomobject]@{ Ok = $false; Status = 'Failed'; Note = 'The quarantined file is missing.' } }
+    $fail = { param($note) Write-QpAudit -FindingId $Id -Action 'Restore' -Result 'Failed' -Object $item.OriginalPath -Note $note; [pscustomobject]@{ Ok = $false; Status = 'Failed'; Note = $note } }
+    if (-not $item.Sha256) { return (& $fail 'It has no fingerprint to check it against, so it was left in quarantine.') }
+    if ((Get-QpFileHash $payload) -ne $item.Sha256) { return (& $fail 'The quarantined file does not match what was stored, so it was left alone.') }
+    $dest = Get-QpCanonicalPath $item.OriginalPath
+    if (-not $dest) { return (& $fail 'Where it came from is not written the way Quietpane writes it, so it was left in quarantine.') }
+    try { $drive = New-Object IO.DriveInfo ([IO.Path]::GetPathRoot($dest)) } catch { $drive = $null }
+    if (-not $drive -or $drive.DriveType -ne 'Fixed') { return (& $fail 'It came from a drive that is not a local disk, so it was left in quarantine.') }
+    if (Test-QpProtectedPath $dest) { return (& $fail 'It would go back into a protected folder, so it was left in quarantine.') }
+    $users = Split-Path ([Environment]::GetFolderPath('UserProfile')) -Parent
+    if ((Test-QpPathUnder $dest $users) -and -not (Test-QpPathUnder $dest ([Environment]::GetFolderPath('UserProfile')))) {
+        return (& $fail "It came from another account's files, so it was left in quarantine. That account can ask an administrator to restore it.")
     }
+    $parent = Split-Path $dest -Parent
+    if (-not [IO.Directory]::Exists($parent)) { return (& $fail "The folder it came from is not there any more ($parent), so it was left in quarantine.") }
+    if (-not (Test-QpReparseFree $parent)) { return (& $fail 'The folder it came from is behind a link, so it was left in quarantine.') }
+    if (Test-Path -LiteralPath $dest) { return (& $fail "Something is already at $dest, so nothing was overwritten.") }
     try {
-        $dest = $item.OriginalPath
-        $parent = Split-Path $dest -Parent
-        if (-not (Test-Path $parent)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
-        if (Test-Path -LiteralPath $dest) { return [pscustomobject]@{ Ok = $false; Status = 'Failed'; Note = "Something is already at $dest, so nothing was overwritten." } }
-        Move-Item -LiteralPath $payload -Destination $dest -ErrorAction Stop
-        $meta = Get-Content (Join-Path $item.Folder 'meta.json') -Raw | ConvertFrom-Json
+        Copy-QpFileFresh -From $payload -To $dest
+        if ((Get-QpFileHash $dest) -ne $item.Sha256) { [IO.File]::Delete($dest); throw 'It did not come back out intact, so it was left in quarantine.' }
         try {
             $f = Get-Item -LiteralPath $dest -Force
             # Saved in the round-trip format; read back the same way whatever the PC's language and calendar.
-            $f.CreationTime = [datetime]::Parse($meta.CreationTime, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)
-            $f.LastWriteTime = [datetime]::Parse($meta.LastWriteTime, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)
+            $f.CreationTime = [datetime]::Parse($item.CreationTime, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)
+            $f.LastWriteTime = [datetime]::Parse($item.LastWriteTime, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)
         } catch { }
-        Remove-Item -LiteralPath $item.Folder -Recurse -Force -ErrorAction SilentlyContinue
+        # Tidy up the item's own two files and its folder - named one by one, never a recursive delete.
+        try { [IO.File]::Delete($payload); [IO.File]::Delete((Join-Path $item.Folder 'meta.json')); [IO.Directory]::Delete($item.Folder) } catch { }
         Write-QpLog "Restored $($item.FileName) to $dest" 'OK'
         Write-QpAudit -FindingId $Id -Action 'Restore' -Result 'Restored' -Object $dest
         [pscustomobject]@{ Ok = $true; Status = 'Restored'; Note = "Put back at $dest. Your antivirus may catch it again straight away." }
     } catch {
-        Write-QpAudit -FindingId $Id -Action 'Restore' -Result 'Failed' -Object $item.OriginalPath -Note $_.Exception.Message
-        [pscustomobject]@{ Ok = $false; Status = 'Failed'; Note = $_.Exception.Message }
+        return (& $fail $_.Exception.Message)
     }
 }
 
 function Remove-QpQuarantineItem {
-    <# Deletes a quarantined file for good. There is no undo, and the window asks first. #>
+    <# Deletes a quarantined file for good - only an item that checks out, file by file, never through a link. There is no undo, and the window asks first. #>
     param([Parameter(Mandatory)][string]$Id, [switch]$Force)
     if (-not $Force) { return [pscustomobject]@{ Ok = $false; Status = 'Failed'; Note = 'Permanent deletion has to be confirmed.' } }
+    if (Assert-QpOperation (New-QpOperation -Kind Quarantine -Target $Id)) { return [pscustomobject]@{ Ok = $false; Status = 'Failed'; Note = 'That needs administrator rights.' } }
     $item = @(Get-QpQuarantineItems | Where-Object { $_.Id -eq $Id }) | Select-Object -First 1
     if (-not $item) { return [pscustomobject]@{ Ok = $false; Status = 'Failed'; Note = 'That quarantined item is no longer there.' } }
+    if (-not $item.Ok) { return [pscustomobject]@{ Ok = $false; Status = 'Failed'; Note = "That item can't be checked, so Quietpane left it alone: $($item.Reason)." } }
     try {
-        Remove-Item -LiteralPath $item.Folder -Recurse -Force -ErrorAction Stop
+        foreach ($n in 'payload.bin', 'meta.json') { $f = Join-Path $item.Folder $n; if ([IO.File]::Exists($f)) { [IO.File]::Delete($f) } }
+        [IO.Directory]::Delete($item.Folder)
         Write-QpLog "Deleted $($item.FileName) for good. This one cannot be undone." 'OK'
         Write-QpAudit -FindingId $Id -Action 'DeletePermanently' -Result 'Deleted' -Object $item.OriginalPath -Note 'from quarantine'
         [pscustomobject]@{ Ok = $true; Status = 'Removed'; Note = 'Deleted for good.' }
@@ -5265,9 +7195,9 @@ function Invoke-QpRemediate {
         return [pscustomobject]@{ Id = $Finding.Id; Action = $Action; Status = 'Allowed'; Ok = $true; Note = 'Left in place at your request.' }
     }
     if ($Action -in 'Quarantine', 'RecycleBin', 'Delete') {
-        if (-not (Test-QpAdmin)) {
+        if (Assert-QpOperation (New-QpOperation -Kind Remediate -Target ([string]$Finding.Path))) {
             Write-QpAudit -FindingId $Finding.Id -Action $Action -Result 'Failed' -Object $Finding.Path -Note 'not running as administrator'
-            return [pscustomobject]@{ Id = $Finding.Id; Action = $Action; Status = 'Failed'; Ok = $false; Note = 'Quietpane needs administrator rights for this. Start it again with "Start Quietpane", which asks Windows for permission.' }
+            return [pscustomobject]@{ Id = $Finding.Id; Action = $Action; Status = 'Failed'; Ok = $false; Note = 'That needs administrator rights. Press it again and say yes when Windows asks - Quietpane reopens with them, and you run the check again there.' }
         }
         if ($Action -eq 'Quarantine') {
             $r = Invoke-QpQuarantine -Finding $Finding
@@ -5309,10 +7239,10 @@ function Invoke-QpRemediate {
         Write-QpAudit -FindingId $Finding.Id -Action 'Remove' -Result 'Failed' -Object $Finding.Path -Note 'Defender remediation unavailable'
         return [pscustomobject]@{ Id = $Finding.Id; Action = $Action; Status = 'Failed'; Ok = $false; Note = 'Defender cannot be asked to remove anything on this PC.' }
     }
-    if (-not (Test-QpAdmin)) {
+    if (Assert-QpOperation (New-QpOperation -Kind Remediate -Target ([string]$Finding.Path))) {
         Write-QpLog 'Administrator rights are needed before Defender will remove anything. Nothing was changed.' 'WARN'
         Write-QpAudit -FindingId $Finding.Id -Action 'Remove' -Result 'Failed' -Object $Finding.Path -Note 'not running as administrator'
-        return [pscustomobject]@{ Id = $Finding.Id; Action = $Action; Status = 'Failed'; Ok = $false; Note = 'Quietpane needs administrator rights for this. Close it and start it again with "Start Quietpane", which asks Windows for permission.' }
+        return [pscustomobject]@{ Id = $Finding.Id; Action = $Action; Status = 'Failed'; Ok = $false; Note = 'That needs administrator rights. Press it again and say yes when Windows asks - Quietpane reopens with them, and you run the check again there.' }
     }
     Write-QpLog "Asking Defender to deal with $($Finding.ThreatName)" 'STEP'
     $hadFile = $Finding.Path -and (Test-Path -LiteralPath $Finding.Path)
@@ -5366,7 +7296,7 @@ function New-QpScanSummary {
     #>
     param(
         $Counts, $Tally, [int]$Scanned = 0, [int]$Seconds = 0,
-        [int]$Outstanding = 0, [bool]$IsAdmin = $true, [bool]$Cancelled = $false
+        [int]$Outstanding = 0, [bool]$IsAdmin = $true, [bool]$Cancelled = $false, [string[]]$NotVisible = @()
     )
     $num = {
         param($bag, $key)
@@ -5400,11 +7330,13 @@ function New-QpScanSummary {
     if ($left)    { $done += "$left left alone on purpose" }
     if ($failed)  { $done += "$failed that did not work" }
     if ($done.Count) { $lines += 'Dealt with: ' + (($done -join ', ') -replace ', ([^,]+)$', ' and $1') + '.' }
+    $hidden = @($NotVisible | Where-Object { $_ })
+    if ($hidden.Count -and -not $Cancelled) { $lines += 'Needs admin rights to check: ' + (($hidden -join ', ') -replace ', ([^,]+)$', ' and $1') + '.' }
 
     $next = if ($Cancelled) {
         'Next: run the check again when you have a few minutes, so nothing is missed.'
     } elseif ($failed -gt 0 -and -not $IsAdmin) {
-        'Next: some actions did not work because Quietpane was not started as administrator. Close it, start it again with "Start Quietpane", and try those again.'
+        'Next: some actions need admin rights. Press them again and say yes when Windows asks - Quietpane reopens with them, then run the check again there.'
     } elseif ($Outstanding -gt 0) {
         'Next: deal with the {0} serious item{1} above. "Remove it" is the safest start - Defender keeps its own copy, and quarantine can be undone.' -f $Outstanding, $(if ($Outstanding -eq 1) { '' } else { 's' })
     } elseif ($failed -gt 0) {
@@ -5426,6 +7358,9 @@ function Invoke-QpAudit {
 
     $findings = New-Object System.Collections.ArrayList
     $isAdmin = Test-QpAdmin
+    # What this check could not see without administrator rights, named one by one for the report.
+    $notVisible = New-Object System.Collections.ArrayList
+    if (-not $isAdmin) { [void]$notVisible.Add('system tasks Windows hides from ordinary accounts') }
     $sw = [Diagnostics.Stopwatch]::StartNew()
     $scanned = 0          # how many things have been looked at, for the progress line
     $defender = $null
@@ -5597,7 +7532,10 @@ function Invoke-QpAudit {
                 $detail += "`nTask created: $(Get-QpStamp 'yyyy-MM-dd HH:mm:ss' $created)"
                 $near = Get-NearbyFolders $created
                 if ($near.Count) { $detail += "`nFolders created within 3 minutes of this task (likely source):`n  " + ($near -join "`n  ") }
-            } elseif (-not $isAdmin) { $detail += "`n(Run as administrator to see when it was created and what was installed at the same time.)" }
+            } elseif (-not $isAdmin) {
+                $detail += "`n(When it was created, and what was installed at the same time, needs admin rights to check.)"
+                if ($notVisible -notcontains 'when suspicious tasks were created') { [void]$notVisible.Add('when suspicious tasks were created') }
+            }
             Add-Finding 'Scheduled tasks' 'High' "Suspicious scheduled task: $id" $detail
         } elseif ($t.TaskPath -notlike '\Microsoft\*') {
             Add-Finding 'Scheduled tasks' 'Info' "Third-party task: $id" "Action: $actions`nState: $($t.State)"
@@ -5613,10 +7551,13 @@ function Invoke-QpAudit {
             Add-Finding 'Startup & persistence' 'High' "WMI event consumer: $($_.Name)" ("{0}{1}" -f $_.CommandLineTemplate, $_.ScriptText)
         }
     }
-    Get-ChildItem 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options' -ErrorAction SilentlyContinue | ForEach-Object {
+    $ifeoDenied = @()
+    Get-ChildItem 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options' -ErrorAction SilentlyContinue -ErrorVariable ifeoDenied | ForEach-Object {
         $dbg = (Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue).Debugger
         if ($dbg) { Add-Finding 'Startup & persistence' 'Medium' "Program hijack (IFEO debugger) on $($_.PSChildName)" "Runs instead: $dbg" }
     }
+    $ifeoDenied = @($ifeoDenied | Where-Object { Test-QpAccessDenied $_ })
+    if ($ifeoDenied.Count) { [void]$notVisible.Add($(if ($ifeoDenied.Count -eq 1) { '1 program-hijack setting Windows keeps from ordinary accounts' } else { "$($ifeoDenied.Count) program-hijack settings Windows keeps from ordinary accounts" })) }
     $wl = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon' -ErrorAction SilentlyContinue
     if ($wl.Shell -and $wl.Shell -notmatch '^\s*explorer\.exe\s*$') { Add-Finding 'Startup & persistence' 'High' 'Winlogon shell has been changed' "Shell = $($wl.Shell)" }
     if ($wl.Userinit -and $wl.Userinit -notmatch '^\s*C:\\Windows\\system32\\userinit\.exe,?\s*$') { Add-Finding 'Startup & persistence' 'High' 'Winlogon Userinit has been changed' "Userinit = $($wl.Userinit)" }
@@ -5786,6 +7727,7 @@ function Invoke-QpAudit {
         $lastFull = if ($mp.FullScanEndTime) { Get-QpStamp 'yyyy-MM-dd' $mp.FullScanEndTime } else { 'never' }
         Add-Finding 'Security' 'Info' 'Microsoft Defender status' ("Real-time protection: {0}`nDefinitions updated: {1:yyyy-MM-dd}`nLast full scan: {2}" -f $mp.RealTimeProtectionEnabled, $mp.AntivirusSignatureLastUpdated, $lastFull)
     }
+    if (-not $isAdmin) { [void]$notVisible.Add("Microsoft Defender's exclusions") }
     if ($isAdmin) {
         $pref = Get-MpPreference -ErrorAction SilentlyContinue
         foreach ($x in @($pref.ExclusionPath) | Where-Object { $_ }) {
@@ -5832,7 +7774,9 @@ function Invoke-QpAudit {
     if (Test-QpCancelled) { return (New-Stopped) }
     Write-Step 13 'Measuring space you could free up'
     Write-QpLog 'Measuring reclaimable space...' 'INFO'
-    $targets = @(Get-QpCleanupTargets | Where-Object SizeBytes -gt 0)
+    $cleanTargets = @(Get-QpCleanupTargets)
+    if (@($cleanTargets | Where-Object { $_.Availability -eq 'NeedsAdmin' }).Count) { [void]$notVisible.Add("the size of Windows' own temporary files") }
+    $targets = @($cleanTargets | Where-Object { $_.SizeBytes -gt 0 })
     if ($targets.Count) { Add-Finding 'Disk space' 'Info' ("Reclaimable with the Clean-up tab: about {0}" -f (Format-QpBytes (($targets | Measure-Object SizeBytes -Sum).Sum))) (($targets | ForEach-Object { '{0,10}  {1}' -f (Format-QpBytes $_.SizeBytes), $_.Title }) -join "`n") }
     if (Test-Path 'C:\Windows.old') { Add-Finding 'Disk space' 'Info' 'C:\Windows.old exists (previous Windows version)' 'Remove it with Settings > System > Storage > Temporary files > "Previous Windows installation(s)".' }
 
@@ -5845,7 +7789,7 @@ function Invoke-QpAudit {
         if (Test-QpCancelled) { $abort = $true; break }
         Write-Step 14 'Looking for folders left behind' $r
         Get-ChildItem -Path $r -Directory -Force -ErrorAction SilentlyContinue |
-            Where-Object { $_.LastWriteTime -lt $cutoff -and $_.CreationTime -lt $cutoff -and $_.Name -notmatch '^(Microsoft|Packages|Temp|Comms|ConnectedDevicesPlatform|Programs|Application Data|History|Temporary Internet Files|Package Cache|USOPrivate|USOShared|ssh|regid\..*|Desktop|Documents|Start Menu|Templates|Favorites|VirtualStore|Publishers|PlaceholderTileLogoFolder)$' } |
+            Where-Object { $_.LastWriteTime -lt $cutoff -and $_.CreationTime -lt $cutoff -and $_.Name -notmatch '^(Microsoft|Packages|Temp|Comms|ConnectedDevicesPlatform|Programs|Application Data|History|Temporary Internet Files|Package Cache|USOPrivate|USOShared|ssh|regid\..*|Desktop|Documents|Start Menu|Templates|Favorites|VirtualStore|Publishers|PlaceholderTileLogoFolder)$' -and -not (Test-QpSamePath $_.FullName $script:MachineRoot) } |
             ForEach-Object {
                 $dir = $_
                 $scanned++
@@ -5868,7 +7812,7 @@ function Invoke-QpAudit {
     $counts = [ordered]@{}
     foreach ($s in 'Critical', 'High', 'Medium', 'Low', 'Info') { $counts[$s] = @($findings | Where-Object { $_.Severity -eq $s }).Count }
     $high = $counts['High']; $med = $counts['Medium']
-    $html = New-QpReportHtml -Findings $findings -Counts $counts -IsAdmin $isAdmin -Scanned $scanned
+    $html = New-QpReportHtml -Findings $findings -Counts $counts -IsAdmin $isAdmin -Scanned $scanned -NotVisible @($notVisible)
     try {
         $dir = Split-Path -Path $OutFile -Parent
         if ($dir -and -not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
@@ -5886,6 +7830,7 @@ function Invoke-QpAudit {
         Defender = $defender
         Report = $OutFile
         Scanned = $scanned; Seconds = [int]$sw.Elapsed.TotalSeconds; Cancelled = $false
+        NotVisible = @($notVisible)
     }
 }
 
@@ -6109,7 +8054,7 @@ footer{border-top:1px solid var(--line);margin-top:32px;padding:16px 0;color:var
 '@
 
 function New-QpReportHtml {
-    param($Findings, [System.Collections.IDictionary]$Counts, [bool]$IsAdmin, [int]$Scanned = 0)
+    param($Findings, [System.Collections.IDictionary]$Counts, [bool]$IsAdmin, [int]$Scanned = 0, [string[]]$NotVisible = @())
     $enc = { param($s) [System.Net.WebUtility]::HtmlEncode([string]$s) }
     # The logo is embedded as a data URI so the report makes no network requests at all
     # (no web fonts, no CDNs, no images from the internet).
@@ -6139,9 +8084,11 @@ $($script:ReportCss)
 "@)
     if ($logo) { [void]$sb.Append(('<img src="{0}" alt="KomodoWorks emblem">' -f $logo)) }
     [void]$sb.Append(('<div><h1>Quietpane &ndash; scan report</h1><p class="by">Developed by <a href="{0}" rel="noopener noreferrer">KomodoWorks.com</a></p></div></div></header><main><div class="wrap">' -f $brandUrl))
-    $adminNote = if (-not $IsAdmin) { ' &middot; run as administrator for the full scan' } else { '' }
     $lookedAt = if ($Scanned -gt 0) { ' &middot; {0:N0} things looked at' -f $Scanned } else { '' }
-    [void]$sb.Append(('<p class="meta">{0} &middot; version {1} &middot; read-only scan, nothing was changed{2}{3}</p>' -f (Get-QpStamp 'yyyy-MM-dd HH:mm'), $script:AppVersion, $lookedAt, $adminNote))
+    [void]$sb.Append(('<p class="meta">{0} &middot; version {1} &middot; read-only scan, nothing was changed{2}</p>' -f (Get-QpStamp 'yyyy-MM-dd HH:mm'), $script:AppVersion, $lookedAt))
+    # Exactly what this check could not see without administrator rights - never a vague "partial scan".
+    $hidden = @($NotVisible | Where-Object { $_ })
+    if ($hidden.Count) { [void]$sb.Append('<p class="meta">Needs admin rights to check: ' + (& $enc (($hidden -join ', ') -replace ', ([^,]+)$', ' and $1')) + '.</p>') }
     # Severity doughnut plus a written legend: the chart never carries meaning through colour alone.
     $colours = @{ Critical = '#7b1d1d'; High = '#a83232'; Medium = '#9a6700'; Low = '#6e695c'; Info = '#117a68' }   # all pass WCAG AA under white text
     $meaning = @{ Critical = 'act now'; High = 'act on it'; Medium = 'worth a look'; Low = 'minor'; Info = 'just so you know' }
@@ -6179,6 +8126,123 @@ $($script:ReportCss)
 
 #endregion
 
+#region ---------------------------------------------------------------- asking Windows for administrator rights
+
+# When a change needs administrator rights, the window asks Windows to open a second Quietpane with them,
+# on the same tab, with the same choices ticked. What travels on that command line is a closed vocabulary:
+# the script's own path (which Windows never lets contain a quote), then a handful of named values that
+# can only ever be letters, digits and a few safe marks. Nothing is escaped, because nothing needs to be:
+# a value outside its vocabulary is refused before anything is started. The ticked choices go as base64url
+# (letters, digits, '-' and '_'). None of it runs anything: the new window only shows what was asked for,
+# and nothing changes until the person presses the button again.
+
+$script:TabKeys = @('home', 'health', 'scan', 'privacy', 'vendors', 'apps', 'cleanup', 'undo', 'about')
+$script:PendingIds = @('apply', 'oneclick', 'undo', 'quarantine', 'shortcut', 'signin', 'putback', 'vendorremove', 'scan')
+# Which lists of tick boxes belong to which tab.
+$script:TickListsByTab = @{
+    privacy = @('privacy', 'devices', 'extensions'); vendors = @('vendors', 'junk')
+    apps = @('startup', 'apps', 'deprovision'); cleanup = @('cleanup')
+}
+# \A and \z, never ^ and $: in .NET, $ also matches just before a final newline, which would let
+# "apply" followed by a line break through.
+$script:ElevationArgRules = [ordered]@{
+    ForUser = '\AS-1-[0-9]{1,3}(-[0-9]{1,10}){1,14}\z'
+    Tab     = '\A(' + ($script:TabKeys -join '|') + ')\z'
+    Tick    = '\A[A-Za-z0-9_-]{1,24000}\z'
+    Pending = '\A(' + ($script:PendingIds -join '|') + ')\z'
+    Handoff = '\A[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\z'
+}
+$script:ElevationSwitches = @('Elevated')
+
+function Test-QpSafeScriptPath([string]$Path) {
+    # A full local path to a .ps1, spelled exactly as Windows spells it. Windows paths cannot hold a quote.
+    return [bool]((Get-QpCanonicalPath $Path) -and $Path -notmatch '["\x00-\x1F]' -and $Path -match '(?i)\.ps1$')
+}
+
+function ConvertTo-QpArgumentString {
+    <#
+        The one command line Quietpane hands Windows when it asks for administrator rights. The fixed
+        start is the same as a double-click on "Start Quietpane"; then -File and the script's path in
+        quotes; then each named value, which must match its rule exactly. Anything else - a quote, a
+        backslash, an empty value, an unknown name - makes it throw, and nothing is started.
+    #>
+    param([Parameter(Mandatory)][string]$Script, [System.Collections.IDictionary]$Named = @{}, [string[]]$Switches = @())
+    if (-not (Test-QpSafeScriptPath $Script)) { throw "Quietpane won't start $Script with administrator rights: its path is not one it can pass on safely." }
+    $parts = New-Object System.Collections.Generic.List[string]
+    foreach ($x in '-NoProfile', '-ExecutionPolicy', 'Bypass', '-STA', '-WindowStyle', 'Hidden', '-File', ('"' + $Script + '"')) { $parts.Add($x) }
+    foreach ($k in @($Named.Keys)) {
+        $rule = $script:ElevationArgRules[[string]$k]
+        if (-not $rule -or @($script:ElevationArgRules.Keys) -cnotcontains [string]$k) { throw "Quietpane doesn't pass -$k on." }
+        $v = [string]$Named[$k]
+        if ($v -cnotmatch $rule) { throw "Quietpane won't pass that value for -$k on." }
+        $parts.Add('-' + $k); $parts.Add($v)
+    }
+    foreach ($s in @($Switches | Where-Object { $_ })) {
+        if ($script:ElevationSwitches -cnotcontains $s) { throw "Quietpane doesn't pass -$s on." }
+        $parts.Add('-' + $s)
+    }
+    return ($parts -join ' ')
+}
+
+function ConvertTo-QpTickList {
+    <# Ticked choices, as (list, id) pairs, packed as base64url. '' when there are none. #>
+    param([object[]]$Pairs)
+    Add-Type -AssemblyName System.Web.Extensions
+    $list = New-Object 'System.Collections.Generic.List[string[]]'
+    foreach ($pair in @($Pairs | Where-Object { $_ })) { $list.Add([string[]]@([string]$pair[0], [string]$pair[1])) }
+    if (-not $list.Count) { return '' }
+    $json = (New-Object System.Web.Script.Serialization.JavaScriptSerializer).Serialize($list)
+    return ([Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($json)).TrimEnd('=').Replace('+', '-').Replace('/', '_'))
+}
+
+function ConvertFrom-QpTickList {
+    <#
+        The ticked choices back, as untrusted input: base64url only; a list of at most 200 pairs of text;
+        each list name one that belongs to the tab; each id at most 400 characters with nothing unprintable.
+        Whatever doesn't fit is dropped. Whether an id is really on screen is for the window to check.
+    #>
+    param([string]$Text, [string]$Tab)
+    $keep = New-Object System.Collections.ArrayList
+    $dropped = 0
+    if (-not $Text) { return [pscustomobject]@{ Pairs = @(); Dropped = 0 } }
+    if ($Text -cnotmatch $script:ElevationArgRules.Tick) { return [pscustomobject]@{ Pairs = @(); Dropped = 1 } }
+    $allowed = @($script:TickListsByTab[$Tab])
+    try {
+        $b64 = $Text.Replace('-', '+').Replace('_', '/')
+        $b64 += '=' * ((4 - $b64.Length % 4) % 4)
+        $d = ConvertFrom-QpStrictJson -Text ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($b64))) -MaxBytes 64KB
+    } catch { return [pscustomobject]@{ Pairs = @(); Dropped = 1 } }
+    if (-not (Test-QpJsonShape $d 'array')) { return [pscustomobject]@{ Pairs = @(); Dropped = 1 } }
+    foreach ($pair in @($d | Select-Object -First 200)) {
+        if (-not (Test-QpJsonShape $pair 'array') -or $pair.Count -ne 2 -or -not ($pair[0] -is [string]) -or -not ($pair[1] -is [string])) { $dropped++; continue }
+        if ($allowed -cnotcontains $pair[0] -or $pair[1].Length -lt 1 -or $pair[1].Length -gt 400 -or $pair[1] -match '[\x00-\x1F]') { $dropped++; continue }
+        [void]$keep.Add([pscustomobject]@{ List = $pair[0]; Id = $pair[1] })
+    }
+    $dropped += [math]::Max(0, @($d).Count - 200)
+    return [pscustomobject]@{ Pairs = @($keep); Dropped = $dropped }
+}
+
+function Test-QpElevationArguments {
+    <#
+        What a Quietpane opened with administrator rights was asked to show, checked value by value and
+        never trusted: the account it works for (a SID, or '' for "not known"), the tab (Home if unknown),
+        the ticked choices (only those that belong to that tab) and the note to show (or none). Nothing
+        here can start a change - these only choose what the window looks like.
+    #>
+    param([string]$ForUser, [string]$Tab, [string]$Tick, [string]$Pending)
+    $sid = ''
+    if ($ForUser -and $ForUser -cmatch $script:ElevationArgRules.ForUser) { try { $sid = (New-Object Security.Principal.SecurityIdentifier($ForUser)).Value } catch { $sid = '' } }
+    $tabKey = if ($Tab -and $script:TabKeys -ccontains $Tab) { $Tab } else { 'home' }
+    $ticks = ConvertFrom-QpTickList -Text $Tick -Tab $tabKey
+    [pscustomobject]@{
+        RequesterSid = $sid
+        Tab = $tabKey
+        Ticks = @($ticks.Pairs); Dropped = $ticks.Dropped
+        Pending = $(if ($Pending -and $script:PendingIds -ccontains $Pending) { $Pending } else { '' })
+    }
+}
+
+#endregion
 Export-ModuleMember -Function Get-QpInfo, Set-QpLogSink, Write-QpLog, Test-QpAdmin, Get-QpCatalog, Format-QpBytes, Format-QpRate,
     Set-QpProgressSink, Write-QpProgress, Set-QpCancelCheck, Test-QpCancelled, New-QpScanSummary,
     Get-QpState, Get-QpSystemUsage, Get-QpTotals, New-QpLiveMonitor, Get-QpLiveReading, Get-QpHeatWord, Get-QpTempUnit, Set-QpTempUnit, Format-QpTemp, Get-QpLiveVerdict, Get-QpSystemFacts, ConvertTo-QpSystemFacts, ConvertFrom-QpPowerCfg,
@@ -6208,6 +8272,17 @@ Export-ModuleMember -Function Get-QpInfo, Set-QpLogSink, Write-QpLog, Test-QpAdm
     Get-QpRegValue, Get-QpTasksByPath, Get-QpTasksMatching, Get-QpStamp, Split-QpFindingDetail,
     Get-QpDefenderState, Get-QpDefenderFindings, Invoke-QpThreatScan, Invoke-QpRemediate, Get-QpAllowList, Resolve-QpThreatInfo, New-QpFinding,
     New-QpDonutSvg, New-QpReportHtml, Get-QpFileHash,
+    Set-QpActor, Get-QpActor, Test-QpSameUser, Get-QpTokenSid, Get-QpAccountName, Get-QpAccountMessage, Test-QpAccessDenied,
+    Get-QpCanonicalPath, Test-QpPathUnder, Test-QpReparseFree, Find-QpReparseInTree,
+    Test-QpUserStoreWritable, Write-QpTextFile, Read-QpTextFile, Get-QpUserStorePath, Invoke-QpPreferenceMigration,
+    ConvertTo-QpRegTarget, Test-QpRegistryWritable, New-QpOperation, Get-QpOperationPolicy, Get-QpItemPolicy, Get-QpActionOperations,
+    Get-QpAppOperations, Get-QpStartupOperations, Get-QpDeviceOperations, Get-QpExtensionOperations, Get-QpCleanupOperations,
+    Get-QpManifestLevel, Get-QpUninstallPrivilege, Test-QpBatchPlan, Invoke-QpPreflight, Assert-QpOperation, Get-QpOutcomeSummary,
+    New-QpAdminOnlySecurity, Test-QpAdminOnlyAcl, Protect-QpMachineStore, Get-QpMachineStorePath, Test-QpRestoreDestination,
+    Test-QpJsonKeysUnique, ConvertFrom-QpStrictJson, Test-QpJsonShape, Test-QpJsonFields,
+    Read-QpRestorePoint, Test-QpUndoEntry, Get-QpLegacyRestorePoints, Get-QpOptionPolicies, Get-QpItemStatus,
+    Get-QpQuarantineRoot, Get-QpLegacyQuarantine, Copy-QpFileFresh, Read-QpQuarantineItem, Get-QpVsCodeSettingsPath, Test-QpActionApplied,
+    ConvertTo-QpArgumentString, ConvertTo-QpTickList, ConvertFrom-QpTickList, Test-QpElevationArguments, Test-QpSafeScriptPath,
     Invoke-QpQuarantine, Get-QpQuarantineItems, Restore-QpQuarantineItem, Remove-QpQuarantineItem, Test-QpProtectedPath, Test-QpFindingStillTrue,
     Get-QpRecommendedPlan, Invoke-QpRecommended,
     Invoke-QpAudit
