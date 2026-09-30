@@ -17,7 +17,8 @@
                                                  back on - the taskbar icon gets a badge if something did
         .\Quietpane.ps1 -SelfTest                build the window without showing it (used for testing)
         .\Quietpane.ps1 -SelfTest -Snapshot x.png -SnapshotTab 1
-                                                 also render the window to an image (used for screenshots)
+                                                 also render the window to an image (used for screenshots);
+                                                 -SnapshotWidth / -SnapshotHeight choose its size
         .\Quietpane.ps1 -SelfTest -Theme Dark    build it in the dark colours (the self-test is light unless told)
 
     Privacy: this app collects nothing and makes no network connections. See PRIVACY.md.
@@ -29,6 +30,8 @@ param(
     [switch]$SelfTest,
     [string]$Snapshot,
     [int]$SnapshotTab = 0,
+    [int]$SnapshotWidth = 0,
+    [int]$SnapshotHeight = 0,
     [ValidateSet('', 'Light', 'Dark')][string]$Theme = ''
 )
 
@@ -194,6 +197,12 @@ $script:Palette = [ordered]@{
     'bar.ok'    = @{ Light = '#117A68'; Dark = '#1E9C82' }
     'bar.amber' = @{ Light = '#FFB627'; Dark = '#B8892C' }
     'held'      = @{ Light = '#7B1D1D'; Dark = '#D85550' }
+    # A ring or bar that says "worth a look": the state between calm (bar.ok) and serious ('#A02020').
+    # Put through the palette checker with those two, every pair, both modes: colour-blind separation
+    # 9.8 / 8.2, normal vision 22.9 / 15.5, and 3:1 on the card. Only one state is ever shown at a time,
+    # always beside a word that says the same, so it is a status colour rather than a series; in the dark
+    # it sits a touch brighter than the checker's band for series, to stay clear of the red.
+    'bar.warn'  = @{ Light = '#C28400'; Dark = '#C9922E' }
     # a session's heat: one hue getting stronger, which in the dark means brighter, not darker
     '#CFAB60' = @{ Light = '#CFAB60'; Dark = '#7A5E22' }
     '#AB7409' = @{ Light = '#AB7409'; Dark = '#C08A1E' }
@@ -238,7 +247,7 @@ function Get-WindowsTheme {
 }
 
 function Get-AppearanceChoice {
-    <# 'System' unless someone chose Light or Dark in About. #>
+    <# 'System' unless someone chose Light or Dark in Settings. #>
     try {
         if (Test-Path $script:AppearanceFile) {
             $v = ([IO.File]::ReadAllText($script:AppearanceFile)).Trim()
@@ -296,7 +305,7 @@ function Set-Theme([ValidateSet('Light', 'Dark')][string]$Name) {
 }
 
 function Set-AppearanceChoice([ValidateSet('System', 'Light', 'Dark')][string]$Choice) {
-    <# The choice in About: remembered as one word, and applied straight away. #>
+    <# The choice in Settings: remembered as one word, and applied straight away. #>
     $script:AppearanceChoice = $Choice
     try {
         New-Item -ItemType Directory -Path $info.DataRoot -Force | Out-Null
@@ -310,7 +319,7 @@ function Sync-ThemeWithWindows {
         Following Windows' light or dark setting while the window is open, called from the window's own
         clock. Asked that way rather than through Windows' change notification, because the notification
         arrives on a thread PowerShell cannot safely run on; one registry read a second, on the window's
-        own thread, costs nothing and cannot crash. Does nothing when Light or Dark was chosen in About.
+        own thread, costs nothing and cannot crash. Does nothing when Light or Dark was chosen in Settings.
     #>
     if ($script:AppearanceChoice -ne 'System') { return }
     if (((Get-Date) - $script:ThemeCheckedAt).TotalSeconds -lt 1) { return }
@@ -360,6 +369,31 @@ if ($Theme) { $script:ActiveTheme = $Theme; $script:AppearanceChoice = $Theme } 
     </Style>
     <Style TargetType="Expander">
       <Setter Property="FocusVisualStyle" Value="{StaticResource FocusRing}"/>
+    </Style>
+
+    <!-- An on/off switch. Only for a setting that takes effect the moment it is flipped; a list you tick
+         and then Apply keeps its tick boxes, so a switch never looks as if it has already changed Windows. -->
+    <Style x:Key="Switch" TargetType="CheckBox">
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="FocusVisualStyle" Value="{StaticResource FocusRing}"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="CheckBox">
+            <Grid Width="44" Height="24" Background="Transparent">
+              <Border x:Name="Track" CornerRadius="12" Background="{DynamicResource Qp_8C9694}"/>
+              <Ellipse x:Name="Knob" Width="16" Height="16" Fill="{DynamicResource Qp_FFFDF8}" HorizontalAlignment="Left" Margin="4,0,0,0"/>
+            </Grid>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsChecked" Value="True">
+                <Setter TargetName="Track" Property="Background" Value="{DynamicResource Qp_117A68}"/>
+                <Setter TargetName="Knob" Property="HorizontalAlignment" Value="Right"/>
+                <Setter TargetName="Knob" Property="Margin" Value="0,0,4,0"/>
+              </Trigger>
+              <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.45"/></Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
     </Style>
 
     <Style TargetType="Button">
@@ -523,6 +557,8 @@ try {
     if ($work.Height -gt 200 -and $window.Height -gt ($work.Height - 40)) { $window.Height = [math]::Max(480, $work.Height - 40) }
 } catch { }
 
+$window.Add_SizeChanged({ Update-TabIcons $window.ActualWidth })
+
 # Started at sign-in: wait on the taskbar without taking the focus, and do nothing until clicked.
 if ($Minimized -and -not $SelfTest) { $window.WindowState = 'Minimized'; $window.ShowActivated = $false }
 
@@ -601,10 +637,42 @@ function New-Button([string]$Text, [string]$Margin = '0,0,8,0', [switch]$Primary
     return $b
 }
 
+# A small outline icon beside each tab's name, from the icon font built into Windows (Segoe Fluent Icons
+# on Windows 11, Segoe MDL2 Assets on 10 - the same code for the same picture in both), so there are no
+# image files. The codes are written as numbers to keep this file plain ASCII.
+$script:TabIcons = @{ home = 0xE80F; health = 0xE95E; scan = 0xEA18; privacy = 0xE890; vendors = 0xE774
+    apps = 0xE71D; cleanup = 0xEDA2; undo = 0xE7A7; about = 0xE713 }
+$script:IconFont = New-Object System.Windows.Media.FontFamily('Segoe Fluent Icons, Segoe MDL2 Assets')
+$script:TabIconBlocks = New-Object System.Collections.ArrayList
+# On a narrow window the icons step aside, so the nine tabs stay on one row instead of wrapping onto two
+# (which WPF does by shuffling the rows - the tab you are on jumps to the bottom).
+function Update-TabIcons([double]$Width) {
+    $show = if ($Width -ge 960) { 'Visible' } else { 'Collapsed' }
+    foreach ($i in $script:TabIconBlocks) { if ($i.Visibility -ne $show) { $i.Visibility = $show } }
+}
+
 function New-TabPage {
     param([string]$Header, [string]$Key, [string]$Intro)
     $tab = New-Object System.Windows.Controls.TabItem
-    $tab.Header = $Header
+    # The icon and the name take their colour and weight from the tab, so the chosen tab's style reaches both.
+    $head = New-Object System.Windows.Controls.StackPanel
+    $head.Orientation = 'Horizontal'
+    if ($script:TabIcons.ContainsKey($Key)) {
+        $icon = New-Object System.Windows.Controls.TextBlock
+        $icon.Text = [string][char]$script:TabIcons[$Key]
+        $icon.FontFamily = $script:IconFont
+        $icon.FontSize = 15
+        $icon.VerticalAlignment = 'Center'
+        $icon.Margin = Get-Thick '0,1,7,0'
+        [void]$head.Children.Add($icon)
+        [void]$script:TabIconBlocks.Add($icon)
+    }
+    $word = New-Object System.Windows.Controls.TextBlock
+    $word.Text = $Header
+    $word.VerticalAlignment = 'Center'
+    [void]$head.Children.Add($word)
+    $tab.Header = $head
+    [System.Windows.Automation.AutomationProperties]::SetName($tab, $Header)
     $tab.Tag = $Key
     $sv = New-Object System.Windows.Controls.ScrollViewer
     $sv.VerticalScrollBarVisibility = 'Auto'
@@ -635,6 +703,313 @@ function Set-MoreInfo($Element, [string]$Text) {
     [System.Windows.Automation.AutomationProperties]::SetHelpText($Element, $Text)
 }
 
+# ------------------------------------------------------------------ the shared pieces
+# One way of showing information on every tab, after the way MSI Center shows its hardware: a ring for
+# the two things that work hardest, one big number and one bar for things that fill up, and a plain list
+# for everything else - the name on the left, the value on the right, a hairline between. Colour only
+# ever says how something stands, and a word beside it always says the same, so nothing depends on
+# seeing colour.
+
+$script:GridLength = New-Object System.Windows.GridLengthConverter
+# How a reading stands: as words and text (HeatColours), and as a bar or ring (StateBars).
+$script:HeatColours = @{ ok = '#117A68'; warn = '#9A6700'; high = '#A83232'; none = '#66706F' }
+$script:StateBars = @{ ok = 'bar.ok'; warn = 'bar.warn'; high = '#A02020'; none = 'bar.ok' }
+
+function New-RingArc([double]$Cx, [double]$Cy, [double]$R, [double]$FromDeg, [double]$SweepDeg) {
+    <# One arc of a ring, clockwise from $FromDeg (0 is three o'clock, -90 the top). #>
+    $a1 = $FromDeg * [Math]::PI / 180.0
+    $a2 = ($FromDeg + $SweepDeg) * [Math]::PI / 180.0
+    $fig = New-Object System.Windows.Media.PathFigure
+    $fig.StartPoint = [System.Windows.Point]::new($Cx + $R * [Math]::Cos($a1), $Cy + $R * [Math]::Sin($a1))
+    $arc = New-Object System.Windows.Media.ArcSegment
+    $arc.Point = [System.Windows.Point]::new($Cx + $R * [Math]::Cos($a2), $Cy + $R * [Math]::Sin($a2))
+    $arc.Size = [System.Windows.Size]::new($R, $R)
+    $arc.SweepDirection = 'Clockwise'
+    $arc.IsLargeArc = ($SweepDeg -gt 180)
+    [void]$fig.Segments.Add($arc)
+    $geo = New-Object System.Windows.Media.PathGeometry
+    [void]$geo.Figures.Add($fig)
+    return $geo
+}
+
+function New-ReadingParts([object]$Tile) {
+    <#
+        The words under a ring or a big number, the same on both: how it stands in plain words, one
+        caption, and two lines kept for the moments worth breaking the pattern for.
+    #>
+    $Tile.Heat = New-Text '' 12.5 'SemiBold' '#117A68' '0,8,0,0'
+    $Tile.Caption = New-Text '' 11.5 'Normal' '#66706F' '0,2,0,0'
+    $Tile.Extra = New-Text '' 11.5 'Normal' '#66706F' '0,4,0,0'
+    $Tile.Extra.Visibility = 'Collapsed'
+    $Tile.Delta = New-Text '' 12.5 'SemiBold' '#117A68' '0,4,0,0'
+    $Tile.Delta.Visibility = 'Collapsed'
+    foreach ($x in $Tile.Heat, $Tile.Caption, $Tile.Extra, $Tile.Delta) { [void]$Tile.Border.Children.Add($x) }
+}
+
+function New-Gauge([string]$Title, [double]$Size = 136) {
+    <#
+        A ring with the number in the middle, for how hard something is working. The ring fills clockwise
+        from the top; a small tick on it marks where that reading stops being ordinary.
+    #>
+    $sp = New-Object System.Windows.Controls.StackPanel
+    $sp.Width = 214
+    $sp.Margin = Get-Thick '0,0,16,16'
+    [void]$sp.Children.Add((New-Text $Title 11.5 'SemiBold' '#4B5B5C' '0,0,0,10'))
+    $thick = 12.0
+    $r = ($Size - $thick) / 2 - 3
+    $c = $Size / 2
+    $canvas = New-Object System.Windows.Controls.Canvas
+    $canvas.Width = $Size; $canvas.Height = $Size
+    $canvas.HorizontalAlignment = 'Left'
+    $track = New-Object System.Windows.Shapes.Ellipse
+    $track.Width = $r * 2; $track.Height = $r * 2
+    $track.Stroke = Get-Brush '#EDE6D5'; $track.StrokeThickness = $thick
+    [System.Windows.Controls.Canvas]::SetLeft($track, $c - $r); [System.Windows.Controls.Canvas]::SetTop($track, $c - $r)
+    [void]$canvas.Children.Add($track)
+    $arc = New-Object System.Windows.Shapes.Path
+    $arc.Stroke = Get-Brush $script:StateBars.ok
+    $arc.StrokeThickness = $thick
+    $arc.StrokeStartLineCap = 'Round'; $arc.StrokeEndLineCap = 'Round'
+    [void]$canvas.Children.Add($arc)
+    $mark = New-Object System.Windows.Shapes.Line
+    $mark.Stroke = Get-Brush '#8C9694'; $mark.StrokeThickness = 2
+    $mark.Visibility = 'Collapsed'
+    [void]$canvas.Children.Add($mark)
+    # The number, shrunk to fit the hole rather than spilling over the ring when it is a word.
+    $fit = New-Object System.Windows.Controls.Viewbox
+    $fit.StretchDirection = 'DownOnly'
+    $fit.Width = ($r - $thick / 2) * 2 - 14
+    $fit.Height = 44
+    $value = New-Text '...' 30 'SemiBold' '#0F1B1C' '0' 'Fraunces, Georgia'
+    $value.TextWrapping = 'NoWrap'
+    $fit.Child = $value
+    [System.Windows.Controls.Canvas]::SetLeft($fit, $c - $fit.Width / 2); [System.Windows.Controls.Canvas]::SetTop($fit, $c - 22)
+    [void]$canvas.Children.Add($fit)
+    [void]$sp.Children.Add($canvas)
+    $tile = [pscustomobject]@{ Border = $sp; Value = $value; Fill = $arc; Mark = $mark; Heat = $null; Caption = $null; Extra = $null
+        Delta = $null; TrackWidth = 0; Ring = [pscustomobject]@{ Cx = $c; Cy = $c; R = $r; Thick = $thick }; Canvas = $canvas }
+    New-ReadingParts $tile
+    return $tile
+}
+
+function New-BigNumber([string]$Title, [double]$Width = 214, [switch]$Card) {
+    <#
+        One big number and one bar, for something that fills up. With -Card it stands on its own in a
+        bordered card; without, it sits beside the rings on the Health tab.
+    #>
+    $sp = New-Object System.Windows.Controls.StackPanel
+    $trackWidth = $Width - 14
+    [void]$sp.Children.Add((New-Text $Title 11.5 'SemiBold' '#4B5B5C' '0,0,0,4'))
+    $value = New-Text '...' 30 'SemiBold' '#0F1B1C' '0,0,0,8' 'Fraunces, Georgia'
+    [void]$sp.Children.Add($value)
+    $track = New-Object System.Windows.Controls.Border
+    $track.Height = 10
+    $track.Width = $trackWidth
+    $track.HorizontalAlignment = 'Left'
+    $track.Background = Get-Brush '#EDE6D5'
+    $track.CornerRadius = New-Object System.Windows.CornerRadius(5)
+    # A grid, so the mark can sit over the fill instead of beside it.
+    $lane = New-Object System.Windows.Controls.Grid
+    $fill = New-Object System.Windows.Controls.Border
+    $fill.Height = 10
+    $fill.Width = 0
+    $fill.HorizontalAlignment = 'Left'
+    $fill.Background = Get-Brush $script:StateBars.ok
+    $fill.CornerRadius = New-Object System.Windows.CornerRadius(5)
+    [void]$lane.Children.Add($fill)
+    $mark = New-Object System.Windows.Controls.Border
+    $mark.Width = 2; $mark.Height = 14
+    $mark.HorizontalAlignment = 'Left'
+    $mark.VerticalAlignment = 'Center'
+    $mark.Background = Get-Brush '#8C9694'
+    $mark.Visibility = 'Collapsed'
+    [void]$lane.Children.Add($mark)
+    $track.Child = $lane
+    [void]$sp.Children.Add($track)
+    $outer = $sp
+    if ($Card) {
+        $b = New-Object System.Windows.Controls.Border
+        $b.Width = $Width + 28
+        $b.Padding = Get-Thick '14,12'
+        $b.Margin = Get-Thick '0,0,12,12'
+        $b.Background = Get-Brush '#FFFDF8'
+        $b.BorderBrush = Get-Brush '#E6DFCC'
+        $b.BorderThickness = Get-Thick '1'
+        $b.Child = $sp
+        $outer = $b
+    } else {
+        $sp.Width = $Width
+        $sp.Margin = Get-Thick '0,0,16,16'
+    }
+    $tile = [pscustomobject]@{ Border = $sp; Outer = $outer; Value = $value; Fill = $fill; Mark = $mark; Heat = $null; Caption = $null
+        Extra = $null; Delta = $null; TrackWidth = $trackWidth; Ring = $null }
+    New-ReadingParts $tile
+    return $tile
+}
+
+function New-DetailsBox([string]$Title, [double]$Width = 0) {
+    <# A titled list of name-and-value rows. It hides itself while it has no rows to show. #>
+    $b = New-Object System.Windows.Controls.Border
+    $b.Background = Get-Brush '#FFFDF8'
+    $b.BorderBrush = Get-Brush '#E6DFCC'
+    $b.BorderThickness = Get-Thick '1'
+    $b.Padding = Get-Thick '14,10,14,4'
+    $b.Margin = Get-Thick '0,0,0,12'
+    if ($Width -gt 0) { $b.Width = $Width }
+    $sp = New-Object System.Windows.Controls.StackPanel
+    $head = New-Text $Title 14 'SemiBold' '#117A68' '0,0,0,4' 'Fraunces, Georgia'
+    [void]$sp.Children.Add($head)
+    $rows = New-Object System.Windows.Controls.StackPanel
+    [void]$sp.Children.Add($rows)
+    $b.Child = $sp
+    $b.Visibility = 'Collapsed'
+    return [pscustomobject]@{ Border = $b; Title = $head; Rows = $rows }
+}
+
+function Add-DetailRow {
+    <#
+        One row: the name on the left, the value on the right, a hairline above it. A value that could
+        not be read is left out, or - with -ShowMissing, where its absence is worth knowing - says
+        "not shared". It is never drawn as a zero, which would look like an answer. -Ratio adds a small
+        bar before the value; -Tone colours the value when it is worth a look (warn) or serious (high).
+    #>
+    param($Box, [string]$Label, $Value, $Ratio = $null, [string]$Tone = '', [string]$Tip = '', [switch]$ShowMissing)
+    if ($null -eq $Value -or "$Value".Trim() -eq '') {
+        if (-not $ShowMissing) { return $null }
+        $Value = 'not shared'; $Tone = 'none'; $Ratio = $null
+    }
+    $row = New-Object System.Windows.Controls.Border
+    $row.Padding = Get-Thick '0,7,0,7'
+    if ($Box.Rows.Children.Count) { $row.BorderBrush = Get-Brush '#E6DFCC'; $row.BorderThickness = Get-Thick '0,1,0,0' }
+    $grid = New-Object System.Windows.Controls.Grid
+    foreach ($w in 'Auto', '*') { $cd = New-Object System.Windows.Controls.ColumnDefinition; $cd.Width = $script:GridLength.ConvertFromString($w); [void]$grid.ColumnDefinitions.Add($cd) }
+    $name = New-Text $Label 12.5 'Normal' '#4B5B5C' '0,0,16,0'
+    $name.TextWrapping = 'NoWrap'
+    $name.VerticalAlignment = 'Center'
+    [void]$grid.Children.Add($name)
+    $right = New-Object System.Windows.Controls.StackPanel
+    $right.Orientation = 'Horizontal'
+    $right.HorizontalAlignment = 'Right'
+    [System.Windows.Controls.Grid]::SetColumn($right, 1)
+    if ($null -ne $Ratio) {
+        $r = [math]::Min(1.0, [math]::Max(0.0, [double]$Ratio))
+        $track = New-Object System.Windows.Controls.Border
+        $track.Width = 64; $track.Height = 6
+        $track.Margin = Get-Thick '0,0,10,0'
+        $track.VerticalAlignment = 'Center'
+        $track.Background = Get-Brush '#EDE6D5'
+        $track.CornerRadius = New-Object System.Windows.CornerRadius(3)
+        $bar = New-Object System.Windows.Controls.Border
+        $bar.Height = 6
+        $bar.Width = [math]::Max(3, [math]::Round(64 * $r))
+        $bar.HorizontalAlignment = 'Left'
+        $bar.CornerRadius = New-Object System.Windows.CornerRadius(3)
+        $bar.Background = Get-Brush $script:StateBars[$(if ($Tone -in 'warn', 'high') { $Tone } else { 'ok' })]
+        $track.Child = $bar
+        [void]$right.Children.Add($track)
+    }
+    $valueColour = switch ($Tone) { 'warn' { $script:HeatColours.warn } 'high' { $script:HeatColours.high } 'none' { '#66706F' } 'good' { '#117A68' } default { '#0F1B1C' } }
+    $val = New-Text ([string]$Value) 12.5 $(if ($Tone -in 'warn', 'high') { 'SemiBold' } else { 'Normal' }) $valueColour '0'
+    $val.TextAlignment = 'Right'
+    $val.VerticalAlignment = 'Center'
+    [void]$right.Children.Add($val)
+    [void]$grid.Children.Add($right)
+    $row.Child = $grid
+    # Read out as one thing: "Temperature: 47 degrees - cool".
+    [System.Windows.Automation.AutomationProperties]::SetName($row, ('{0}: {1}' -f $Label, $Value))
+    if ($Tip) { Set-MoreInfo $row $Tip }
+    [void]$Box.Rows.Children.Add($row)
+    $Box.Border.Visibility = 'Visible'
+    return $val
+}
+
+function Add-DetailHeading($Box, [string]$Text) {
+    <# A sub-heading inside a box, for a PC with two graphics cards: each card's rows sit under its name. #>
+    $t = New-Text $Text 12.5 'SemiBold' '#0F1B1C' $(if ($Box.Rows.Children.Count) { '0,10,0,0' } else { '0,2,0,0' })
+    $t.TextTrimming = 'CharacterEllipsis'
+    $t.TextWrapping = 'NoWrap'
+    [void]$Box.Rows.Children.Add($t)
+    $Box.Border.Visibility = 'Visible'
+}
+
+function Clear-DetailsBox($Box) {
+    $Box.Rows.Children.Clear()
+    $Box.Border.Visibility = 'Collapsed'
+}
+
+function Get-DetailsText($Box) {
+    <# A box's rows as plain text, "name: value | name: value" - what a screen reader hears, and what the self-test reads. #>
+    @(foreach ($row in $Box.Rows.Children) {
+        if ($row -is [System.Windows.Controls.TextBlock]) { '[' + $row.Text + ']' }
+        else { [System.Windows.Automation.AutomationProperties]::GetName($row) }
+    }) -join ' | '
+}
+
+function New-Switch([string]$Name) {
+    <# An on/off switch, named for screen readers. Only for a setting that takes effect the moment it is flipped. #>
+    $cb = New-Object System.Windows.Controls.CheckBox
+    $cb.Style = $window.FindResource('Switch')
+    $cb.VerticalAlignment = 'Center'
+    [System.Windows.Automation.AutomationProperties]::SetName($cb, $Name)
+    return $cb
+}
+
+function New-SettingRow([string]$Label, [string]$Note, $Control) {
+    <# One setting: what it is (and a short note) on the left, the switch or choice on the right, a hairline below. #>
+    $row = New-Object System.Windows.Controls.Border
+    $row.Padding = Get-Thick '0,10,0,10'
+    $row.BorderBrush = Get-Brush '#E6DFCC'
+    $row.BorderThickness = Get-Thick '0,0,0,1'
+    $grid = New-Object System.Windows.Controls.Grid
+    foreach ($w in '*', 'Auto') { $cd = New-Object System.Windows.Controls.ColumnDefinition; $cd.Width = $script:GridLength.ConvertFromString($w); [void]$grid.ColumnDefinitions.Add($cd) }
+    $left = New-Object System.Windows.Controls.StackPanel
+    $left.VerticalAlignment = 'Center'
+    $left.Margin = Get-Thick '0,0,20,0'
+    $name = New-Text $Label 13.5 'SemiBold' '#0F1B1C' '0'
+    [void]$left.Children.Add($name)
+    $noteBlock = New-Text $Note 12 'Normal' '#66706F' '0,2,0,0'
+    if (-not $Note) { $noteBlock.Visibility = 'Collapsed' }
+    [void]$left.Children.Add($noteBlock)
+    [void]$grid.Children.Add($left)
+    if ($Control) {
+        [System.Windows.Controls.Grid]::SetColumn($Control, 1)
+        $Control.VerticalAlignment = 'Center'
+        [void]$grid.Children.Add($Control)
+    }
+    $row.Child = $grid
+    return [pscustomobject]@{ Border = $row; Label = $name; Note = $noteBlock; Control = $Control }
+}
+
+# At a glance: the top of each list tab, one short box summing up the sections below it - a count, and
+# a bar where "how much of it" is the point. Filled in by the same code that fills the sections.
+$script:GlanceBoxes = @{}
+$script:Glance = @{}
+$script:GlanceOrder = @{
+    privacy = 'addons', 'devices', 'settings'
+    vendors = 'brands', 'open'
+    apps    = 'startup', 'remove'
+    cleanup = 'drive', 'leftovers'
+    undo    = 'points', 'newest'
+}
+function New-GlanceBox([string]$Tab) {
+    $box = New-DetailsBox 'At a glance'
+    $box.Border.Margin = Get-Thick '0,4,0,12'
+    $script:GlanceBoxes[$Tab] = $box
+    $script:Glance[$Tab] = @{}
+    return $box.Border
+}
+function Set-Glance([string]$Tab, [string]$Key, [string]$Label, $Value, $Ratio = $null, [string]$Tone = '', [string]$Tip = '') {
+    <# One line of a tab's summary, then the box drawn again in its set order. A value of $null leaves the line out. #>
+    if (-not $script:GlanceBoxes.ContainsKey($Tab)) { return }
+    $script:Glance[$Tab][$Key] = [pscustomobject]@{ Label = $Label; Value = $Value; Ratio = $Ratio; Tone = $Tone; Tip = $Tip }
+    $box = $script:GlanceBoxes[$Tab]
+    Clear-DetailsBox $box
+    foreach ($k in $script:GlanceOrder[$Tab]) {
+        $g = $script:Glance[$Tab][$k]
+        if ($g) { [void](Add-DetailRow $box $g.Label $g.Value -Ratio $g.Ratio -Tone $g.Tone -Tip $g.Tip) }
+    }
+}
+
 $script:Options = @{}
 foreach ($k in 'privacy', 'devices', 'extensions', 'vendors', 'apps', 'startup', 'cleanup') { $script:Options[$k] = New-Object System.Collections.ArrayList }
 
@@ -646,18 +1021,25 @@ function Add-Option {
     param($Panel, [string]$Key, [string]$Id, [string]$Title, [string]$Description, [bool]$Recommended, [string]$Short = '')
     $cb = New-Object System.Windows.Controls.CheckBox
     $cb.Tag = $Id
-    $cb.Margin = Get-Thick '0,10,0,0'
     $cb.VerticalContentAlignment = 'Center'
     $label = New-Text $Title 13.5 'SemiBold' '#0F1B1C' '2,0,0,0'
     $cb.Content = $label
     # Keep the Apply button's count honest as things are ticked and unticked.
     $cb.Add_Checked({ Update-TickCount })
     $cb.Add_Unchecked({ Update-TickCount })
-    [void]$Panel.Children.Add($cb)
+    # One row per choice, with a hairline under it, so a long list reads as a list rather than a page.
+    $row = New-Object System.Windows.Controls.Border
+    $row.Padding = Get-Thick '0,8,0,8'
+    $row.BorderBrush = Get-Brush '#E6DFCC'
+    $row.BorderThickness = Get-Thick '0,0,0,1'
+    $rowStack = New-Object System.Windows.Controls.StackPanel
+    [void]$rowStack.Children.Add($cb)
+    $row.Child = $rowStack
+    [void]$Panel.Children.Add($row)
     $shown = if ($Short) { $Short } else { $Description }
     if ($shown) {
-        $desc = New-Text $shown 12.5 'Normal' '#4B5B5C' '22,2,0,0'
-        [void]$Panel.Children.Add($desc)
+        $desc = New-Text $shown 12.5 'Normal' '#66706F' '22,2,0,0'
+        [void]$rowStack.Children.Add($desc)
         if ($Short -and $Description -and $Description -ne $Short) { Set-MoreInfo $cb $Description; Set-MoreInfo $desc $Description }
     }
     [void]$script:Options[$Key].Add([pscustomobject]@{ Id = $Id; CheckBox = $cb; Recommended = $Recommended; Label = $label; Title = $Title; Status = 'Unknown' })
@@ -673,17 +1055,30 @@ function New-Card([string]$Title) {
     $b = New-Object System.Windows.Controls.Border
     # Narrow enough that all five cards stay on one row even when a scrollbar appears.
     $b.Width = 186
-    $b.MinHeight = 108
+    $b.MinHeight = 96
     $b.Padding = Get-Thick '14,12'
     $b.Margin = Get-Thick '0,0,12,12'
     $b.Background = Get-Brush '#FAF6EC'
     $b.BorderBrush = Get-Brush '#E6DFCC'
     $b.BorderThickness = Get-Thick '1'
     $sp = New-Object System.Windows.Controls.StackPanel
-    [void]$sp.Children.Add((New-Text $Title 11.5 'SemiBold' '#4B5B5C' '0,0,0,4'))
-    $value = New-Text 'Checking...' 21 'SemiBold' '#0F1B1C' '0,0,0,2' 'Fraunces, Georgia'
+    [void]$sp.Children.Add((New-Text $Title 11.5 'SemiBold' '#4B5B5C' '0,0,0,6'))
+    # The answer big, and one line under it. A longer line is cut short on the card and shown whole when
+    # you point at it, so every card is the same height and can be read at a glance.
+    $value = New-Text 'Checking...' 25 'SemiBold' '#0F1B1C' '0,0,0,4' 'Fraunces, Georgia'
+    $value.TextWrapping = 'NoWrap'
+    $fitValue = New-Object System.Windows.Controls.Viewbox
+    $fitValue.StretchDirection = 'DownOnly'
+    $fitValue.HorizontalAlignment = 'Left'
+    $fitValue.MaxWidth = 158
     $caption = New-Text '' 12 'Normal' '#4B5B5C' '0'
-    [void]$sp.Children.Add($value)
+    $caption.TextWrapping = 'NoWrap'
+    $caption.TextTrimming = 'CharacterEllipsis'
+    $tipBinding = New-Object System.Windows.Data.Binding('Text')
+    $tipBinding.RelativeSource = New-Object System.Windows.Data.RelativeSource([System.Windows.Data.RelativeSourceMode]::Self)
+    [void]$caption.SetBinding([System.Windows.FrameworkElement]::ToolTipProperty, $tipBinding)
+    $fitValue.Child = $value
+    [void]$sp.Children.Add($fitValue)
     [void]$sp.Children.Add($caption)
     $b.Child = $sp
     return [pscustomobject]@{ Border = $b; Value = $value; Caption = $caption }
@@ -696,7 +1091,8 @@ $script:CardBrands   = New-Card 'HARDWARE & BRANDS'
 $script:CardAdware   = New-Card 'ADWARE CHECK'
 foreach ($c in $script:CardTracking, $script:CardApps, $script:CardSpace, $script:CardBrands, $script:CardAdware) { [void]$cards.Children.Add($c.Border) }
 $script:CardAdware.Value.Text = 'Not checked yet'
-$script:CardAdware.Caption.Text = 'Takes about 2 minutes and changes nothing'
+$script:CardAdware.Caption.Text = 'About 2 minutes'
+Set-MoreInfo $script:CardAdware.Border 'The check takes about 2 minutes and changes nothing.'
 [void]$homePanel.Children.Add($cards)
 
 # Things that switched themselves back on since last time - usually a Windows or driver update.
@@ -738,42 +1134,6 @@ $script:UpdatePanel.Child = $updateRow
 Set-MoreInfo $script:UpdateText 'Found in your Downloads folder. Quietpane never goes online to look - this is a file you downloaded.'
 [void]$homePanel.Children.Add($script:UpdatePanel)
 
-# Two simple bars: how full the disk is, and how much memory is in use.
-function New-Meter([string]$Title, [string]$FillColour) {
-    $b = New-Object System.Windows.Controls.Border
-    $b.Width = 294
-    $b.MinHeight = 148
-    $b.Padding = Get-Thick '14,12'
-    $b.Margin = Get-Thick '0,0,12,12'
-    $b.Background = Get-Brush '#FFFDF8'
-    $b.BorderBrush = Get-Brush '#E6DFCC'
-    $b.BorderThickness = Get-Thick '1'
-    $sp = New-Object System.Windows.Controls.StackPanel
-    [void]$sp.Children.Add((New-Text $Title 11.5 'SemiBold' '#4B5B5C' '0,0,0,4'))
-    $value = New-Text 'Checking...' 21 'SemiBold' '#0F1B1C' '0,0,0,8' 'Fraunces, Georgia'
-    [void]$sp.Children.Add($value)
-    $track = New-Object System.Windows.Controls.Border
-    $track.Height = 16
-    $track.Width = 272
-    $track.HorizontalAlignment = 'Left'
-    $track.Background = Get-Brush '#EDE6D5'
-    $track.CornerRadius = New-Object System.Windows.CornerRadius(8)
-    $fill = New-Object System.Windows.Controls.Border
-    $fill.Height = 16
-    $fill.Width = 0
-    $fill.HorizontalAlignment = 'Left'
-    $fill.Background = Get-Brush $FillColour
-    $fill.CornerRadius = New-Object System.Windows.CornerRadius(8)
-    $track.Child = $fill
-    [void]$sp.Children.Add($track)
-    $caption = New-Text '' 12 'Normal' '#4B5B5C' '0,6,0,0'
-    $delta = New-Text '' 13 'SemiBold' '#117A68' '0,4,0,0'
-    $delta.Visibility = 'Collapsed'
-    [void]$sp.Children.Add($caption)
-    [void]$sp.Children.Add($delta)
-    $b.Child = $sp
-    return [pscustomobject]@{ Border = $b; Value = $value; Fill = $fill; Caption = $caption; Delta = $delta; TrackWidth = 272 }
-}
 # Two jobs, two sets of colour. Words are read close up and need contrast against the cream behind
 # them, so the text set is the darker one; a bar is a big block and only has to be told apart from the
 # other bars. Both were put through the palette checker rather than chosen by eye: the bar pair clears
@@ -781,128 +1141,11 @@ function New-Meter([string]$Title, [string]$FillColour) {
 # 4.5:1 on this background. The house green is a little grey for a chart colour by that checker's
 # reckoning, and it stays anyway - it is the product's own colour, and no tile depends on it alone.
 $script:BarColours = @{ ok = 'bar.ok'; high = '#A02020' }
-#
-# Live tiles: how hard the PC is working right now, and how warm it is.
-#
-# Every tile is built to exactly the same pattern - heading, one number, one bar, one line of plain
-# words, one caption, one trend - and nothing may be added to one that the others don't have. That is
-# the whole trick: four tiles the same shape can be compared at a glance, and four tiles of different
-# heights and different numbers of lines have to be read one at a time. What used to hang off the
-# bottom of a tile (which programs were busiest) now sits in one row beneath all four, because it was
-# the same handful of programs repeated four times.
-#
-# The bar carries a mark at the point where that reading stops being ordinary, so "is 72% bad?" is
-# answered by looking rather than by knowing. Colour only ever says how things stand - calm or serious -
-# and never which tile it is, and the plain word beside it always says the same thing in text.
-function New-LiveTile([string]$Title) {
-    $sp = New-Object System.Windows.Controls.StackPanel
-    $sp.Width = 172
-    $sp.Margin = Get-Thick '0,0,16,10'
-    [void]$sp.Children.Add((New-Text $Title 11 'SemiBold' '#4B5B5C' '0,0,0,2'))
-    $value = New-Text '...' 25 'SemiBold' '#0F1B1C' '0,0,0,7' 'Fraunces, Georgia'
-    [void]$sp.Children.Add($value)
-    $track = New-Object System.Windows.Controls.Border
-    $track.Height = 10
-    $track.Width = 156
-    $track.HorizontalAlignment = 'Left'
-    $track.Background = Get-Brush '#EDE6D5'
-    $track.CornerRadius = New-Object System.Windows.CornerRadius(5)
-    # A grid, so the mark can sit over the fill instead of beside it.
-    $lane = New-Object System.Windows.Controls.Grid
-    $fill = New-Object System.Windows.Controls.Border
-    $fill.Height = 10
-    $fill.Width = 0
-    $fill.HorizontalAlignment = 'Left'
-    $fill.Background = Get-Brush $script:BarColours.ok
-    $fill.CornerRadius = New-Object System.Windows.CornerRadius(5)
-    [void]$lane.Children.Add($fill)
-    # "Where this stops being ordinary": a notch on the track, not a number to memorise.
-    $mark = New-Object System.Windows.Controls.Border
-    $mark.Width = 2; $mark.Height = 14
-    $mark.HorizontalAlignment = 'Left'
-    $mark.VerticalAlignment = 'Center'
-    $mark.Background = Get-Brush '#8C9694'
-    $mark.Visibility = 'Collapsed'
-    [void]$lane.Children.Add($mark)
-    $track.Child = $lane
-    [void]$sp.Children.Add($track)
-    # The bar is this second; the trend directly under it is the last two minutes, drawn the same width
-    # and on the same nought-to-a-hundred scale, so the two read as one picture of the same thing.
-    #
-    # It sits here, above the words, on purpose. Everything below varies in length - one card is called
-    # "RTX 4060 Laptop GPU" and another "NVMe Micron_2400E_MTFDKBA512QFM" - so anything placed after the
-    # words lands at a different height in every tile, and four charts at four different heights cannot
-    # be compared at a glance. Above them, all four line up exactly.
-    $spark = New-Object System.Windows.Controls.Canvas
-    $spark.Width = 156; $spark.Height = 26
-    $spark.Margin = Get-Thick '0,5,0,0'
-    $spark.HorizontalAlignment = 'Left'
-    $spark.Visibility = 'Collapsed'
-    [void]$sp.Children.Add($spark)
-    $heat = New-Text '' 12.5 'SemiBold' '#117A68' '0,8,0,0'
-    $caption = New-Text '' 11.5 'Normal' '#66706F' '0,2,0,0'
-    $caption.TextWrapping = 'Wrap'
-    # Kept for the one thing worth interrupting the pattern for: being held back to cool off.
-    $extra = New-Text '' 11.5 'Normal' '#66706F' '0,4,0,0'
-    $extra.TextWrapping = 'Wrap'
-    $extra.Visibility = 'Collapsed'
-    $delta = New-Text '' 12.5 'SemiBold' '#117A68' '0,4,0,0'
-    $delta.Visibility = 'Collapsed'
-    foreach ($x in $heat, $caption, $extra, $delta) { [void]$sp.Children.Add($x) }
-    return [pscustomobject]@{ Border = $sp; Value = $value; Fill = $fill; Mark = $mark; Heat = $heat; Caption = $caption
-        Extra = $extra; Delta = $delta; TrackWidth = 156; Spark = $spark; SparkColour = '#117A68' }
-}
-
 $meters = New-Object System.Windows.Controls.WrapPanel
-$script:MeterSpace = New-Meter 'SPACE ON THIS PC' 'bar.ok'
-[void]$meters.Children.Add($script:MeterSpace.Border)
+$script:MeterSpace = New-BigNumber 'SPACE ON THIS PC' 380 -Card
+$script:MeterSpace.Heat.Visibility = 'Collapsed'
+[void]$meters.Children.Add($script:MeterSpace.Outer)
 
-$script:LivePanel = New-Object System.Windows.Controls.Border
-$script:LivePanel.MinHeight = 148
-$script:LivePanel.Padding = Get-Thick '14,12,0,10'
-$script:LivePanel.Margin = Get-Thick '0,0,12,12'
-$script:LivePanel.Background = Get-Brush '#FFFDF8'
-$script:LivePanel.BorderBrush = Get-Brush '#E6DFCC'
-$script:LivePanel.BorderThickness = Get-Thick '1'
-$liveStack = New-Object System.Windows.Controls.StackPanel
-[void]$liveStack.Children.Add((New-Text 'RIGHT NOW' 11.5 'SemiBold' '#4B5B5C' '0,0,0,6'))
-# The answer first. Everything below it is the working.
-$verdictRow = New-Object System.Windows.Controls.StackPanel
-$verdictRow.Orientation = 'Horizontal'
-$verdictRow.Margin = Get-Thick '0,0,0,2'
-$script:VerdictDot = New-Object System.Windows.Shapes.Ellipse
-$script:VerdictDot.Width = 11; $script:VerdictDot.Height = 11
-$script:VerdictDot.VerticalAlignment = 'Center'
-$script:VerdictDot.Margin = Get-Thick '0,0,8,0'
-$script:VerdictDot.Fill = Get-Brush '#8C9694'
-[void]$verdictRow.Children.Add($script:VerdictDot)
-$script:VerdictText = New-Text 'Having a look...' 18 'SemiBold' '#0F1B1C' '0' 'Fraunces, Georgia'
-$script:VerdictText.VerticalAlignment = 'Center'
-[void]$verdictRow.Children.Add($script:VerdictText)
-[void]$liveStack.Children.Add($verdictRow)
-$script:VerdictWhy = New-Text '' 12.5 'Normal' '#4B5B5C' '19,0,0,12'
-[void]$liveStack.Children.Add($script:VerdictWhy)
-$liveTiles = New-Object System.Windows.Controls.WrapPanel
-$script:TileCpu    = New-LiveTile 'PROCESSOR'
-$script:TileGpu    = New-LiveTile 'GRAPHICS'
-$script:TileMemory = New-LiveTile 'MEMORY'
-$script:TileDisk   = New-LiveTile 'THE DRIVE'
-foreach ($t in $script:TileCpu, $script:TileGpu, $script:TileMemory, $script:TileDisk) { [void]$liveTiles.Children.Add($t.Border) }
-[void]$liveStack.Children.Add($liveTiles)
-# One list for all four tiles. It used to be four lists of much the same programs.
-$script:BusyStrip = New-Object System.Windows.Controls.StackPanel
-$script:BusyStrip.Margin = Get-Thick '0,4,0,0'
-$script:BusyHead = New-Text 'BUSIEST RIGHT NOW' 11 'SemiBold' '#4B5B5C' '0,0,0,4'
-[void]$script:BusyStrip.Children.Add($script:BusyHead)
-$script:BusyRows = New-Object System.Windows.Controls.StackPanel
-[void]$script:BusyStrip.Children.Add($script:BusyRows)
-Set-MoreInfo $script:BusyStrip 'The programs working your PC hardest this second, counted the way Task Manager counts them. A program near the top of this list while your PC feels slow is the one to look at first.'
-[void]$liveStack.Children.Add($script:BusyStrip)
-$script:LiveNote = New-Text 'Live, every 2 seconds. Nothing is recorded.' 11.5 'Normal' '#66706F' '0,10,0,0'
-[void]$liveStack.Children.Add($script:LiveNote)
-$script:LivePanel.Child = $liveStack
-# The memory tile carries the "freed just now" note that the old memory bar used to.
-$script:MeterMemory = $script:TileMemory
 [void]$homePanel.Children.Add($meters)
 $script:TotalsText = New-Text '' 13 'Normal' '#117A68' '2,0,0,10'
 $script:TotalsText.Visibility = 'Collapsed'
@@ -960,30 +1203,54 @@ $homePanel.Children.Clear()
 $meters.Margin = Get-Thick '0,20,0,0'
 foreach ($x in @($homeTop) + @($script:UpdatePanel, $cards, $script:BackPanel, $homeButtons, $homeHint, $script:ResultPanel, $meters, $script:TotalsText, $homeDisclaimer, $homeRather)) { [void]$homePanel.Children.Add($x) }
 
-# 1. Health - how hard the PC is working, how warm it is, and how the battery and drive are holding up.
-# Its own tab, so Home stays calm - and nothing here is read unless this tab is open.
-$healthPanel = New-TabPage 'Health' 'health' 'How hard your PC is working, how warm it is, and how the battery and drive are doing.'
-$script:LivePanel.Margin = Get-Thick '0,4,0,12'
-[void]$healthPanel.Children.Add($script:LivePanel)
-$healthCards = New-Object System.Windows.Controls.WrapPanel
-# Laptops only: charge, plugged in or not, and how much the battery holds compared with when it was new.
-$script:BatteryCard = New-Meter 'BATTERY' 'bar.amber'
-$script:BatteryHealthText = New-Text '' 12.5 'Normal' '#0F1B1C' '0,6,0,0'
-[void]$script:BatteryCard.Border.Child.Children.Add($script:BatteryHealthText)
-$script:BatteryCard.Border.Visibility = 'Collapsed'
-# The drive Windows runs from: Windows' own verdict, how much of its rated life is used, and its heat.
-$script:DriveCard = New-Meter 'THE DRIVE WINDOWS IS ON' 'bar.ok'
-$script:DriveHeatText = New-Text '' 12.5 'SemiBold' '#117A68' '0,6,0,0'
-[void]$script:DriveCard.Border.Child.Children.Add($script:DriveHeatText)
-$script:DriveCard.Value.Text = 'Having a look...'
-# Windows keeps its own record of how steady this PC has been. Almost nobody ever opens it.
-$script:SteadyCard = New-Meter 'HOW IT HAS BEEN HOLDING UP' 'bar.ok'
-$script:SteadyLines = New-Object System.Windows.Controls.StackPanel
-$script:SteadyLines.Margin = Get-Thick '0,6,0,0'
-[void]$script:SteadyCard.Border.Child.Children.Add($script:SteadyLines)
-$script:SteadyCard.Value.Text = 'Having a look...'
-foreach ($c in $script:BatteryCard, $script:DriveCard, $script:SteadyCard) { [void]$healthCards.Children.Add($c.Border) }
-[void]$healthPanel.Children.Add($healthCards)
+# 1. Health - how hard the PC is working, how warm it is, and how it is holding up, laid out the way
+# MSI Center lays out its hardware: the answer in one line, the four readings that change by the second
+# on the left, and one plain list of everything else on the right. Nothing here is read unless this tab
+# is open. On a narrow window the list drops underneath rather than being squeezed.
+$healthPanel = New-TabPage 'Health' 'health' ''
+# The answer first. Why, one step away: it appears when you point at it, and screen readers read it out.
+$verdictRow = New-Object System.Windows.Controls.StackPanel
+$verdictRow.Orientation = 'Horizontal'
+$verdictRow.Margin = Get-Thick '0,0,0,18'
+$script:VerdictDot = New-Object System.Windows.Shapes.Ellipse
+$script:VerdictDot.Width = 12; $script:VerdictDot.Height = 12
+$script:VerdictDot.VerticalAlignment = 'Center'
+$script:VerdictDot.Margin = Get-Thick '0,2,10,0'
+$script:VerdictDot.Fill = Get-Brush '#8C9694'
+[void]$verdictRow.Children.Add($script:VerdictDot)
+$script:VerdictText = New-Text 'Having a look...' 20 'SemiBold' '#0F1B1C' '0' 'Fraunces, Georgia'
+$script:VerdictText.VerticalAlignment = 'Center'
+[void]$verdictRow.Children.Add($script:VerdictText)
+[void]$healthPanel.Children.Add($verdictRow)
+
+$healthColumns = New-Object System.Windows.Controls.WrapPanel
+$healthLeft = New-Object System.Windows.Controls.StackPanel
+$healthLeft.Width = 460
+$healthLeft.Margin = Get-Thick '0,0,28,0'
+# How hard the two chips are working: rings. What fills up: one big number and a bar each.
+$gaugeRow = New-Object System.Windows.Controls.WrapPanel
+$script:TileCpu = New-Gauge 'PROCESSOR'
+$script:TileGpu = New-Gauge 'GRAPHICS'
+$numberRow = New-Object System.Windows.Controls.WrapPanel
+$script:TileMemory = New-BigNumber 'MEMORY'
+$script:TileDisk = New-BigNumber 'THE DRIVE'
+foreach ($t in $script:TileCpu, $script:TileGpu) { [void]$gaugeRow.Children.Add($t.Border) }
+foreach ($t in $script:TileMemory, $script:TileDisk) { [void]$numberRow.Children.Add($t.Border) }
+[void]$healthLeft.Children.Add($gaugeRow)
+[void]$healthLeft.Children.Add($numberRow)
+# The memory number carries the "freed just now" note after Quiet my PC now.
+$script:MeterMemory = $script:TileMemory
+# One list of the programs working the PC hardest, for all four readings at once.
+$script:BusyStrip = New-Object System.Windows.Controls.StackPanel
+$script:BusyStrip.Margin = Get-Thick '0,0,0,0'
+$script:BusyHead = New-Text 'BUSIEST RIGHT NOW' 11.5 'SemiBold' '#4B5B5C' '0,0,0,6'
+[void]$script:BusyStrip.Children.Add($script:BusyHead)
+$script:BusyRows = New-Object System.Windows.Controls.StackPanel
+[void]$script:BusyStrip.Children.Add($script:BusyRows)
+Set-MoreInfo $script:BusyStrip 'The programs working your PC hardest this second, counted the way Task Manager counts them. A program near the top of this list while your PC feels slow is the one to look at first.'
+[void]$healthLeft.Children.Add($script:BusyStrip)
+$script:LiveNote = New-Text 'Live, every 2 seconds. Nothing is recorded.' 11.5 'Normal' '#66706F' '0,10,0,14'
+[void]$healthLeft.Children.Add($script:LiveNote)
 
 # What a whole session cost, for anyone who wants to know how their PC held up while they worked.
 $script:SessionBox = New-Object System.Windows.Controls.Border
@@ -1018,8 +1285,27 @@ $sessionNote = New-Text 'It watches only while Quietpane is open, and forgets ev
 Set-MoreInfo $sessionNote 'Nothing is installed, nothing is scheduled and nothing is written down: the record lives in this window and goes when the window goes. It keeps reading while Quietpane is minimised, which is the whole point, and checks about every 10 seconds while you are not looking at this tab.'
 [void]$sessionStack.Children.Add($sessionNote)
 $script:SessionBox.Child = $sessionStack
-# Above the battery and drive: those change over months, this is about the afternoon you are having.
-[void]$healthPanel.Children.Insert(2, $script:SessionBox)
+$script:SessionBox.Margin = Get-Thick '0,0,0,12'
+[void]$healthLeft.Children.Add($script:SessionBox)
+[void]$healthColumns.Children.Add($healthLeft)
+
+# Everything else, as one list in boxes: the name on the left, the value on the right. A box with nothing
+# to say - no battery on a desktop, say - is not shown at all.
+$healthRight = New-Object System.Windows.Controls.StackPanel
+$healthRight.Width = 460
+$script:Details = [ordered]@{
+    Processor = New-DetailsBox 'Processor'
+    Graphics  = New-DetailsBox 'Graphics'
+    Memory    = New-DetailsBox 'Memory'
+    Drive     = New-DetailsBox 'The drive Windows is on'
+    Battery   = New-DetailsBox 'Battery'
+    Network   = New-DetailsBox 'Network'
+    Power     = New-DetailsBox 'Power and fans'
+    ThisPC    = New-DetailsBox 'This PC'
+}
+foreach ($box in $script:Details.Values) { [void]$healthRight.Children.Add($box.Border) }
+[void]$healthColumns.Children.Add($healthRight)
+[void]$healthPanel.Children.Add($healthColumns)
 
 # 1. Safety scan - Microsoft Defender's detections plus Quietpane's own checks
 $scanPanel = New-TabPage 'Safety scan' 'scan' ('Asks Microsoft Defender what it has found, and looks for the tricks adware uses. Looking changes nothing.')
@@ -1108,6 +1394,7 @@ function New-Section([string]$Header) {
     return [pscustomobject]@{ Expander = $ex; Content = $sp }
 }
 $privacyPanel = New-TabPage 'Privacy' 'privacy' ('What your PC shares, and the tracking and ads you can switch off. Security and Windows Update are never touched.')
+[void]$privacyPanel.Children.Add((New-GlanceBox 'privacy'))
 
 # Add-ons see more of your browsing than anything else on this PC, so they come first.
 $script:AddonSection = New-Section 'Your browser add-ons'
@@ -1158,6 +1445,7 @@ $vendorPanel = New-TabPage 'Telemetry' 'vendors' ('')
 $vendorIntroText = New-Text 'Background extras from the companies that made your PC, and what they report. Drivers are never touched, and the apps still work.' 13.5 'Normal' '#4B5B5C' '0,0,0,12'
 Set-MoreInfo $vendorIntroText 'The laptop maker, the graphics chip, the processor: most PCs arrive with helpers from each, and many quietly report home. Only what is actually on this PC is listed.'
 [void]$vendorPanel.Children.Add($vendorIntroText)
+[void]$vendorPanel.Children.Add((New-GlanceBox 'vendors'))
 $script:VendorIntro = New-Text 'Having a look at what came with this PC...' 13 'SemiBold' '#0F1B1C' '0,0,0,6'
 [void]$vendorPanel.Children.Add($script:VendorIntro)
 $script:VendorList = New-Object System.Windows.Controls.StackPanel
@@ -1165,6 +1453,7 @@ $script:VendorList = New-Object System.Windows.Controls.StackPanel
 
 # 4. Apps - what starts when you sign in, and apps you could remove
 $appsPanel = New-TabPage 'Apps' 'apps' ('What starts when you sign in, and apps you never asked for. Tick, then Preview or Apply.')
+[void]$appsPanel.Children.Add((New-GlanceBox 'apps'))
 
 $script:StartupSection = New-Section 'Starts when you sign in'
 $script:StartupSection.Expander.IsExpanded = $true
@@ -1192,6 +1481,7 @@ $script:AppsList = New-Object System.Windows.Controls.StackPanel
 
 # 5. Clean-up
 $cleanupPanel = New-TabPage 'Free up space' 'cleanup' ('Leftovers nobody needs, like temporary files and old installers. They go to your Recycle Bin. Close your browsers first.')
+[void]$cleanupPanel.Children.Add((New-GlanceBox 'cleanup'))
 $script:CleanupList = New-Object System.Windows.Controls.StackPanel
 [void]$script:CleanupList.Children.Add((New-Text 'Measuring sizes...' 13 'Normal' '#4B5B5C'))
 [void]$cleanupPanel.Children.Add($script:CleanupList)
@@ -1238,6 +1528,7 @@ foreach ($e in $script:SpaceWinsHead, $script:SpaceWinsNote, $script:SpaceCrumb,
 # 6. Undo
 $undoPanel = New-TabPage 'Undo' 'undo' ('Every change is saved as a restore point. Pick one to put it back.')
 Set-MoreInfo $undoPanel.Children[0] 'Settings go back exactly as they were. Cleaned-up files are waiting in your Recycle Bin, and removed apps come back from the Microsoft Store.'
+[void]$undoPanel.Children.Add((New-GlanceBox 'undo'))
 $script:UndoList = New-Object System.Windows.Controls.ListBox
 $script:UndoList.MinHeight = 160
 [System.Windows.Automation.AutomationProperties]::SetName($script:UndoList, 'Restore points, newest first')
@@ -1252,117 +1543,85 @@ $btnUndoRefresh = New-Button 'Refresh list'
 [void]$undoButtons.Children.Add($btnUndoRefresh)
 [void]$undoPanel.Children.Add($undoButtons)
 
-# 7. About, privacy & terms
-$aboutPanel = New-TabPage 'About' 'about' ''
-$aboutHead = New-Object System.Windows.Controls.StackPanel
-$aboutHead.Orientation = 'Horizontal'
-$aboutHead.Margin = Get-Thick '0,0,0,12'
-if ($logo) {
-    $img = New-Object System.Windows.Controls.Image
-    $img.Source = $logo; $img.Width = 72; $img.Height = 72; $img.Margin = Get-Thick '0,0,16,0'
-    [void]$aboutHead.Children.Add($img)
-}
-$aboutTitle = New-Object System.Windows.Controls.StackPanel
-$aboutTitle.VerticalAlignment = 'Center'
-[void]$aboutTitle.Children.Add((New-Text "Quietpane $($info.Version)" 24 'SemiBold' '#0F1B1C' '0,0,0,2' 'Fraunces, Georgia'))
-[void]$aboutTitle.Children.Add((New-Text 'Developed by KomodoWorks - an independent technology studio in Dublin, Ireland.' 13 'Normal' '#4B5B5C' '0'))
-[void]$aboutHead.Children.Add($aboutTitle)
-[void]$aboutPanel.Children.Add($aboutHead)
+# 7. Settings - how Quietpane looks and starts, updates, our promise, and who made it. Laid out like a
+# settings page: what each setting is on the left, its switch or choice on the right, a hairline between.
+# A switch is used only where flipping it changes things there and then; it shows "on" only once that
+# has worked. The version and the small print sit at the bottom.
+$aboutPanel = New-TabPage 'Settings' 'about' ''
+[void]$aboutPanel.Children.Add((New-Text 'Settings' 24 'SemiBold' '#0F1B1C' '0,0,0,6' 'Fraunces, Georgia'))
 
-[void]$aboutPanel.Children.Add((New-GroupHeader 'Our promise'))
-# One short line each; point at a line for the whole of it.
-foreach ($pair in @(
-        @('Collects nothing - no accounts, tracking or ads.',
-          'No accounts, analytics, telemetry, crash reports, ads, cookies or tracking of any kind.'),
-        @('Connects to nothing - links open only when you click them.',
-          'The app makes no network requests at all.'),
-        @('Changes nothing without asking, and keeps a restore point.',
-          'Every change is shown first and confirmed, and settings go into a restore point you can undo.'),
-        @('Tidying up uses your Recycle Bin. Anything that can''t be undone says so first.',
-          'Scheduled tasks are switched off, not deleted. Three things can''t be undone - removing an app (the Microsoft Store has it), uninstalling a brand extra, and deleting a threat for good - and the app says so before you confirm.'),
-        @('Hides nothing - plain-text code you can read. No installer.',
-          'Plain-text PowerShell you can read line by line, plus three small pieces of C# - for the graphics temperature, adding up folder sizes, and making shortcuts. It only copies itself to Program Files if you add shortcuts or start it when you sign in.'),
-        @('Free and open source (MIT). Not tied to Microsoft or any PC maker.',
-          'MIT License. Not affiliated with Microsoft, NVIDIA, Intel, AMD, Google or any PC maker.'))) {
-    $t = New-Text ('-  ' + $pair[0]) 13 'Normal' '#0F1B1C' '4,4,0,0'
-    Set-MoreInfo $t $pair[1]
-    [void]$aboutPanel.Children.Add($t)
+function New-ChoiceRow([string]$Group, [string]$Label, [object[]]$Choices, [string]$Current, [scriptblock]$OnPick) {
+    <# A row of round buttons for one choice. Applies the moment one is picked. Returns the buttons by value. #>
+    $row = New-Object System.Windows.Controls.StackPanel
+    $row.Orientation = 'Horizontal'
+    $buttons = @{}
+    foreach ($opt in $Choices) {
+        $rb = New-Object System.Windows.Controls.RadioButton
+        $rb.GroupName = $Group
+        $rb.Content = New-Text $opt[1] 13 'Normal' '#0F1B1C' '2,0,0,0'
+        $rb.Margin = Get-Thick '16,0,0,0'
+        $rb.VerticalContentAlignment = 'Center'
+        $rb.Tag = $opt[0]
+        $rb.FocusVisualStyle = $window.FindResource('FocusRing')
+        [System.Windows.Automation.AutomationProperties]::SetName($rb, $Label + ': ' + $opt[1])
+        $rb.IsChecked = ($Current -eq $opt[0])
+        $rb.Add_Checked($OnPick)
+        $buttons[$opt[0]] = $rb
+        [void]$row.Children.Add($rb)
+    }
+    return [pscustomobject]@{ Panel = $row; Buttons = $buttons }
 }
 
-$aboutButtons = New-Object System.Windows.Controls.WrapPanel
-$aboutButtons.Margin = Get-Thick '0,16,0,8'
-$btnSite = New-Button 'Visit KomodoWorks.com' -Primary
-$btnMail = New-Button "Email $($info.BrandEmail)"
-$btnRepo = New-Button 'Source code on GitHub'
-$btnData = New-Button 'Open this app''s data folder'
-foreach ($b in $btnSite, $btnMail, $btnRepo, $btnData) { $b.Margin = Get-Thick '0,0,8,8'; [void]$aboutButtons.Children.Add($b) }
-[void]$aboutPanel.Children.Add($aboutButtons)
+# Light or dark: follows Windows unless someone would rather it didn't.
+$appear = New-ChoiceRow 'Appearance' 'Appearance' @(@('System', 'Match Windows'), @('Light', 'Light'), @('Dark', 'Dark')) $script:AppearanceChoice {
+    param($s) if ($s.Tag -ne $script:AppearanceChoice) { Set-AppearanceChoice $s.Tag } }
+$script:AppearButtons = $appear.Buttons
+$appearRow = New-SettingRow 'Appearance' 'Match Windows follows your Windows colour setting.' $appear.Panel
+Set-MoreInfo $appearRow.Label 'Match Windows follows Settings > Personalisation > Colours, and changes with it while Quietpane is open. Light or Dark stays put whatever Windows does.'
+[void]$aboutPanel.Children.Add($appearRow.Border)
 
-# The two ways to reach Quietpane without hunting for the folder again.
-[void]$aboutPanel.Children.Add((New-GroupHeader 'Quietpane on this PC'))
-$btnShortcut = New-Button 'Add to Start menu and desktop' '0,8,0,0'
-$btnShortcut.HorizontalAlignment = 'Left'
-[void]$aboutPanel.Children.Add($btnShortcut)
-$script:SignInBox = New-Object System.Windows.Controls.CheckBox
-$script:SignInBox.Margin = Get-Thick '0,14,0,0'
-$script:SignInBox.VerticalContentAlignment = 'Center'
-$script:SignInBox.Content = New-Text 'Start Quietpane when I sign in' 13.5 'SemiBold' '#0F1B1C' '2,0,0,0'
-[void]$aboutPanel.Children.Add($script:SignInBox)
-[void]$aboutPanel.Children.Add((New-Text 'It waits on the taskbar and does nothing until you click it.' 12.5 'Normal' '#4B5B5C' '22,2,0,0'))
-# Only makes sense with the one above, so it sits under it, indented, and waits until that is ticked.
-$script:WatchBox = New-Object System.Windows.Controls.CheckBox
-$script:WatchBox.Margin = Get-Thick '22,10,0,0'
-$script:WatchBox.VerticalContentAlignment = 'Center'
+# Celsius or Fahrenheit, for every temperature Quietpane shows.
+$deg = [char]0x00B0
+$temp = New-ChoiceRow 'Temperature' 'Temperatures' @(@('C', "${deg}C"), @('F', "${deg}F")) (Get-QpTempUnit) { param($s) Set-TemperatureChoice $s.Tag }
+$script:TempButtons = $temp.Buttons
+$tempRow = New-SettingRow 'Temperatures' 'On the Health tab and in session reports.' $temp.Panel
+[void]$aboutPanel.Children.Add($tempRow.Border)
+
+# Starting when you sign in, and checking once as it does. Both take effect the moment they are flipped.
+$script:SignInBox = New-Switch 'Start Quietpane when I sign in'
+# Greyed out until Windows has said whether it is on, so it never shows "off" for a setting that is on.
+$script:SignInBox.IsEnabled = $false
+$script:SignInBox.ToolTip = 'Checking whether this is on...'
+[System.Windows.Controls.ToolTipService]::SetShowOnDisabled($script:SignInBox, $true)
+$signInRow = New-SettingRow 'Start Quietpane when I sign in' 'It waits on the taskbar and does nothing until you click it.' $script:SignInBox
+[void]$aboutPanel.Children.Add($signInRow.Border)
+# Only makes sense with the one above, so it sits under it, indented, and waits until that is on.
+$script:WatchBox = New-Switch 'Also tell me if Windows switches things back on'
 $script:WatchBox.IsEnabled = $false
-$script:WatchBox.Opacity = 0.55   # looks as unavailable as it is, until the box above is ticked
-$script:WatchBox.Content = New-Text 'Also tell me if Windows switches things back on' 13.5 'SemiBold' '#0F1B1C' '2,0,0,0'
-$script:WatchBox.ToolTip = 'Tick "Start Quietpane when I sign in" first.'
+$script:WatchBox.ToolTip = 'Switch on "Start Quietpane when I sign in" first.'
 [System.Windows.Controls.ToolTipService]::SetShowOnDisabled($script:WatchBox, $true)
-[void]$aboutPanel.Children.Add($script:WatchBox)
-$watchNote = New-Text 'Checks once as you sign in, and badges the taskbar icon if anything came back.' 12.5 'Normal' '#4B5B5C' '44,2,0,0'
-Set-MoreInfo $watchNote 'About a second of work, just after you sign in. If nothing came back, you won''t notice it at all.'
-[void]$aboutPanel.Children.Add($watchNote)
-$placeNote = New-Text 'Both use Quietpane''s own copy, so you can move the folder you unzipped.' 12.5 'Normal' '#4B5B5C' '0,12,0,6'
-Set-MoreInfo $placeNote 'The copy lives in Program Files. To keep Quietpane on the taskbar, right-click it in the Start menu and choose "Pin to taskbar".'
-Set-MoreInfo $btnShortcut 'To keep Quietpane on the taskbar afterwards, right-click it in the Start menu and choose "Pin to taskbar".'
-[void]$aboutPanel.Children.Add($placeNote)
+$watchRow = New-SettingRow 'Also tell me if Windows switches things back on' 'Checks once as you sign in, and badges the taskbar icon if anything came back.' $script:WatchBox
+$watchRow.Border.Margin = Get-Thick '24,0,0,0'
+Set-MoreInfo $watchRow.Note 'About a second of work, just after you sign in. If nothing came back, you won''t notice it at all.'
+[void]$aboutPanel.Children.Add($watchRow.Border)
 
-# Light or dark: follows Windows unless someone would rather it didn't. Applies the moment it is picked.
-$appearRow = New-Object System.Windows.Controls.StackPanel
-$appearRow.Orientation = 'Horizontal'
-$appearRow.Margin = Get-Thick '0,14,0,0'
-$appearLabel = New-Text 'Appearance' 13.5 'SemiBold' '#0F1B1C' '0,0,14,0'
-$appearLabel.VerticalAlignment = 'Center'
-[void]$appearRow.Children.Add($appearLabel)
-$script:AppearButtons = @{}
-foreach ($opt in @(@('System', 'Match Windows'), @('Light', 'Light'), @('Dark', 'Dark'))) {
-    $rb = New-Object System.Windows.Controls.RadioButton
-    $rb.GroupName = 'Appearance'
-    $rb.Content = New-Text $opt[1] 13 'Normal' '#0F1B1C' '2,0,0,0'
-    $rb.Margin = Get-Thick '0,0,16,0'
-    $rb.VerticalContentAlignment = 'Center'
-    $rb.Tag = $opt[0]
-    $rb.FocusVisualStyle = $window.FindResource('FocusRing')
-    [System.Windows.Automation.AutomationProperties]::SetName($rb, 'Appearance: ' + $opt[1])
-    $rb.IsChecked = ($script:AppearanceChoice -eq $opt[0])
-    $rb.Add_Checked({ param($s) if ($s.Tag -ne $script:AppearanceChoice) { Set-AppearanceChoice $s.Tag } })
-    $script:AppearButtons[$opt[0]] = $rb
-    [void]$appearRow.Children.Add($rb)
-}
-Set-MoreInfo $appearLabel 'Match Windows follows Settings > Personalisation > Colours, and changes with it while Quietpane is open. Light or Dark stays put whatever Windows does.'
-[void]$aboutPanel.Children.Add($appearRow)
+# The way to reach Quietpane without hunting for the folder again.
+$btnShortcut = New-Button 'Add to Start menu and desktop' '0'
+$shortcutRow = New-SettingRow 'Start menu and desktop' 'Both use Quietpane''s own copy, so you can move the folder you unzipped.' $btnShortcut
+Set-MoreInfo $shortcutRow.Note 'The copy lives in Program Files. To keep Quietpane on the taskbar, right-click it in the Start menu and choose "Pin to taskbar".'
+Set-MoreInfo $btnShortcut 'To keep Quietpane on the taskbar afterwards, right-click it in the Start menu and choose "Pin to taskbar".'
+[void]$aboutPanel.Children.Add($shortcutRow.Border)
 
 # Updates. Quietpane never goes online to look for one; these are the two ways you can.
-[void]$aboutPanel.Children.Add((New-GroupHeader 'Updates'))
-$script:VersionLine = New-Text '' 13 'Normal' '#0F1B1C' '0,8,0,8'
-[void]$aboutPanel.Children.Add($script:VersionLine)
-$updateButtons = New-Object System.Windows.Controls.WrapPanel
-$btnLookForUpdate = New-Button 'Look for a newer version'
-$btnUpdateFromFile = New-Button 'Install an update from a file...'
-foreach ($b in $btnLookForUpdate, $btnUpdateFromFile) { $b.Margin = Get-Thick '0,0,10,4'; [void]$updateButtons.Children.Add($b) }
+$updateButtons = New-Object System.Windows.Controls.StackPanel
+$btnLookForUpdate = New-Button 'Look for a newer version' '0,0,0,6'
+$btnUpdateFromFile = New-Button 'Install an update from a file...' '0'
+foreach ($b in $btnLookForUpdate, $btnUpdateFromFile) { [void]$updateButtons.Children.Add($b) }
+$updateRow = New-SettingRow 'Updates' ' ' $updateButtons
+$script:VersionLine = $updateRow.Note
 Set-MoreInfo $btnLookForUpdate 'Opens the Quietpane page on GitHub in your web browser. Quietpane itself never connects to anything.'
 Set-MoreInfo $btnUpdateFromFile 'Already downloaded a newer Quietpane.zip? Pick it here and Quietpane installs it for you.'
-[void]$aboutPanel.Children.Add($updateButtons)
+[void]$aboutPanel.Children.Add($updateRow.Border)
 $btnLookForUpdate.Add_Click({ Open-ReleasePage })
 $btnUpdateFromFile.Add_Click({
     $dlg = New-Object Microsoft.Win32.OpenFileDialog
@@ -1380,6 +1639,29 @@ $btnUpdateLater.Add_Click({
     } catch { }
     $script:UpdatePanel.Visibility = 'Collapsed'
 })
+
+# Our promise, as a short list: what, and how. Point at a line for the whole of it.
+$promise = New-DetailsBox 'Our promise'
+$promise.Border.Margin = Get-Thick '0,18,0,12'
+foreach ($p in @(
+        @('Collects', 'nothing - no accounts, tracking or ads', 'No accounts, analytics, telemetry, crash reports, ads, cookies or tracking of any kind.'),
+        @('Connects to', 'nothing - links open only when you click them', 'The app makes no network requests at all.'),
+        @('Changes', 'nothing without asking, and keeps a restore point', 'Every change is shown first and confirmed, and settings go into a restore point you can undo.'),
+        @('Tidying up', 'uses your Recycle Bin', 'Scheduled tasks are switched off, not deleted. Three things can''t be undone - removing an app (the Microsoft Store has it), uninstalling a brand extra, and deleting a threat for good - and the app says so before you confirm.'),
+        @('The code', 'plain text you can read - no installer', 'Plain-text PowerShell you can read line by line, plus a few small pieces of C# - for the graphics card''s and the drive''s own readings, adding up folder sizes, and making shortcuts - compiled on your PC as it runs. It only copies itself to Program Files if you add shortcuts or start it when you sign in.'),
+        @('Licence', 'free and open source (MIT)', 'MIT License. Not affiliated with Microsoft, NVIDIA, Intel, AMD, Google or any PC maker.'))) {
+    [void](Add-DetailRow $promise $p[0] $p[1] -Tip $p[2])
+}
+[void]$aboutPanel.Children.Add($promise.Border)
+
+$aboutButtons = New-Object System.Windows.Controls.WrapPanel
+$aboutButtons.Margin = Get-Thick '0,4,0,8'
+$btnSite = New-Button 'Visit KomodoWorks.com' -Primary
+$btnMail = New-Button "Email $($info.BrandEmail)"
+$btnRepo = New-Button 'Source code on GitHub'
+$btnData = New-Button 'Open this app''s data folder'
+foreach ($b in $btnSite, $btnMail, $btnRepo, $btnData) { $b.Margin = Get-Thick '0,0,8,8'; [void]$aboutButtons.Children.Add($b) }
+[void]$aboutPanel.Children.Add($aboutButtons)
 
 function Get-DocText([string]$File) {
     $p = Join-Path $PSScriptRoot $File
@@ -1411,6 +1693,43 @@ $script:LicenseExpander = New-DocExpander 'License (MIT)' 'LICENSE'
 $script:SecurityExpander = New-DocExpander 'Security & genuine copies' 'SECURITY.md'
 foreach ($e in $script:PrivacyExpander, $script:TermsExpander, $script:LicenseExpander, $script:SecurityExpander) { [void]$aboutPanel.Children.Add($e) }
 
+# At the bottom, like any settings page: which version this is, who made it, and the small print.
+$aboutFoot = New-Object System.Windows.Controls.StackPanel
+$aboutFoot.Margin = Get-Thick '0,26,0,0'
+$footHead = New-Object System.Windows.Controls.StackPanel
+$footHead.Orientation = 'Horizontal'
+if ($logo) {
+    $img = New-Object System.Windows.Controls.Image
+    $img.Source = $logo; $img.Width = 40; $img.Height = 40; $img.Margin = Get-Thick '0,0,12,0'
+    [void]$footHead.Children.Add($img)
+}
+$footWords = New-Object System.Windows.Controls.StackPanel
+$footWords.VerticalAlignment = 'Center'
+$script:VersionTitle = New-Text "Version $($info.Version)" 16 'SemiBold' '#9A6700' '0,0,0,2' 'Fraunces, Georgia'
+[void]$footWords.Children.Add($script:VersionTitle)
+[void]$footWords.Children.Add((New-Text 'Developed by KomodoWorks - an independent technology studio in Dublin, Ireland.' 12.5 'Normal' '#4B5B5C' '0'))
+[void]$footHead.Children.Add($footWords)
+[void]$aboutFoot.Children.Add($footHead)
+$footLinks = New-Object System.Windows.Controls.TextBlock
+$footLinks.Margin = Get-Thick '0,10,0,0'
+$footLinks.FontSize = 12.5
+$footLinks.Foreground = Get-Brush '#4B5B5C'
+$footLinks.TextWrapping = 'Wrap'
+function Add-FootLink([string]$Text, [scriptblock]$OnClick) {
+    if ($footLinks.Inlines.Count) { $footLinks.Inlines.Add((New-Object System.Windows.Documents.Run '   |   ')) }
+    $h = New-Object System.Windows.Documents.Hyperlink
+    $h.Inlines.Add($Text)
+    $h.Foreground = Get-Brush '#117A68'
+    $h.Add_Click($OnClick)
+    $footLinks.Inlines.Add($h)
+}
+Add-FootLink 'Privacy' { Show-Doc $script:PrivacyExpander }
+Add-FootLink 'Terms' { Show-Doc $script:TermsExpander }
+Add-FootLink 'Source' { Open-AsUser $info.RepoUrl }
+Add-FootLink 'Licence' { Show-Doc $script:LicenseExpander }
+[void]$aboutFoot.Children.Add($footLinks)
+[void]$aboutPanel.Children.Add($aboutFoot)
+
 $script:ActionButtons = @($ui.BtnRecommended, $ui.BtnNone, $ui.BtnPreview, $ui.BtnApply, $btnScan, $btnUndo, $btnUndoRefresh, $btnOneClick, $btnHomeScan, $btnUndoAll, $btnRestart, $btnPutBack, $btnThatWasMe, $btnSpaceLook, $btnSpaceBack)
 
 # ------------------------------------------------------------------ links
@@ -1424,6 +1743,37 @@ $ui.LinkFooter.Add_Click({ Open-AsUser $info.BrandUrl })
 $ui.LinkContact.Add_Click({ Open-AsUser "mailto:$($info.BrandEmail)?subject=Quietpane" })
 $ui.LinkPrivacy.Add_Click({ Show-Doc $script:PrivacyExpander })
 $ui.LinkTerms.Add_Click({ Show-Doc $script:TermsExpander })
+function Show-Message([string]$Text) {
+    <# A message you have to click away. The self-test keeps it instead of showing it, so it can read it and never waits. #>
+    if ($SelfTest) { $script:LastMessage = $Text; return }
+    [void][System.Windows.MessageBox]::Show($Text, 'Quietpane')
+}
+
+function Set-TemperatureChoice([string]$Unit) {
+    <#
+        Celsius or Fahrenheit, from Settings: saved as one letter, then every temperature on screen is written
+        again at once. If it cannot be saved, the choice goes back and says why - never a choice that did not stick.
+    #>
+    if ($Unit -eq (Get-QpTempUnit)) { return }
+    $ok = if ($SelfTest) { Set-QpTempUnit -Unit $Unit -SessionOnly } else { Set-QpTempUnit -Unit $Unit }
+    if (-not $ok) {
+        $script:TempButtons[(Get-QpTempUnit)].IsChecked = $true
+        Show-Message 'That choice could not be saved, so temperatures stay as they were.'
+        return
+    }
+    if ($script:LastReading) { Update-LiveTiles $script:LastReading } else { Update-HealthDetails }
+    try { Update-SessionCard } catch { }
+}
+
+# The switches react to being flipped, however they are flipped - by mouse, by keyboard, or by a screen
+# reader, which flips them without a click. When the window itself moves a switch to show how things are,
+# it does so quietly, so that never counts as a person asking for a change.
+$script:SwitchSync = $false
+function Set-SwitchQuietly($Box, [bool]$Value) {
+    $script:SwitchSync = $true
+    try { $Box.IsChecked = $Value } finally { $script:SwitchSync = $false }
+}
+
 function Update-PlaceControls {
     # The button and the tick box always show how things really are. The one button does both jobs,
     # so there is only ever one thing to click.
@@ -1432,12 +1782,17 @@ function Update-PlaceControls {
         $btnShortcut.Content = if ($s.StartMenu -or $s.Desktop) { 'Remove from Start menu and desktop' } else { 'Add to Start menu and desktop' }
         $task = Get-QpSignInTask
         $on = [bool]($task -and "$($task.State)" -ne 'Disabled')
-        $script:SignInBox.IsChecked = $on
+        Set-SwitchQuietly $script:SignInBox $on
+        $script:SignInBox.IsEnabled = $true
+        $script:SignInBox.ToolTip = $null
         $script:WatchBox.IsEnabled = $on
-        $script:WatchBox.Opacity = $(if ($on) { 1.0 } else { 0.55 })
-        $script:WatchBox.ToolTip = $(if ($on) { $null } else { 'Tick "Start Quietpane when I sign in" first.' })
-        $script:WatchBox.IsChecked = ($on -and (Test-QpTaskWatches $task))
-    } catch { }
+        $script:WatchBox.ToolTip = $(if ($on) { $null } else { 'Switch on "Start Quietpane when I sign in" first.' })
+        Set-SwitchQuietly $script:WatchBox ($on -and (Test-QpTaskWatches $task))
+    } catch {
+        # Windows would not say whether it is on, so the switch can't honestly show either way.
+        $script:SignInBox.IsEnabled = $false
+        $script:SignInBox.ToolTip = 'Quietpane could not read this setting from Task Scheduler.'
+    }
 }
 # Taken away while this copy is the one open: it goes to the Recycle Bin once the window closes.
 $script:RemoveCopyOnClose = $false
@@ -1463,33 +1818,49 @@ $btnShortcut.Add_Click({
     }
     Update-PlaceControls
 })
-# Click, not Checked: only a person ticking the box changes anything, never the window updating it.
-$script:SignInBox.Add_Click({
+# Only a person flipping a switch changes anything, never the window showing how things are (see above).
+# A switch shows how things are, never how they are about to be: it goes back to that straight away, and
+# only moves once the change has been made and read back.
+$script:OnSignInSwitch = {
+    if ($script:SwitchSync) { return }
+    $want = [bool]$script:SignInBox.IsChecked
+    Set-SwitchQuietly $script:SignInBox (-not $want)
     if (Test-Busy) { Update-PlaceControls; return }
     try {
-        $r = if ($script:SignInBox.IsChecked) { Enable-QpSignInStart } else { Disable-QpSignInStart }
+        $r = if ($want) { Enable-QpSignInStart } else { Disable-QpSignInStart }
         Set-CopyFollowUp $r
-        # The tick itself says it worked; only a problem, or something now in the Recycle Bin, needs words.
-        if (-not $r.Ok -or $r.Copy -in 'Recycled', 'Later', 'Failed') { [void][System.Windows.MessageBox]::Show($r.Note, 'Quietpane') }
+        Update-PlaceControls
+        # The switch itself says it worked; only a problem, or something now in the Recycle Bin, needs words.
+        if (-not $r.Ok -or $r.Copy -in 'Recycled', 'Later', 'Failed') { Show-Message $r.Note }
         else { $ui.Status.Text = $r.Note }
     } catch {
-        [void][System.Windows.MessageBox]::Show("That did not work: $($_.Exception.Message)", 'Quietpane')
+        Update-PlaceControls
+        Show-Message "That did not work: $($_.Exception.Message)"
     }
     Update-PlaceControls
-})
-$script:WatchBox.Add_Click({
+}
+$script:SignInBox.Add_Checked($script:OnSignInSwitch)
+$script:SignInBox.Add_Unchecked($script:OnSignInSwitch)
+$script:OnWatchSwitch = {
+    if ($script:SwitchSync) { return }
+    $want = [bool]$script:WatchBox.IsChecked
+    Set-SwitchQuietly $script:WatchBox (-not $want)
     if (Test-Busy) { Update-PlaceControls; return }
     try {
         # The sign-in task carries this choice, so changing it means setting the task up again.
-        $r = Enable-QpSignInStart -Watch:([bool]$script:WatchBox.IsChecked)
-        if (-not $r.Ok) { [void][System.Windows.MessageBox]::Show($r.Note, 'Quietpane') }
-        elseif ($script:WatchBox.IsChecked) { $ui.Status.Text = $r.Note }
+        $r = Enable-QpSignInStart -Watch:$want
+        Update-PlaceControls
+        if (-not $r.Ok) { Show-Message $r.Note }
+        elseif ($want) { $ui.Status.Text = $r.Note }
         else { $ui.Status.Text = 'Quietpane will no longer check when you sign in. It still starts on the taskbar.' }
     } catch {
-        [void][System.Windows.MessageBox]::Show("That did not work: $($_.Exception.Message)", 'Quietpane')
+        Update-PlaceControls
+        Show-Message "That did not work: $($_.Exception.Message)"
     }
     Update-PlaceControls
-})
+}
+$script:WatchBox.Add_Checked($script:OnWatchSwitch)
+$script:WatchBox.Add_Unchecked($script:OnWatchSwitch)
 
 $btnSite.Add_Click({ Open-AsUser $info.BrandUrl })
 $btnRepo.Add_Click({ Open-AsUser $info.RepoUrl })
@@ -1641,12 +2012,12 @@ function Start-LiveSampler {
                     try {
                         # Free space is here too: it is what the "drive is filling up" warning needs, and
                         # it changes far too slowly to be worth asking about every two seconds.
-                        $free = $null
+                        $free = $null; $space = $null
                         try {
                             $d = New-Object IO.DriveInfo ($env:SystemDrive + '\')
-                            if ($d.TotalSize -gt 0) { $free = 100 * $d.AvailableFreeSpace / $d.TotalSize }
+                            if ($d.TotalSize -gt 0) { $free = 100 * $d.AvailableFreeSpace / $d.TotalSize; $space = @{ Free = [double]$d.AvailableFreeSpace; Total = [double]$d.TotalSize } }
                         } catch { }
-                        $Live.Health = @{ Battery = Get-QpBatteryHealth; Drive = Get-QpDriveHealth; Steady = Get-QpReliability; FreePct = $free }
+                        $Live.Health = @{ Battery = Get-QpBatteryHealth; Drive = Get-QpDriveHealth; Steady = Get-QpReliability; FreePct = $free; Space = $space; Facts = Get-QpSystemFacts }
                         $Live.HealthSeq = $Live.HealthSeq + 1
                     } catch { }
                     $healthAt = Get-Date
@@ -1702,7 +2073,7 @@ $timer.Add_Tick({
     }
     if ($script:Live.HealthSeq -ne $script:HealthSeqShown) {
         $script:HealthSeqShown = $script:Live.HealthSeq
-        try { $script:BatteryHealth = $script:Live.Health.Battery; Update-DriveCard $script:Live.Health.Drive } catch { }
+        try { $script:BatteryHealth = $script:Live.Health.Battery; $script:SpaceLast = $script:Live.Health.Space; $script:FactsLast = $script:Live.Health.Facts; Update-DriveCard $script:Live.Health.Drive } catch { }
         try { Update-SteadyCard $script:Live.Health.Steady } catch { }
     }
     if ($script:Live.Seq -ne $script:LiveSeqShown) {
@@ -1764,6 +2135,9 @@ function Update-FromState($state) {
         try { & $Body } catch { $ui.LogBox.AppendText(('[{0}] WARN    Could not show {1}: {2}' -f (Get-Date -Format 'HH:mm:ss'), $What, $_.Exception.Message) + [Environment]::NewLine) }
     }
     foreach ($o in $script:Options['privacy']) { Set-OptionStatus $o ([string]$state.Privacy[$o.Id]) }
+    $privAll = @($script:Options['privacy'] | Where-Object { $_.Status -ne 'NotApplicable' })
+    $privOff = @($privAll | Where-Object { $_.Status -eq 'Applied' })
+    if ($privAll.Count) { Set-Glance 'privacy' 'settings' 'Settings already switched off' ('{0} of {1}' -f $privOff.Count, $privAll.Count) -Ratio ($privOff.Count / $privAll.Count) -Tip 'The tracking, ads and suggestions below that are already off on this PC. The bar is how many.' }
     Show-Part 'the brand extras' { Update-VendorTab @($state.Vendors) }
     Show-Part 'what starts at sign-in' { Update-StartupList @($state.Startup | Where-Object { $_ }) $state.SignIn }
     Show-Part 'camera, microphone and location use' { Update-DeviceList @($state.Devices | Where-Object { $_ }) }
@@ -1775,10 +2149,13 @@ function Update-FromState($state) {
     $script:Options['apps'].Clear()
     $apps = @($state.Apps | Where-Object { $_ })
     $script:RemoveSection.Expander.Header = New-Text ('Apps you could remove   ({0} found)' -f $apps.Count) 14.5 'SemiBold' '#117A68' '0' 'Fraunces, Georgia'
+    Set-Glance 'apps' 'remove' 'Apps you could remove' $(if ($apps.Count) { '{0} found' -f $apps.Count } else { 'none found' }) -Tone $(if ($apps.Count) { 'warn' } else { 'good' })
     if ($apps.Count -eq 0) { [void]$script:AppsList.Children.Add((New-Text 'No known bloat apps found on this PC.' 13 'SemiBold' '#117A68')) }
     foreach ($a in $apps) { Add-Option -Panel $script:AppsList -Key 'apps' -Id $a.Name -Title $a.Title -Short $a.Description -Description ('{0}  (Windows calls it {1}.)' -f $a.Description, $a.Name) -Recommended ([bool]$a.Recommended) }
     $script:CleanupList.Children.Clear()
     $script:Options['cleanup'].Clear()
+    $leftover = [double](@($state.Cleanup | Where-Object { $_ } | ForEach-Object { [double]$_.SizeBytes }) | Measure-Object -Sum).Sum
+    Set-Glance 'cleanup' 'leftovers' 'Leftovers you could clear' $(if ($leftover -gt 0) { Format-QpBytes $leftover } else { 'none - already tidy' }) -Tip 'Temporary files, crash dumps and old installers, listed below. They go to your Recycle Bin.'
     foreach ($c in @($state.Cleanup | Where-Object { $_ })) {
         $title = '{0}   ({1})' -f $c.Title, (Format-QpBytes $c.SizeBytes)
         Add-Option -Panel $script:CleanupList -Key 'cleanup' -Id $c.Id -Title $title -Description $c.Description -Recommended ([bool]$c.Recommended)
@@ -1912,7 +2289,10 @@ function Update-StartupList($items, $signIn) {
     $off    = @($items | Where-Object { -not $_.On -and -not $_.Keep } | Sort-Object Name)
     $kept   = @($items | Where-Object { $_.Keep })
     $locked = @($items | Where-Object { $_.Locked -and $_.On -and -not $_.Keep })
-    $script:StartupSection.Expander.Header = New-Text ('Starts when you sign in   ({0} on, {1} off)' -f ($on.Count + @($kept | Where-Object On).Count + $locked.Count), ($off.Count + @($kept | Where-Object { -not $_.On }).Count)) 14.5 'SemiBold' '#117A68' '0' 'Fraunces, Georgia'
+    $startOn = $on.Count + @($kept | Where-Object On).Count + $locked.Count
+    $startOff = $off.Count + @($kept | Where-Object { -not $_.On }).Count
+    $script:StartupSection.Expander.Header = New-Text ('Starts when you sign in   ({0} on, {1} off)' -f $startOn, $startOff) 14.5 'SemiBold' '#117A68' '0' 'Fraunces, Georgia'
+    Set-Glance 'apps' 'startup' 'Start when you sign in' ('{0} on, {1} off' -f $startOn, $startOff) -Ratio $(if ($startOn + $startOff) { $startOn / ($startOn + $startOff) } else { $null }) -Tip 'The bar is how many of them still start when you sign in.'
     if (-not $on.Count) { [void]$script:StartupList.Children.Add((New-Text 'Nothing extra starts when you sign in.' 13 'SemiBold' '#117A68' '0,8,0,0')) }
     else {
         # What this is costing you, measured: memory in use now, and Windows' own timing where it has one.
@@ -1975,6 +2355,7 @@ function Update-AddonList($addons) {
            elseif ($wide.Count) { '{0}, {1} read every site' -f $yours.Count, $wide.Count }
            else { '{0}, none reads every site' -f $yours.Count }
     $script:AddonSection.Expander.Header = New-Text ("Your browser add-ons   ($sum)") 14.5 'SemiBold' $(if ($wide.Count) { '#9A6700' } else { '#117A68' }) '0' 'Fraunces, Georgia'
+    Set-Glance 'privacy' 'addons' 'Browser add-ons' $sum -Tone $(if ($wide.Count) { 'warn' } else { '' }) -Tip 'An add-on that reads every site you visit sees more of your browsing than anything else on this PC.'
     if (-not $all.Count) {
         [void]$script:AddonList.Children.Add((New-Text 'No browser that Quietpane knows about is installed here.' 13 'Normal' '#4B5B5C' '0,6,0,0'))
         return
@@ -2075,6 +2456,7 @@ function Update-DeviceList($devices) {
     }
     $sum = if ($live.Count) { ($live -join ' and ') + ' in use right now' } elseif ($users.Count -eq 1) { '1 app has used them' } else { "$($users.Count) apps have used them" }
     $script:DeviceSection.Expander.Header = New-Text ("Who used your camera, microphone and location   ($sum)") 14.5 'SemiBold' $(if ($live.Count) { '#9A6700' } else { '#117A68' }) '0' 'Fraunces, Georgia'
+    Set-Glance 'privacy' 'devices' 'Camera, microphone and location' $sum -Tone $(if ($live.Count) { 'warn' } else { '' })
 }
 
 function Update-NetList($c) {
@@ -2114,7 +2496,6 @@ $script:SpaceCurrent = $null
 $script:SpacePending = $null
 $script:SpaceMoved = [int64]0
 $script:SpaceAdviceCache = @{}
-$script:GridLength = New-Object System.Windows.GridLengthConverter
 
 $script:SpaceStops = $null
 function Test-SpaceNearProgram($Node) {
@@ -2482,10 +2863,14 @@ function Update-VendorTab($vendors) {
     $vendors = @($vendors | Where-Object { $_ })
     if ($vendors.Count -eq 0) {
         $script:VendorIntro.Text = 'Nothing to do here - no brand software that Quietpane recognises.'
+        Set-Glance 'vendors' 'brands' 'Brand software found' 'none that Quietpane knows'
+        Set-Glance 'vendors' 'open' 'Still switched on' 'nothing'
         return
     }
     $open = (@($vendors | ForEach-Object { $_.Open }) | Measure-Object -Sum).Sum
     $names = ($vendors | ForEach-Object { $_.Name }) -join ', '
+    Set-Glance 'vendors' 'brands' 'Brand software found' $names
+    Set-Glance 'vendors' 'open' 'Still switched on' $(if ($open -gt 0) { '{0} background extras' -f $open } else { 'nothing' }) -Tone $(if ($open -gt 0) { 'warn' } else { '' })
     $script:VendorIntro.Text = if ($open -gt 0) {
         'Found software from {0}. There are {1} background thing(s) still switched on.' -f $names, $open
     } else {
@@ -2548,13 +2933,14 @@ function Update-HomeCards($state) {
 
     $good = Get-Brush '#117A68'; $todo = Get-Brush '#0F1B1C'
     if ($priv) { $script:CardTracking.Value.Text = "$priv to switch off"; $script:CardTracking.Value.Foreground = $todo; $script:CardTracking.Caption.Text = 'Telemetry, ads and tips' }
-    else { $script:CardTracking.Value.Text = 'All set'; $script:CardTracking.Value.Foreground = $good; $script:CardTracking.Caption.Text = 'Tracking and ads are already off' }
-    if ($apps) { $script:CardApps.Value.Text = "$apps to remove"; $script:CardApps.Value.Foreground = $todo; $script:CardApps.Caption.Text = 'Pre-installed and promoted apps' }
-    else { $script:CardApps.Value.Text = 'None found'; $script:CardApps.Value.Foreground = $good; $script:CardApps.Caption.Text = 'No known bloat apps on this PC' }
+    else { $script:CardTracking.Value.Text = 'All set'; $script:CardTracking.Value.Foreground = $good; $script:CardTracking.Caption.Text = 'Already switched off' }
+    if ($apps) { $script:CardApps.Value.Text = "$apps to remove"; $script:CardApps.Value.Foreground = $todo; $script:CardApps.Caption.Text = 'Pre-installed extras' }
+    else { $script:CardApps.Value.Text = 'None found'; $script:CardApps.Value.Foreground = $good; $script:CardApps.Caption.Text = 'No known bloat apps' }
     # Startup is never part of one-click (what you want at sign-in is personal), so just point to it.
     $starting = @($state.Startup | Where-Object { $_ -and $_.On -and -not $_.Keep -and -not $_.Locked }).Count
-    if ($starting) { $script:CardApps.Caption.Text += ('. {0} start when you sign in - see Apps' -f $starting) }
-    if ($bytes -gt 0) { $script:CardSpace.Value.Text = Format-QpBytes $bytes; $script:CardSpace.Value.Foreground = $todo; $script:CardSpace.Caption.Text = 'Temp files, crash dumps, old installers' }
+    if ($starting) { $script:CardApps.Caption.Text = ('{0} start when you sign in' -f $starting); Set-MoreInfo $script:CardApps.Border 'Choose what starts when you sign in on the Apps tab.' }
+    else { $script:CardApps.Border.ToolTip = $null }
+    if ($bytes -gt 0) { $script:CardSpace.Value.Text = Format-QpBytes $bytes; $script:CardSpace.Value.Foreground = $todo; $script:CardSpace.Caption.Text = 'Temp files and leftovers' }
     else { $script:CardSpace.Value.Text = 'Nothing to clean'; $script:CardSpace.Value.Foreground = $good; $script:CardSpace.Caption.Text = 'Already tidy' }
     if ($vendors.Count) {
         $script:CardBrands.Border.Visibility = 'Visible'
@@ -2569,7 +2955,15 @@ function Update-HomeCards($state) {
 }
 
 function Set-MeterFill($meter, [double]$Ratio) {
+    <# How full a bar or a ring is, from nought to one. A ring with nothing to show is an empty track. #>
     if ($Ratio -lt 0) { $Ratio = 0 } elseif ($Ratio -gt 1) { $Ratio = 1 }
+    if ($meter.Ring) {
+        $g = $meter.Ring
+        if ($Ratio -le 0) { $meter.Fill.Data = $null }
+        elseif ($Ratio -ge 0.999) { $meter.Fill.Data = New-Object System.Windows.Media.EllipseGeometry([System.Windows.Point]::new($g.Cx, $g.Cy), $g.R, $g.R) }
+        else { $meter.Fill.Data = New-RingArc $g.Cx $g.Cy $g.R -90 ([math]::Max(1.5, 360 * $Ratio)) }
+        return
+    }
     $meter.Fill.Width = [Math]::Max(6, [Math]::Round($meter.TrackWidth * $Ratio))
 }
 
@@ -2578,6 +2972,7 @@ function Update-Meters {
     if ($u.DiskTotal -gt 0) {
         $script:MeterSpace.Value.Text = '{0} free' -f (Format-QpBytes $u.DiskFree)
         $script:MeterSpace.Caption.Text = 'of {0} on drive {1} - {2}% full' -f (Format-QpBytes $u.DiskTotal), $u.Drive, [int](100 * $u.DiskUsed / $u.DiskTotal)
+        Set-Glance 'cleanup' 'drive' ('Drive {0}' -f $u.Drive) ('{0} free of {1}' -f (Format-QpBytes $u.DiskFree), (Format-QpBytes $u.DiskTotal)) -Ratio ($u.DiskUsed / $u.DiskTotal) -Tone $(if ($u.DiskFree / $u.DiskTotal -lt 0.1) { 'warn' } else { '' }) -Tip 'The bar is how full the drive is.'
         Set-MeterFill $script:MeterSpace ($u.DiskUsed / $u.DiskTotal)
     }
     if ($u.MemTotal -gt 0) { Set-MemoryTile $u.MemUsed $u.MemTotal }
@@ -2602,12 +2997,9 @@ function Get-ShortName([string]$Name) {
 
 function Set-MemoryTile([double]$Used, [double]$Total, $PromisedPct = $null) {
     <#
-        Memory in the same shape as the others: a number, a bar, a plain word, a caption.
-
-        Where the others have a temperature, memory has the figure that actually explains a PC grinding
-        to a halt - how much Windows has promised out to programs, which fills up before the memory
-        chips do. It used to sit in a row of three bare percentages at the bottom of the panel, where it
-        meant nothing to anybody. Here it is the thing that decides the word.
+        Memory as one big number and a bar. Whichever is under more pressure - the memory in use, or
+        what Windows has promised out to programs, which runs out first - decides the word, because
+        either one can be what brings a PC to a crawl. The promised figure itself is in the list.
     #>
     if ($Total -le 0) { return }
     $t = $script:TileMemory
@@ -2615,34 +3007,35 @@ function Set-MemoryTile([double]$Used, [double]$Total, $PromisedPct = $null) {
     $t.Value.Text = '{0:N0}%' -f $pct
     Set-MeterFill $t ($Used / $Total)
     Set-TileMark $t 0.9
-    # Whichever is under more pressure decides the word, because either one can be what runs out.
-    $worst = @(@($pct, $PromisedPct) | Where-Object { $null -ne $_ } | ForEach-Object { [double]$_ } | Sort-Object -Descending)[0]
-    $word, $level = if ($worst -ge 90) { 'nearly full', 'high' } elseif ($worst -ge 80) { 'filling up', 'warn' } else { 'plenty free', 'ok' }
-    $t.Heat.Text = $word
+    $level = Get-MemoryLevel $pct $PromisedPct
+    $t.Heat.Text = switch ($level) { 'high' { 'nearly full' } 'warn' { 'filling up' } default { 'plenty free' } }
     Set-TileState $t $level
-    $caption = '{0} of {1} in use' -f (Format-QpBytes $Used), (Format-QpBytes $Total)
-    if ($null -ne $PromisedPct) { $caption += [Environment]::NewLine + ('{0}% promised to programs' -f $PromisedPct) }
-    $t.Caption.Text = $caption
+    $t.Caption.Text = '{0} of {1} in use' -f (Format-QpBytes $Used), (Format-QpBytes $Total)
     $t.Heat.ToolTip = 'Memory in use is what the chips are holding. Promised is what Windows has undertaken to find if every program asks at once - it runs out first, and when it does the PC starts crawling however much memory is fitted.'
 }
 
-$script:HeatColours = @{ ok = '#117A68'; warn = '#9A6700'; high = '#A83232'; none = '#66706F' }
-function Set-HeatText($Block, $Celsius, $MaxC, [bool]$Stuck, [string]$Tip) {
-    # Number and word together, so heat never depends on colour alone.
-    $deg = [char]0x00B0
+function Get-MemoryLevel([double]$Pct, $PromisedPct) {
+    $worst = @(@($Pct, $PromisedPct) | Where-Object { $null -ne $_ } | ForEach-Object { [double]$_ } | Sort-Object -Descending)[0]
+    if ($worst -ge 90) { 'high' } elseif ($worst -ge 80) { 'warn' } else { 'ok' }
+}
+
+function Get-HeatLine($Celsius, $MaxC = $null, [bool]$Stuck = $false, [string]$Kind = 'Chip') {
+    <#
+        A temperature as it is shown everywhere: the number, in the unit chosen in Settings, and a plain
+        word, so heat never depends on colour alone. Nothing shared is "not shared", never a number.
+    #>
     $dot = [char]0x00B7
-    $h = Get-QpHeatWord -Celsius $Celsius -MaxC $MaxC
-    if ($null -eq $Celsius) {
-        $Block.Text = 'temperature not shared'
-        $Block.Foreground = Get-Brush $script:HeatColours.none
-    } elseif ($Stuck) {
-        $Block.Text = '{0:N0}{1}C {2} sensor not updating' -f $Celsius, $deg, $dot
-        $Block.Foreground = Get-Brush $script:HeatColours.none
-        $Tip = 'This number has not changed at all for a while, so this PC''s sensor probably isn''t live. Treat it as unknown.'
-    } else {
-        $Block.Text = '{0:N0}{1}C {2} {3}' -f $Celsius, $deg, $dot, $h.Word
-        $Block.Foreground = Get-Brush $script:HeatColours[$h.Level]
-    }
+    if ($null -eq $Celsius) { return [pscustomobject]@{ Text = 'not shared'; Level = 'none'; Shared = $false } }
+    if ($Stuck) { return [pscustomobject]@{ Text = ('{0} {1} sensor not updating' -f (Format-QpTemp $Celsius), $dot); Level = 'none'; Shared = $true } }
+    $h = if ($Kind -eq 'Drive') { Get-QpHeatWord -Celsius $Celsius -Kind Drive } else { Get-QpHeatWord -Celsius $Celsius -MaxC $MaxC }
+    return [pscustomobject]@{ Text = ('{0} {1} {2}' -f (Format-QpTemp $Celsius), $dot, $h.Word); Level = $h.Level; Shared = $true }
+}
+
+function Set-HeatText($Block, $Celsius, $MaxC, [bool]$Stuck, [string]$Tip) {
+    $h = Get-HeatLine $Celsius $MaxC $Stuck
+    $Block.Text = if ($h.Shared) { $h.Text } else { 'temperature not shared' }
+    $Block.Foreground = Get-Brush $script:HeatColours[$h.Level]
+    if ($Stuck) { $Tip = 'This number has not changed at all for a while, so this PC''s sensor probably isn''t live. Treat it as unknown.' }
     $Block.ToolTip = $Tip
 }
 
@@ -2653,16 +3046,26 @@ function Set-TileState($Tile, [string]$Level) {
         the same thing in words, so none of this depends on seeing colour.
     #>
     if (-not $Level) { $Level = 'none' }
-    $Tile.Fill.Background = Get-Brush $(if ($Level -eq 'high') { $script:BarColours.high } else { $script:BarColours.ok })
+    $brush = Get-Brush $script:StateBars[$Level]
+    if ($Tile.Ring) { $Tile.Fill.Stroke = $brush } else { $Tile.Fill.Background = $brush }
     $Tile.Heat.Foreground = Get-Brush $script:HeatColours[$Level]
 }
 
 function Set-TileMark($Tile, $Ratio) {
-    <# The notch on the track where this reading stops being ordinary. Hidden where there is no such point. #>
+    <# The notch on the bar or ring where this reading stops being ordinary. Hidden where there is no such point. #>
     if ($null -eq $Ratio) { $Tile.Mark.Visibility = 'Collapsed'; return }
     $r = [double]$Ratio
     if ($r -le 0 -or $r -ge 1) { $Tile.Mark.Visibility = 'Collapsed'; return }
-    $Tile.Mark.Margin = Get-Thick ('{0},0,0,0' -f [math]::Round($Tile.TrackWidth * $r))
+    if ($Tile.Ring) {
+        # A short line across the ring, at that point of the clock.
+        $g = $Tile.Ring
+        $a = (-90 + 360 * $r) * [Math]::PI / 180.0
+        $inner = $g.R - $g.Thick / 2 - 3; $outer = $g.R + $g.Thick / 2 + 3
+        $Tile.Mark.X1 = $g.Cx + $inner * [Math]::Cos($a); $Tile.Mark.Y1 = $g.Cy + $inner * [Math]::Sin($a)
+        $Tile.Mark.X2 = $g.Cx + $outer * [Math]::Cos($a); $Tile.Mark.Y2 = $g.Cy + $outer * [Math]::Sin($a)
+    } else {
+        $Tile.Mark.Margin = Get-Thick ('{0},0,0,0' -f [math]::Round($Tile.TrackWidth * $r))
+    }
     $Tile.Mark.Visibility = 'Visible'
 }
 
@@ -2691,19 +3094,20 @@ function Show-BusyStrip($r) {
         $row.Orientation = 'Horizontal'
         $row.Margin = Get-Thick '0,0,0,3'
         $name = New-Text (Get-ShortName $p.Name) 12 'Normal' '#0F1B1C' '0'
-        $name.Width = 190
+        $name.Width = 170
         $name.TextTrimming = 'CharacterEllipsis'
+        $name.TextWrapping = 'NoWrap'
         $name.VerticalAlignment = 'Center'
         [void]$row.Children.Add($name)
         # A bar on the same scale for all three, so the gap between first and third is visible.
         $track = New-Object System.Windows.Controls.Border
-        $track.Height = 8; $track.Width = 120
+        $track.Height = 8; $track.Width = 100
         $track.Background = Get-Brush '#EDE6D5'
         $track.CornerRadius = New-Object System.Windows.CornerRadius(4)
         $track.VerticalAlignment = 'Center'
         $bar = New-Object System.Windows.Controls.Border
         $bar.Height = 8
-        $bar.Width = [math]::Max(4, [math]::Round(120 * [math]::Min(100, [math]::Max(0, $p.Pct)) / 100))
+        $bar.Width = [math]::Max(4, [math]::Round(100 * [math]::Min(100, [math]::Max(0, $p.Pct)) / 100))
         $bar.HorizontalAlignment = 'Left'
         $bar.Background = Get-Brush $script:BarColours.ok
         $bar.CornerRadius = New-Object System.Windows.CornerRadius(4)
@@ -2717,142 +3121,30 @@ function Show-BusyStrip($r) {
     }
 }
 
-$script:BatteryHealth = $null   # how much the battery holds compared with new - read by the Health tab
-function Update-BatteryCard($Live) {
-    <# Charge and power every reading; how much it holds compared with new whenever that's been read. #>
-    $c = $script:BatteryCard
-    if (-not $Live) { $c.Border.Visibility = 'Collapsed'; return }   # a desktop, or a battery that isn't saying
-    $c.Value.Text = '{0}%' -f $Live.Percent
-    Set-MeterFill $c ($Live.Percent / 100)
-    $c.Caption.Text = if ($Live.Charging) { 'Charging' } elseif ($Live.PluggedIn) { 'Plugged in' } else { 'On battery' }
-    # What the cell itself says it is giving or taking, and how long that leaves. Worked out from the
-    # charge in the battery and the draw just measured - Windows' own guess is not used, because on
-    # mains it is a made-up number.
-    if ($null -ne $Live.Watts) {
-        $power = '{0:N1} W {1}' -f $Live.Watts, $(if ($Live.Direction -eq 'charging') { 'going in' } else { 'right now' })
-        if ($Live.MinutesLeft) { $power += ', about {0} left at this rate' -f (Format-QpSpan ($Live.MinutesLeft * 60)) }
-        $c.Caption.Text = $c.Caption.Text + ' - ' + $power
-    }
-    $h = $script:BatteryHealth
-    if ($h) {
-        $t = $script:BatteryHealthText
-        $t.Text = 'Holds {0}% of what it did when new' -f $h.Percent
-        $t.Foreground = Get-Brush $(if ($h.Percent -lt 60) { $script:HeatColours.warn } else { '#0F1B1C' })
-        $tip = "Built to hold {0} Wh; it holds {1} Wh now. Every battery slowly loses capacity with age - below about 80% you may notice it runs out sooner. That's wear, not a fault." -f $h.DesignWh, $h.FullWh
-        if ($h.Cycles) { $tip += " It has been through about $($h.Cycles) charge cycles." }
-        $t.ToolTip = $tip
-        $t.Visibility = 'Visible'
-    } else {
-        $script:BatteryHealthText.Visibility = 'Collapsed'
-    }
-    $c.Border.Visibility = 'Visible'
-}
+# What the Health tab last heard, kept in the window only. The slow ones (battery wear, the drive, Windows'
+# stability record, free space) arrive every five minutes; the live reading every two seconds.
+$script:BatteryHealth = $null   # how much the battery holds compared with new
+$script:DriveLast = $null       # the last drive reading
+$script:DriveRead = $false      # whether the drive has been asked yet at all - "not yet" is not "nothing to say"
+$script:SteadyLast = $null      # Windows' own stability record
+$script:SteadyRead = $false
+$script:SpaceLast = $null       # free and total bytes on the drive Windows is on
+$script:FactsLast = $null       # what the PC is: cores, memory, model, Windows, screens, power plan
+$script:LastReading = $null     # the latest live reading
 
-$script:DriveLast = $null   # the last drive reading, so the live drive tile can show its temperature
-$script:DriveRead = $false  # whether the drive has been asked yet at all - "not yet" is not "nothing to say"
 function Update-DriveCard($d) {
-    <#
-        How the drive is holding up over its life - the slow story. How busy and how warm it is this
-        second is the drive tile's job, up with the other live readings.
-    #>
+    <# The drive's slow story - Windows' verdict, wear, hours, how much written - into the list. #>
     $script:DriveLast = $d
     $script:DriveRead = $true
-    $c = $script:DriveCard
-    $track = $c.Fill.Parent
-    if (-not $d) {
-        $c.Value.Text = 'Not shared'
-        $c.Caption.Text = 'Windows did not say how this drive is doing.'
-        $track.Visibility = 'Collapsed'; $script:DriveHeatText.Visibility = 'Collapsed'
-        return
-    }
-    $dot = [char]0x00B7
-    if ($d.Health -and $d.Health -ne 'Healthy') {
-        $c.Value.Text = 'Needs attention'
-        $c.Value.Foreground = Get-Brush $script:HeatColours.high
-        $c.Caption.Text = 'Windows reports a problem with this drive. Back up your files soon.'
-    } else {
-        $c.Value.Text = 'Healthy'
-        $c.Value.Foreground = Get-Brush '#117A68'
-        $c.Caption.Text = if ($null -ne $d.WearPct) { '{0} {1} {2}% of its rated life used' -f $d.Media, $dot, $d.WearPct } else { "$($d.Media)".Substring(0, 1).ToUpper() + "$($d.Media)".Substring(1) }
-    }
-    # The bar is how much of its rated life the drive has used - only when the drive says.
-    if ($null -ne $d.WearPct) { Set-MeterFill $c ([math]::Min(100, $d.WearPct) / 100); $track.Visibility = 'Visible' } else { $track.Visibility = 'Collapsed' }
-    # How long it has been running, and how much has been written to it: the two figures that say
-    # whether "4% used" is a new drive or a hard-worked one.
-    $lines = @()
-    if ($d.PowerOnHours) { $lines += 'Switched on for about {0:N0} hours' -f $d.PowerOnHours }
-    if ($d.BytesWritten) { $lines += '{0} written to it so far' -f (Format-QpBytes $d.BytesWritten) }
-    if ($lines.Count) {
-        $script:DriveHeatText.Text = $lines -join [Environment]::NewLine
-        $script:DriveHeatText.Foreground = Get-Brush '#66706F'
-        $script:DriveHeatText.FontWeight = 'Normal'
-        $script:DriveHeatText.Visibility = 'Visible'
-    } else {
-        $script:DriveHeatText.Visibility = 'Collapsed'
-    }
-    $tip = "$($d.Name). 'Healthy' is Windows' own verdict on the drive."
-    if ($null -ne $d.WearPct) { $tip += ' Rated life is what the maker promises for writing data; under 100% is within that.' }
-    if ($d.FromDrive) { $tip += ' These figures come from the drive itself rather than from Windows, which on many PCs reports the same made-up numbers for ever.' }
-    $c.Border.ToolTip = $tip
+    Update-HealthDetails
 }
 
-# The last two minutes of each tile, kept in the window and nowhere else.
+# The last two minutes of readings, kept in the window and nowhere else. Nothing is drawn from it on the
+# page any more; it answers "how high did it go just now?" when you point at a ring or a number.
 $script:LiveHistory = New-Object System.Collections.ArrayList
 $script:LiveHistoryMax = 60
 
-function Draw-Sparkline($Canvas, $Values, [string]$Colour, [double]$Max = 100) {
-    <#
-        A plain trend line under a number: no axes, no grid, no labels. The line is quiet grey so the
-        number stays the loud thing, and the newest reading carries a dot in the tile's own colour, with
-        a ring in the surface colour so it stays visible where it meets the line.
-    #>
-    $Canvas.Children.Clear()
-    $vals = @($Values | Where-Object { $null -ne $_ } | ForEach-Object { [double]$_ })
-    if ($vals.Count -lt 2) { $Canvas.Visibility = 'Collapsed'; return }
-    $Canvas.Visibility = 'Visible'
-    $w = [double]$Canvas.Width; $h = [double]$Canvas.Height
-    $top = 3.0; $bottom = $h - 3.0        # room for the dot at either extreme
-    $ceiling = [math]::Max(1.0, [double]$Max)
-    $points = New-Object System.Windows.Media.PointCollection
-    for ($i = 0; $i -lt $vals.Count; $i++) {
-        $x = if ($vals.Count -eq 1) { $w } else { $w * $i / ($vals.Count - 1) }
-        $y = $bottom - (($bottom - $top) * [math]::Min(1.0, [math]::Max(0.0, $vals[$i] / $ceiling)))
-        $points.Add((New-Object System.Windows.Point($x, $y)))
-    }
-    # A wash under the line, so a low flat reading reads as a low band rather than a stray underline.
-    $area = New-Object System.Windows.Shapes.Polygon
-    $fillPoints = New-Object System.Windows.Media.PointCollection
-    foreach ($pt in $points) { $fillPoints.Add($pt) }
-    $fillPoints.Add((New-Object System.Windows.Point($points[$points.Count - 1].X, $bottom)))
-    $fillPoints.Add((New-Object System.Windows.Point($points[0].X, $bottom)))
-    $area.Points = $fillPoints
-    # Kept faint. The bar above is the headline; a wash any stronger reads as a second, louder bar,
-    # which is what a memory tile sitting at three-quarters full used to look like.
-    $wash = (Get-Brush $Colour).Clone()
-    $wash.Opacity = 0.10
-    $area.Fill = $wash
-    [void]$Canvas.Children.Add($area)
-    $line = New-Object System.Windows.Shapes.Polyline
-    $line.Points = $points
-    $line.Stroke = Get-Brush '#8C9694'     # de-emphasised: the trend, not the headline
-    $line.StrokeThickness = 2
-    $line.StrokeLineJoin = 'Round'
-    $line.StrokeStartLineCap = 'Round'
-    $line.StrokeEndLineCap = 'Round'
-    [void]$Canvas.Children.Add($line)
-    $last = $points[$points.Count - 1]
-    $dot = New-Object System.Windows.Shapes.Ellipse
-    $dot.Width = 8; $dot.Height = 8
-    $dot.Fill = Get-Brush $Colour
-    $dot.Stroke = Get-Brush '#FFFDF8'      # a ring in the surface colour, so it never merges with the line
-    $dot.StrokeThickness = 2
-    [System.Windows.Controls.Canvas]::SetLeft($dot, $last.X - 4)
-    [System.Windows.Controls.Canvas]::SetTop($dot, $last.Y - 4)
-    [void]$Canvas.Children.Add($dot)
-}
-
-function Update-Sparklines($r) {
-    <# One reading onto the end of each tile's trend. Kept in memory only, and only the last two minutes. #>
+function Add-LiveHistory($r) {
     if (-not $r) { return }
     $gpu = @($r.Gpus) | Select-Object -First 1
     [void]$script:LiveHistory.Add([pscustomobject]@{
@@ -2863,13 +3155,169 @@ function Update-Sparklines($r) {
     })
     while ($script:LiveHistory.Count -gt $script:LiveHistoryMax) { $script:LiveHistory.RemoveAt(0) }
     $h = @($script:LiveHistory)
-    Draw-Sparkline $script:TileCpu.Spark    @($h | ForEach-Object { $_.Cpu })  $script:TileCpu.SparkColour
-    Draw-Sparkline $script:TileGpu.Spark    @($h | ForEach-Object { $_.Gpu })  $script:TileGpu.SparkColour
-    Draw-Sparkline $script:TileMemory.Spark @($h | ForEach-Object { $_.Mem })  $script:TileMemory.SparkColour
-    Draw-Sparkline $script:TileDisk.Spark   @($h | ForEach-Object { $_.Disk }) $script:TileDisk.SparkColour
-    foreach ($t in $script:TileCpu, $script:TileGpu, $script:TileMemory, $script:TileDisk) {
-        Set-MoreInfo $t.Spark ('The last {0} readings, about two minutes, on the same nought-to-a-hundred scale as the bar above. The line is quiet on purpose - the number is the thing to read.' -f $h.Count)
+    foreach ($pair in @(@($script:TileCpu, 'Cpu'), @($script:TileGpu, 'Gpu'), @($script:TileMemory, 'Mem'), @($script:TileDisk, 'Disk'))) {
+        $vals = @($h | ForEach-Object { $_.($pair[1]) } | Where-Object { $null -ne $_ } | ForEach-Object { [double]$_ })
+        if ($vals.Count -lt 2) { continue }
+        $peak = ($vals | Measure-Object -Maximum).Maximum
+        Set-MoreInfo $pair[0].Value ('Highest in the last {0}: {1:N0}%.' -f (Format-QpSpan ($vals.Count * 2)), $peak)
     }
+}
+
+function Update-HealthDetails {
+    <#
+        The list on the right of the Health tab, drawn afresh from what was last heard. A reading this
+        PC does not share is left out, or says "not shared" where knowing that is useful - never a zero.
+        The rings and big numbers say how hard things are working; the list adds what they cannot.
+    #>
+    if (-not $script:Details) { return }
+    $r = $script:LastReading
+    $f = $script:FactsLast
+    $dot = [char]0x00B7
+    $rate = { param($b) Format-QpRate $b }
+    foreach ($box in $script:Details.Values) { Clear-DetailsBox $box }
+
+    # Processor
+    $b = $script:Details.Processor
+    if ($r) {
+        [void](Add-DetailRow $b 'Name' (Get-ShortName $r.CpuName))
+        if ($f) {
+            $ct = @($(if ($f.Cores) { '{0} cores' -f $f.Cores }), $(if ($f.Threads) { '{0} threads' -f $f.Threads }) | Where-Object { $_ })
+            [void](Add-DetailRow $b 'Cores' ($ct -join ', ') -Tip 'Cores are the processor''s own workers; threads are how many things it can juggle at once. Windows calls threads logical processors.')
+        }
+        [void](Add-DetailRow $b 'Speed right now' $(if ($r.SpeedMhz) { '{0:N0} MHz' -f $r.SpeedMhz } else { $null }) -Tip 'How fast it is running this moment. It slows itself down when there is little to do, to save power - that is normal, not a fault.')
+        $heat = Get-HeatLine $r.CpuTempC $null ([bool]$r.CpuTempStuck)
+        $zone = if ($r.CpuTempSource) { " ($($r.CpuTempSource))" } else { '' }
+        [void](Add-DetailRow $b 'Temperature' $(if ($heat.Shared) { $heat.Text } else { $null }) -Tone $heat.Level -ShowMissing -Tip "From Windows' own thermal sensor$zone. On some PCs that is the processor itself, on others a sensor close to it, so treat it as a guide.")
+        if ($r.CpuThrottled) { [void](Add-DetailRow $b 'Held back to cool off' ('running at {0:N0}% of its speed' -f $r.CpuLimitPct) -Tone 'warn') }
+    }
+
+    # Graphics - one set of rows per card; with two, each card's rows sit under its own name.
+    $b = $script:Details.Graphics
+    $gpus = @($(if ($r) { $r.Gpus }) | Where-Object { $_ })
+    foreach ($g in $gpus) {
+        if ($gpus.Count -gt 1) { Add-DetailHeading $b (Get-ShortName $g.Name) }
+        else { [void](Add-DetailRow $b 'Name' (Get-ShortName $g.Name)) }
+        [void](Add-DetailRow $b 'Busy' $(if ($null -ne $g.Usage) { '{0:N0}%' -f $g.Usage } else { $null }) -Ratio $(if ($null -ne $g.Usage) { $g.Usage / 100 } else { $null }))
+        [void](Add-DetailRow $b 'Graphics clock' $(if ($g.EngineClockMhz) { '{0:N0} MHz' -f $g.EngineClockMhz } else { $null }) -Tip 'How fast its graphics engine is running this moment, as the graphics driver reports it. It drops right down when there is little to draw.')
+        [void](Add-DetailRow $b 'Video memory clock' $(if ($g.MemoryClockMhz) { '{0:N0} MHz' -f $g.MemoryClockMhz } else { $null }) -Tip 'The speed of its own memory this moment, as the graphics driver reports it.')
+        if ($null -ne $g.FanRpm) { [void](Add-DetailRow $b 'Fan' $(if ($g.FanRpm -gt 0) { '{0:N0} RPM' -f $g.FanRpm } else { 'stopped' }) -Tip 'The graphics card''s own fan, as its driver reports it. Many cards stop the fan altogether when they are cool.') }
+        $heat = Get-HeatLine $g.TempC $g.TempMaxC
+        # Built-in graphics share the processor's cooling and never report their own heat, so saying
+        # "not shared" there would only be noise. A graphics card that says nothing is worth knowing.
+        [void](Add-DetailRow $b 'Temperature' $(if ($heat.Shared) { $heat.Text } else { $null }) -Tone $heat.Level -ShowMissing:([bool]$g.Discrete) -Tip 'From the graphics driver - the same reading Task Manager shows. On laptops the graphics card often sleeps when it isn''t needed, and then says nothing.')
+        if ($g.Discrete -and $g.DedicatedTotal -gt 0) {
+            [void](Add-DetailRow $b 'Video memory' ('{0:N0}% of {1}' -f (100 * $g.DedicatedUsed / $g.DedicatedTotal), (Format-QpBytes $g.DedicatedTotal)) -Ratio ($g.DedicatedUsed / $g.DedicatedTotal))
+        } elseif ($g.SharedTotal -gt 0) {
+            [void](Add-DetailRow $b 'Video memory' ('{0:N0}%, borrowed from memory' -f (100 * $g.SharedUsed / $g.SharedTotal)) -Ratio ($g.SharedUsed / $g.SharedTotal))
+        }
+    }
+
+    # Memory
+    $b = $script:Details.Memory
+    if ($r -and $r.MemTotal -gt 0 -and $null -ne $r.MemUsed) {
+        $level = Get-MemoryLevel (100 * $r.MemUsed / $r.MemTotal) $r.CommitPct
+        [void](Add-DetailRow $b 'In use' ('{0} of {1}' -f (Format-QpBytes $r.MemUsed), (Format-QpBytes $r.MemTotal)) -Ratio ($r.MemUsed / $r.MemTotal) -Tone $(if ($level -eq 'ok') { '' } else { $level }))
+    }
+    if ($f) {
+        [void](Add-DetailRow $b 'Type' $f.MemoryType)
+        [void](Add-DetailRow $b 'Speed' $(if ($f.MemorySpeedMTs) { '{0:N0} MT/s' -f $f.MemorySpeedMTs } else { $null }) -Tip 'The speed the memory is set to run at, as Windows reports it - the same figure Task Manager shows.')
+        if ($f.MemorySticks -and $f.MemorySlots) { [void](Add-DetailRow $b 'Slots used' ('{0} of {1}' -f $f.MemorySticks, $f.MemorySlots) -Tip 'How many of the memory slots on the board have a stick in them, as the board itself reports it.') }
+        elseif ($f.MemorySticks) { [void](Add-DetailRow $b 'Sticks fitted' ('{0}' -f $f.MemorySticks)) }
+    }
+    if ($r -and $null -ne $r.CommitPct) {
+        [void](Add-DetailRow $b 'Promised to programs' ('{0}%' -f $r.CommitPct) -Ratio ($r.CommitPct / 100) -Tone $(if ($r.CommitPct -ge 90) { 'high' } elseif ($r.CommitPct -ge 80) { 'warn' } else { '' }) -Tip 'What Windows has undertaken to find if every program asks for its share at once. It runs out before the memory does, and when it does the PC starts crawling.')
+    }
+
+    # The drive Windows is on: its slow story, and how full it is.
+    $b = $script:Details.Drive
+    $d = $script:DriveLast
+    if ($d) {
+        if ($d.Health -and $d.Health -ne 'Healthy') { [void](Add-DetailRow $b "Windows' verdict" 'Needs attention - back up your files soon' -Tone 'high') }
+        elseif ($d.Health) { [void](Add-DetailRow $b "Windows' verdict" 'Healthy' -Tone 'good' -Tip "Windows' own verdict on the drive, from what the drive reports about itself.") }
+        [void](Add-DetailRow $b 'Model' ((@($d.Name, $(if ($d.Media) { "($($d.Media))" })) | Where-Object { $_ }) -join ' '))
+        $heat = Get-HeatLine $d.TempC $null $false 'Drive'
+        [void](Add-DetailRow $b 'Temperature' $(if ($heat.Shared) { $heat.Text } else { $null }) -Tone $heat.Level -ShowMissing -Tip $(if ($d.FromDrive) { 'Asked of the drive itself, so it moves with what the drive is doing.' } else { "Windows' own figure for this drive. Some storage drivers report the same number whatever is happening, so treat it as a guide." }))
+        if ($null -ne $d.WearPct) { [void](Add-DetailRow $b 'Rated life used' ('{0}%' -f $d.WearPct) -Ratio ([math]::Min(100, $d.WearPct) / 100) -Tone $(if ($d.WearPct -ge 90) { 'warn' } else { '' }) -Tip 'How much of the writing the maker rates this drive for has been used. Under 100% is within that.') }
+        if ($d.PowerOnHours) { [void](Add-DetailRow $b 'Switched on for' ('about {0:N0} hours' -f $d.PowerOnHours)) }
+        if ($d.BytesWritten) { [void](Add-DetailRow $b 'Written to it so far' (Format-QpBytes $d.BytesWritten)) }
+    } elseif ($script:DriveRead) {
+        [void](Add-DetailRow $b "Windows' verdict" $null -ShowMissing)
+    }
+    if ($r) {
+        $tipAll = 'Counted across all the drives in this PC, as the busy figure is. Windows'' own figure, the one Task Manager uses.'
+        [void](Add-DetailRow $b 'Reading right now' (& $rate $r.DiskReadBps) -Tip $tipAll)
+        [void](Add-DetailRow $b 'Writing right now' (& $rate $r.DiskWriteBps) -Tip $tipAll)
+    }
+    $s = $script:SpaceLast
+    if ($s -and $s.Total -gt 0) {
+        $freeRatio = $s.Free / $s.Total
+        [void](Add-DetailRow $b 'Space' ('{0} free of {1}' -f (Format-QpBytes $s.Free), (Format-QpBytes $s.Total)) -Ratio (1 - $freeRatio) -Tone $(if ($freeRatio -lt 0.05) { 'high' } elseif ($freeRatio -lt 0.1) { 'warn' } else { '' }) -Tip 'The bar is how full the drive is.')
+    }
+
+    # Battery - laptops only. A desktop, or a battery that says nothing, has no box at all.
+    $b = $script:Details.Battery
+    $bat = if ($r) { $r.Battery } else { $null }
+    if ($bat) {
+        [void](Add-DetailRow $b 'Charge' ('{0}%' -f $bat.Percent) -Ratio ($bat.Percent / 100))
+        [void](Add-DetailRow $b 'Power' $(if ($bat.Charging) { 'Charging' } elseif ($bat.PluggedIn) { 'Plugged in' } else { 'On battery' }))
+        # What the cell itself says it is giving or taking, and how long that leaves. Worked out from the
+        # charge and the draw just measured - Windows' own guess is not used, because on mains it is made up.
+        if ($null -ne $bat.Watts) {
+            [void](Add-DetailRow $b $(if ($bat.Direction -eq 'charging') { 'Going in' } else { 'Drawing' }) ('{0:N1} W' -f $bat.Watts))
+            if ($bat.MinutesLeft) { [void](Add-DetailRow $b 'Time left at this rate' ('about ' + (Format-QpSpan ($bat.MinutesLeft * 60)))) }
+        }
+        $h = $script:BatteryHealth
+        if ($h) {
+            $tip = "Built to hold {0} Wh; it holds {1} Wh now. Every battery slowly loses capacity with age - below about 80% you may notice it runs out sooner. That's wear, not a fault." -f $h.DesignWh, $h.FullWh
+            [void](Add-DetailRow $b 'Holds, compared with new' ('{0}%' -f $h.Percent) -Ratio ([math]::Min(100, $h.Percent) / 100) -Tone $(if ($h.Percent -lt 60) { 'warn' } else { '' }) -Tip $tip)
+            if ($h.Cycles) { [void](Add-DetailRow $b 'Charge cycles' ('about {0:N0}' -f $h.Cycles)) }
+        }
+    }
+
+    # Network - how fast this PC is sending and receiving, from Windows' own counters. Only real Wi-Fi and
+    # wired cards are counted; virtual ones (VPNs, Hyper-V, WSL) would count the same traffic twice.
+    $b = $script:Details.Network
+    if ($r) {
+        $netTip = 'Windows'' own count of what goes through the card - the figure Task Manager shows. Quietpane connects to nothing to measure it.'
+        if ($null -eq $r.Network) { [void](Add-DetailRow $b 'Speed' $null -ShowMissing) }
+        elseif (-not @($r.Network).Count) { [void](Add-DetailRow $b 'Connection' 'not connected' -Tone 'none') }
+        else { foreach ($n in @($r.Network)) { [void](Add-DetailRow $b $n.Kind ('{0} down, {1} up' -f (& $rate $n.DownBps), (& $rate $n.UpBps)) -Tip $netTip) } }
+    }
+
+    # Power and fans
+    $b = $script:Details.Power
+    if ($f) { [void](Add-DetailRow $b 'Power plan' $f.PowerPlan -Tip 'Windows'' power plan, as powercfg reports it.') }
+    if ($r -or $f) { [void](Add-DetailRow $b 'Fan speed' 'not shared by the maker' -Tone 'none' -Tip 'Your PC''s maker doesn''t share fan speed with Windows. The maker''s own app may show it, using a driver of its own - Quietpane installs no drivers, and won''t guess.') }
+
+    # This PC - what it is, and Windows' own record of how steady it has been.
+    $b = $script:Details.ThisPC
+    if ($f) {
+        [void](Add-DetailRow $b 'Maker and model' ((@($f.Maker, $f.Model) | Where-Object { $_ }) -join ' '))
+        $win = (@($f.Windows, $f.WindowsVersion) | Where-Object { $_ }) -join ' '
+        if ($win -and $f.WindowsBuild) { $win += ' (build ' + $f.WindowsBuild + ')' }
+        [void](Add-DetailRow $b 'Windows' $win)
+        $screens = @($f.Screens | Where-Object { $_ })
+        [void](Add-DetailRow $b $(if ($screens.Count -gt 1) { 'Screens' } else { 'Screen' }) ($screens -join '; ') -Tip 'What each graphics adapter says it is showing right now: the picture''s size in dots, and how many times a second it is redrawn.')
+    }
+    $st = $script:SteadyLast
+    if ($st -and $st.Available -and $null -ne $st.Score) {
+        $when = if ($st.ScoreWhen) { ', as of ' + (Format-QpWhen $st.ScoreWhen) } else { '' }
+        [void](Add-DetailRow $b "Windows' stability score" ('{0:N1} / 10 {1} {2}{3}' -f $st.Score, $dot, $st.Word, $when) -Ratio ([double]$st.Score / 10) -Tone $(if ($st.Score -lt 7) { 'warn' } else { '' }) -Tip "Windows' own score, out of ten, from the record behind Reliability Monitor - Quietpane does not work it out. It drops on a day something crashed and climbs back as quiet days pass, so it is a shape over weeks rather than a verdict on today.")
+    } elseif ($script:SteadyRead) {
+        [void](Add-DetailRow $b "Windows' stability score" $(if ($st -and $st.Available) { "Windows hasn't worked one out yet" } else { "Windows hasn't kept a record on this PC" }) -Tone 'none')
+    }
+    if ($st -and $st.Available) {
+        $broke = [int]$st.Crashes + [int]$st.Hangs
+        $worst = @($st.Programs | Select-Object -First 1)
+        $what = if ($broke -eq 0) { 'none' } else {
+            $x = if ($broke -eq 1) { '1 program' } else { "$broke programs" }
+            if ($worst -and $worst[0].Count -gt 1) { "$x, most often $($worst[0].Name)" } elseif ($worst) { "$x, including $($worst[0].Name)" } else { $x }
+        }
+        [void](Add-DetailRow $b ('Stopped working, last {0} days' -f $st.Days) $what -Tip 'Programs that crashed or stopped responding, from the event log. Windows Update and installer entries are left out, because an update that installed is not a problem.')
+        if ($st.SuddenStops -gt 0) { [void](Add-DetailRow $b 'PC stopped without warning' $(if ($st.SuddenStops -eq 1) { 'once' } else { "$($st.SuddenStops) times" }) -Tone 'warn') }
+        if ($st.BlueScreens -gt 0) { [void](Add-DetailRow $b 'Blue screens' "$($st.BlueScreens)" -Tone 'warn') }
+    }
+    if ($st -and $st.Uptime) { [void](Add-DetailRow $b 'Awake for' (Format-QpSpan ([double]$st.Uptime.TotalSeconds))) }
 }
 
 # How hot it was, as one colour getting darker and one bar getting taller. Two encodings of the same
@@ -2906,7 +3354,7 @@ function Draw-SessionTimeline($Panel, $Watch) {
     $strip.Height = 22
     foreach ($b in $bands) {
         $cell = New-Object System.Windows.Controls.Border
-        $cell.Width = 5
+        $cell.Width = 4
         $cell.Height = $script:SessionBandHeights[[string]$b.Heat]
         $cell.VerticalAlignment = 'Bottom'
         if ($cell.Height -gt 0) { $cell.Background = Get-Brush $script:SessionBandColours[[string]$b.Heat] }
@@ -2921,7 +3369,7 @@ function Draw-SessionTimeline($Panel, $Watch) {
         $held.Margin = Get-Thick '0,2,0,0'
         foreach ($b in $bands) {
             $cell = New-Object System.Windows.Controls.Border
-            $cell.Width = 5; $cell.Height = 6
+            $cell.Width = 4; $cell.Height = 6
             if ($b.Held) { $cell.Background = Get-Brush $script:SessionHeldColour }
             [void]$held.Children.Add($cell)
         }
@@ -2936,7 +3384,7 @@ function Draw-SessionTimeline($Panel, $Watch) {
     $right = New-Text $to 11 'Normal' '#66706F' '0,3,0,0'
     [System.Windows.Controls.Grid]::SetColumn($right, 1)
     [void]$axis.Children.Add($left); [void]$axis.Children.Add($right)
-    $axis.Width = $bands.Count * 5
+    $axis.Width = $bands.Count * 4
     $axis.HorizontalAlignment = 'Left'
     [void]$Panel.Children.Add($axis)
 
@@ -2970,58 +3418,14 @@ function Draw-SessionTimeline($Panel, $Watch) {
     [void]$Panel.Children.Add($legend)
 }
 
-# The three numbers that used to run along the bottom of the panel - promised memory, processor speed
-# and disk busy - are no longer a line of their own. Each has gone to the tile it belongs to: promised
-# memory decides the memory tile's word, disk busy is now a tile in its own right, and processor speed
-# is only ever mentioned when something is actually holding the processor back, which is the only
-# moment it tells you anything. Three bare percentages in a row told nobody anything at all.
-
 function Update-SteadyCard($r) {
     <#
-        Windows' own record of how steady this PC has been: its score out of ten, what has crashed, and
-        how long the PC has been awake. Where Windows has kept no score, the card says so.
+        Windows' own record of how steady this PC has been - its score out of ten, what has crashed, how
+        long the PC has been awake - into the This PC list. Where Windows kept no score, the list says so.
     #>
-    $c = $script:SteadyCard
-    $script:SteadyLines.Children.Clear()
-    if (-not $r -or -not $r.Available) {
-        $c.Value.Text = 'Not scored'
-        $c.Caption.Text = "Windows hasn't kept a record on this PC"
-        Set-MeterFill $c 0
-        return
-    }
-    if ($null -ne $r.Score) {
-        $c.Value.Text = '{0:N1} / 10' -f $r.Score
-        $c.Caption.Text = $r.Word + $(if ($r.ScoreWhen) { ', as of ' + (Format-QpWhen $r.ScoreWhen) } else { '' })
-        Set-MeterFill $c ([double]$r.Score / 10)
-        $c.Value.Foreground = Get-Brush $(if ($r.Score -lt 7) { $script:HeatColours.warn } else { '#0F1B1C' })
-    } else {
-        $c.Value.Text = 'Not scored'
-        $c.Caption.Text = "Windows hasn't worked out a score yet"
-        Set-MeterFill $c 0
-    }
-    Set-MoreInfo $c.Border ("Windows' own score, out of ten, from the record behind Reliability Monitor. It drops on a day something crashed and climbs back as quiet days pass, so it is a shape over weeks rather than a verdict on today. What crashed is read from the event log for the last {0} days; Windows Update and installer entries are left out, because an update that installed is not a problem." -f $r.Days)
-
-    $lines = @()
-    $broke = [int]$r.Crashes + [int]$r.Hangs
-    if ($broke -eq 0) {
-        $lines += "Nothing has crashed in $($r.Days) days."
-    } else {
-        $what = if ($broke -eq 1) { '1 program stopped working' } else { "$broke programs stopped working" }
-        $worst = @($r.Programs | Select-Object -First 1)
-        $line = "$what in $($r.Days) days"
-        if ($worst -and $worst[0].Count -gt 1) { $line += ', most often ' + $worst[0].Name } elseif ($worst) { $line += ', including ' + $worst[0].Name }
-        $lines += $line + '.'
-    }
-    if ($r.SuddenStops -gt 0) {
-        $lines += $(if ($r.SuddenStops -eq 1) { 'The PC stopped without warning once.' } else { "The PC stopped without warning $($r.SuddenStops) times." })
-    }
-    if ($r.BlueScreens -gt 0) { $lines += "$($r.BlueScreens) blue screen(s)." }
-    if ($r.Uptime) { $lines += 'Awake for {0}.' -f (Format-QpSpan ([double]$r.Uptime.TotalSeconds)) }
-    foreach ($line in $lines) {
-        $t = New-Text $line 12 'Normal' '#4B5B5C' '0,2,0,0'
-        if ($line -match 'without warning|blue screen') { $t.Foreground = Get-Brush $script:HeatColours.warn }
-        [void]$script:SteadyLines.Children.Add($t)
-    }
+    $script:SteadyLast = $r
+    $script:SteadyRead = $true
+    Update-HealthDetails
 }
 
 function Show-SessionAlerts($alerts) {
@@ -3127,35 +3531,32 @@ function Save-SessionReport {
 
 function Update-LiveTiles($r) {
     <#
-        Paints one reading onto the verdict, the four tiles and the busiest row.
-
-        Each tile answers one question and says how it stands in words. Anything this PC doesn't share
-        is shown as "not shared", never as a zero - a zero looks like an answer.
+        Paints one reading onto the verdict, the two rings, the two big numbers, the busiest list and the
+        details list. Each reading says how it stands in words as well as colour. Anything this PC doesn't
+        share is shown as "not shared", never as a zero - a zero looks like an answer.
     #>
     if (-not $r) { return }
-    Update-Sparklines $r
+    $script:LastReading = $r
+    Add-LiveHistory $r
     Show-BusyStrip $r
-    $deg = [char]0x00B0
-    $dot = [char]0x00B7
 
     $v = Get-QpLiveVerdict -Reading $r
     $script:VerdictText.Text = $v.Text
     $script:VerdictText.Foreground = Get-Brush $(if ($v.Level -eq 'ok' -or $v.Level -eq 'none') { '#0F1B1C' } else { $script:HeatColours[$v.Level] })
     $script:VerdictDot.Fill = Get-Brush $script:HeatColours[$v.Level]
-    $script:VerdictWhy.Text = $v.Why
-    $script:VerdictWhy.Visibility = if ($v.Why) { 'Visible' } else { 'Collapsed' }
+    # Why, one step away: shown when you point at the sentence, and read out by screen readers.
+    if ($v.Why) { Set-MoreInfo $script:VerdictText $v.Why } else { $script:VerdictText.ToolTip = $null; [System.Windows.Automation.AutomationProperties]::SetHelpText($script:VerdictText, '') }
 
     # PROCESSOR - how hard it is working, and how warm it got doing it.
     $t = $script:TileCpu
     if ($null -ne $r.CpuUsage) { $t.Value.Text = '{0:N0}%' -f $r.CpuUsage; Set-MeterFill $t ($r.CpuUsage / 100) } else { $t.Value.Text = 'not shared'; Set-MeterFill $t 0 }
     Set-TileMark $t 0.8
     $t.Caption.Text = Get-ShortName $r.CpuName
-    Update-BatteryCard $r.Battery
     $zone = if ($r.CpuTempSource) { " ($($r.CpuTempSource))" } else { '' }
     Set-HeatText $t.Heat $r.CpuTempC $null ([bool]$r.CpuTempStuck) ("From Windows' own thermal sensor$zone. On some PCs that is the processor itself, on others a sensor close to it, so treat it as a guide. Laptops often run hot when busy - it's only a worry if it stays very hot while the PC is doing nothing.")
     Set-TileState $t (Get-QpHeatWord -Celsius $(if ($r.CpuTempStuck) { $null } else { $r.CpuTempC })).Level
     # Windows holding the processor back to cool it: the moment a game suddenly stutters for no reason.
-    # The only thing allowed to break the tiles' shape, because it is the only one worth stopping for.
+    # The only thing allowed to break the pattern, because it is the only one worth stopping for.
     if ($r.CpuThrottled) {
         $t.Extra.Text = 'Held back to cool off - running at {0:N0}% of its speed' -f $r.CpuLimitPct
         $t.Extra.Foreground = Get-Brush $script:HeatColours.warn
@@ -3166,8 +3567,7 @@ function Update-LiveTiles($r) {
         $t.Extra.Visibility = 'Collapsed'
     }
 
-    # GRAPHICS - the same two questions, plus what its own memory is doing, which used to be a tile of
-    # its own and almost never had anything to say.
+    # GRAPHICS - the same two questions. Its memory, and a second card's details, are in the list.
     $gpus = @($r.Gpus)
     $g = $gpus | Select-Object -First 1
     $t = $script:TileGpu
@@ -3176,20 +3576,18 @@ function Update-LiveTiles($r) {
         Set-MeterFill $t ($g.Usage / 100)
         Set-TileMark $t 0.8
         $t.Caption.Text = Get-ShortName $g.Name
-        $tip = if ($g.TempMaxC) { "From the graphics driver - the same reading Task Manager shows. The driver says this card is built for up to {0:N0}{1}C." -f $g.TempMaxC, $deg } else { 'From the graphics driver - the same reading Task Manager shows.' }
+        $tip = if ($g.TempMaxC) { 'From the graphics driver - the same reading Task Manager shows. The driver says this card is built for up to {0}.' -f (Format-QpTemp $g.TempMaxC) } else { 'From the graphics driver - the same reading Task Manager shows.' }
         if ($null -eq $g.TempC -and -not $g.Discrete) { $tip = 'Built-in graphics share the processor''s cooling, so the driver doesn''t report its own temperature.' }
         elseif ($null -eq $g.TempC) { $tip = 'The driver isn''t sharing a temperature right now. On laptops the graphics card often sleeps when it isn''t needed.' }
         Set-HeatText $t.Heat $g.TempC $g.TempMaxC $false $tip
         Set-TileState $t (Get-QpHeatWord -Celsius $g.TempC -MaxC $g.TempMaxC).Level
-        $bits = @()
-        if ($g.Discrete -and $g.DedicatedTotal -gt 0) { $bits += 'Video memory {0:N0}% of {1}' -f (100 * $g.DedicatedUsed / $g.DedicatedTotal), (Format-QpBytes $g.DedicatedTotal) }
-        elseif ($g.SharedTotal -gt 0) { $bits += 'Video memory {0:N0}%, borrowed from memory' -f (100 * $g.SharedUsed / $g.SharedTotal) }
         # Gaming laptops have two: say how busy the other one is, quietly.
         $other = $gpus | Select-Object -Skip 1 -First 1
-        if ($other) { $bits += 'Also {0}: {1:N0}%' -f (Get-ShortName $other.Name), $other.Usage }
-        $t.Extra.Text = $bits -join "`n"
-        $t.Extra.Foreground = Get-Brush '#66706F'; $t.Extra.FontWeight = 'Normal'
-        $t.Extra.Visibility = if ($bits.Count) { 'Visible' } else { 'Collapsed' }
+        if ($other) {
+            $t.Extra.Text = 'Also {0}: {1:N0}%' -f (Get-ShortName $other.Name), $other.Usage
+            $t.Extra.Foreground = Get-Brush '#66706F'; $t.Extra.FontWeight = 'Normal'
+            $t.Extra.Visibility = 'Visible'
+        } else { $t.Extra.Visibility = 'Collapsed' }
     } else {
         $t.Value.Text = 'not shared'
         $t.Caption.Text = 'This PC keeps no graphics figures.'
@@ -3201,7 +3599,7 @@ function Update-LiveTiles($r) {
     if ($null -ne $r.MemUsed) { Set-MemoryTile $r.MemUsed $r.MemTotal $r.CommitPct }
 
     # THE DRIVE - how busy it is, and how warm. A drive flat out while the processor idles is what
-    # "slow" almost always turns out to be, and it had no tile at all before.
+    # "slow" almost always turns out to be.
     $t = $script:TileDisk
     if ($null -ne $r.DiskBusyPct) {
         $t.Value.Text = '{0:N0}%' -f $r.DiskBusyPct
@@ -3215,8 +3613,8 @@ function Update-LiveTiles($r) {
     }
     $d = $script:DriveLast
     if ($d -and $null -ne $d.TempC) {
-        $h = Get-QpHeatWord -Celsius $d.TempC -Kind Drive
-        $t.Heat.Text = '{0}{1}C {2} {3}' -f $d.TempC, $deg, $dot, $h.Word
+        $h = Get-HeatLine $d.TempC $null $false 'Drive'
+        $t.Heat.Text = $h.Text
         Set-TileState $t $h.Level
         $t.Heat.ToolTip = $(if ($d.FromDrive) { 'Asked of the drive itself, so it moves with what the drive is doing.' } else { "Windows' own figure for this drive. Some storage drivers report the same number whatever is happening, so treat it as a guide." })
     } elseif (-not $script:DriveRead) {
@@ -3226,9 +3624,9 @@ function Update-LiveTiles($r) {
         $t.Heat.Text = 'temperature not shared'
         Set-TileState $t 'none'
     }
-    # Which drive it is stays on the card below, where its make and model can be read without wrapping
-    # a tile to three lines and knocking the row out of line.
     $t.Extra.Visibility = 'Collapsed'
+
+    Update-HealthDetails
 }
 
 function Show-MeterGains([int64]$SpaceFreed, [int64]$MemoryFreed) {
@@ -3288,6 +3686,10 @@ function Update-UndoList($points) {
         [void]$script:UndoList.Items.Add($li)
     }
     if ($script:UndoList.Items.Count -eq 0) { [void]$script:UndoList.Items.Add('No restore points yet.') }
+    $pts = @($points | Where-Object { $_ })
+    Set-Glance 'undo' 'points' 'Restore points' $(if ($pts.Count) { '{0}' -f $pts.Count } else { 'none yet' }) -Tip 'Every change Quietpane makes is saved as one first.'
+    # Restore points come newest first.
+    if ($pts.Count) { Set-Glance 'undo' 'newest' 'Newest' (Format-RestoreName $pts[0].Name) }
 }
 
 function Update-StateAfterChange {
@@ -3523,6 +3925,8 @@ function Get-VersionLineText {
     if (((Get-Date) - $released).TotalDays -gt 90) { return $text + ' - there may be a newer one.' }
     return $text + '.'
 }
+# Shown straight away; the look in Downloads for a newer one comes after the first read of the PC.
+$script:VersionLine.Text = Get-VersionLineText
 
 function Open-ReleasePage {
     <# Says first that this opens the browser, and that it is the browser - not Quietpane - that connects. #>
@@ -3534,7 +3938,7 @@ function Open-ReleasePage {
 }
 
 function Update-UpdateOffer([string]$Folder = '') {
-    <# The About line, and the Home offer when a newer download is sitting in Downloads. #>
+    <# The version line in Settings, and the Home offer when a newer download is sitting in Downloads. #>
     $script:VersionLine.Text = Get-VersionLineText
     $found = $null
     try { $found = Find-QpDownloadedUpdate -Folder $Folder } catch { }
@@ -3873,7 +4277,7 @@ function Start-SafetyScan([bool]$AskDefender = $false) {
     $scanSummary.Text = 'Having a look around...'
     $script:ScanProgress.Text = if ($AskDefender) { 'Asking Microsoft Defender to scan first. This can take a few minutes - Stop works at any point.' } else { 'Getting started...' }
     $script:CardAdware.Value.Text = 'Checking...'
-    $script:CardAdware.Caption.Text = 'Nothing is changed while we look'
+    $script:CardAdware.Caption.Text = 'Changing nothing'
     Start-Work -StatusText 'Looking for threats and problems (nothing is changed)...' -Params @{ Deep = $AskDefender } -Work {
         param($Deep)
         if ($Deep) { Invoke-QpThreatScan -Type Quick | Out-Null }
@@ -3893,7 +4297,7 @@ function Start-SafetyScan([bool]$AskDefender = $false) {
             $script:ScanProgress.Text = ''
             $script:CardAdware.Value.Text = 'Stopped'
             $script:CardAdware.Value.Foreground = Get-Brush '#0F1B1C'
-            $script:CardAdware.Caption.Text = 'Run the check again when you have a few minutes'
+            $script:CardAdware.Caption.Text = 'Try again when you can'
             Update-ScanSummary
             Update-Buttons
             return
@@ -4111,7 +4515,7 @@ function Get-TabWords {
             if ($el -is [System.Windows.UIElement] -and $el.Visibility -ne 'Visible') { continue }
             foreach ($child in [System.Windows.LogicalTreeHelper]::GetChildren($el)) { if ($child -is [System.Windows.DependencyObject]) { $stack.Push($child) } }
         }
-        '{0}={1}' -f $tab.Header, $words
+        '{0}={1}' -f [System.Windows.Automation.AutomationProperties]::GetName($tab), $words
     }
 }
 function Test-FindingCards {
@@ -4147,6 +4551,17 @@ function Test-FindingCards {
         $script:FindingsPanel.Children.Clear()
     }
 }
+function Get-ListTexts($Panel) {
+    <# Every line of words in a list, in order - the rows' names and notes included - for the self-test to read. #>
+    $out = New-Object System.Collections.ArrayList
+    function Walk($el) {
+        if ($el -is [System.Windows.Controls.CheckBox] -and $el.Content -is [System.Windows.Controls.TextBlock]) { [void]$out.Add($el.Content.Text); return }
+        if ($el -is [System.Windows.Controls.TextBlock]) { [void]$out.Add($el.Text); return }
+        foreach ($c in [System.Windows.LogicalTreeHelper]::GetChildren($el)) { if ($c -is [System.Windows.DependencyObject]) { Walk $c } }
+    }
+    foreach ($c in $Panel.Children) { Walk $c }
+    return @($out)
+}
 function Test-SignInCosts {
     <#
         Three startup programs with known costs: one Windows timed, one heavy, one not running. The
@@ -4168,9 +4583,7 @@ function Test-SignInCosts {
     }
     Update-StartupList $items $signIn
     $order = @($script:Options['startup'] | ForEach-Object { $_.Title }) -join ','
-    $text = @()
-    foreach ($child in $script:StartupList.Children) { if ($child -is [System.Windows.Controls.TextBlock]) { $text += $child.Text } }
-    $all = $text -join ' | '
+    $all = (Get-ListTexts $script:StartupList) -join ' | '
     $result = '{0}; total line: {1}; restart line: {2}; windows timing: {3}; copies: {4}' -f $order,
         [bool]($all -match 'using 580\.0 MB right now'), [bool]($all -match 'timed your last restart at 35\.5 seconds'),
         [bool]($all -match 'Windows timed it at 3.2 seconds'), [bool]($all -match 'in 2 copies')
@@ -4200,12 +4613,7 @@ function Test-AddonList {
     )
     Update-AddonList $addons
     $order = @($script:Options['extensions'] | ForEach-Object { ($_.Title -split '   ')[0] }) -join ','
-    $text = @()
-    foreach ($child in $script:AddonList.Children) {
-        if ($child -is [System.Windows.Controls.TextBlock]) { $text += $child.Text }
-        elseif ($child -is [System.Windows.Controls.CheckBox] -and $child.Content -is [System.Windows.Controls.TextBlock]) { $text += $child.Content.Text }
-    }
-    $all = ($text -join ' | ') + ' | ' + [string]$script:AddonSection.Expander.Header.Text
+    $all = ((Get-ListTexts $script:AddonList) -join ' | ') + ' | ' + [string]$script:AddonSection.Expander.Header.Text
     $result = '{0}; reads every site: {1}; count: {2}; parts summed up: {3}; firefox: {4}' -f $order,
         [bool]($all -match 'Reads and changes everything on every site you visit'), [bool]($all -match '3, 2 read every site'),
         [bool]($all -match '1 more are part of the browsers themselves'), [bool]($all -match 'switch this off in Firefox itself')
@@ -4307,32 +4715,32 @@ function Test-SessionCard {
 }
 function Test-SteadyCard {
     <#
-        Windows' own steadiness record, drawn into the real card: a scored PC, then one where Windows has
-        kept nothing, which must say so rather than show a zero.
+        Windows' own steadiness record, drawn into the real This PC list: a scored PC, then one where
+        Windows has kept nothing, which must say so rather than show a zero.
     #>
     Update-SteadyCard ([pscustomobject]@{
         Score = 8.5; ScoreWhen = (Get-Date).AddHours(-1); Word = 'mostly steady'; Days = 30
         Crashes = 7; Hangs = 1; BlueScreens = 0; SuddenStops = 2; Available = $true
         Programs = @([pscustomobject]@{ Name = 'DCv2'; Count = 3 }); Uptime = [timespan]::FromHours(3)
     })
-    $scored = '{0} | {1} | {2}' -f $script:SteadyCard.Value.Text, $script:SteadyCard.Caption.Text,
-        ((@(foreach ($c in $script:SteadyLines.Children) { $c.Text }) -join ' / '))
+    $scored = Get-DetailsText $script:Details.ThisPC
     Update-SteadyCard ([pscustomobject]@{ Score = $null; Word = 'not scored'; Days = 30; Crashes = 0; Hangs = 0
         BlueScreens = 0; SuddenStops = 0; Available = $false; Programs = @(); Uptime = $null })
-    $blank = '{0} | {1}' -f $script:SteadyCard.Value.Text, $script:SteadyCard.Caption.Text
+    $blank = Get-DetailsText $script:Details.ThisPC
+    $script:SteadyLast = $null; $script:SteadyRead = $false
     'score: {0}; crashes named: {1}; sudden stops: {2}; awake: {3}; unscored says so: {4}' -f
-        [bool]($scored -match '8\.5 / 10'), [bool]($scored -match '8 programs stopped working in 30 days, most often DCv2'),
-        [bool]($scored -match 'stopped without warning 2 times'), [bool]($scored -match 'Awake for 3 hours'),
-        [bool]($blank -match "Not scored .* hasn't kept a record")
+        [bool]($scored -match "Windows' stability score: 8\.5 / 10"), [bool]($scored -match 'Stopped working, last 30 days: 8 programs, most often DCv2'),
+        [bool]($scored -match 'PC stopped without warning: 2 times'), [bool]($scored -match 'Awake for: 3 hours'),
+        [bool](($blank -match "stability score: Windows hasn't kept a record") -and ($blank -notmatch '0 / 10|: 0\b'))
 }
 function Test-LiveTiles {
     <#
-        The live panel, drawn twice into the real window.
+        The Health tab, drawn into the real window several times.
 
         First a PC in trouble - hot, held back, nearly out of memory, with a game on top - which has to
         reach the one verdict that matters most rather than the biggest number. Then a PC that shares
         almost nothing, which has to say "not shared" in every empty place instead of drawing a zero,
-        because a zero looks like an answer.
+        because a zero looks like an answer. Then two graphics cards, and built-in graphics alone.
     #>
     $busy = [pscustomobject]@{
         CpuName = 'Test processor'; CpuUsage = 96; CpuTempC = 97; CpuTempStuck = $false; CpuTempSource = 'TZ'
@@ -4348,28 +4756,201 @@ function Test-LiveTiles {
             TempC = 47; WarnAtC = 87; PowerOnHours = 861; BytesWritten = [int64]9TB; FromDrive = $true })
     Update-LiveTiles $busy
     $hot = '{0} | {1} | {2} | {3} | {4} | {5}' -f $script:VerdictText.Text, $script:TileCpu.Value.Text, $script:TileCpu.Extra.Text,
-        $script:TileMemory.Heat.Text, $script:TileDisk.Heat.Text, $script:TileGpu.Extra.Text
-    # The card below the tiles: the slow story, which is where the drive's hours and writing live.
-    $card = '{0} | {1} | {2}' -f $script:DriveCard.Value.Text, $script:DriveCard.Caption.Text, $script:DriveHeatText.Text
+        $script:TileMemory.Heat.Text, $script:TileDisk.Heat.Text, (Get-DetailsText $script:Details.Graphics)
+    # The drive's slow story is in the list: its wear, hours and writing.
+    $card = Get-DetailsText $script:Details.Drive
     # The busiest row: one line per program, and a game busy on both chips counted once, at its loudest.
     $rows = @(foreach ($row in $script:BusyRows.Children) { (@(foreach ($c in $row.Children) { if ($c -is [System.Windows.Controls.TextBlock]) { $c.Text } }) -join ' ') })
     $merged = '{0} rows: {1}' -f $rows.Count, ($rows -join ' / ')
+    $noBattery = ($script:Details.Battery.Border.Visibility -eq 'Collapsed')
 
     $bare = [pscustomobject]@{
         CpuName = 'Test processor'; CpuUsage = 4; CpuTempC = $null; CpuTempStuck = $false; CpuThrottled = $false
         CpuTop = @(); MemUsed = [double]4GB; MemTotal = [double]16GB; CommitPct = $null
         DiskBusyPct = $null; Gpus = @(); Battery = $null
     }
-    Update-DriveCard $null
+    Update-DriveCard ([pscustomobject]@{ Name = 'Test HDD'; Media = 'HDD'; Health = 'Healthy'; WearPct = $null
+            TempC = $null; WarnAtC = $null; PowerOnHours = $null; BytesWritten = $null; FromDrive = $false })
     Update-LiveTiles $bare
     $quiet = '{0} | {1} | {2} | {3}' -f $script:VerdictText.Text, $script:TileGpu.Value.Text, $script:TileDisk.Value.Text, $script:TileMemory.Heat.Text
-    'verdict worst first: {0}; held back named: {1}; memory word: {2}; drive heat: {3}; video memory folded in: {4}; {5}; drive life: {6}; calm: {7}; nothing invented: {8}' -f
+    $bareList = (@(foreach ($box in $script:Details.Values) { Get-DetailsText $box }) -join ' | ')
+    $driveQuiet = Get-DetailsText $script:Details.Drive
+
+    # Two graphics cards: one list, each card's rows under its own name. Then built-in graphics alone,
+    # which never report their own heat - so the list must not fill up with "not shared" for it.
+    $two = $bare.PSObject.Copy()
+    $two.Gpus = @(
+        [pscustomobject]@{ Name = 'NVIDIA GeForce Test 4060'; Usage = 30; TempC = 55; TempMaxC = 95; Discrete = $true; DedicatedUsed = [double]1GB; DedicatedTotal = [double]8GB; SharedUsed = 0; SharedTotal = 0; Top = @() },
+        [pscustomobject]@{ Name = 'Intel Test Graphics'; Usage = 12; TempC = $null; TempMaxC = $null; Discrete = $false; DedicatedUsed = 0; DedicatedTotal = [double]128MB; SharedUsed = [double]1GB; SharedTotal = [double]8GB; Top = @() })
+    Update-LiveTiles $two
+    $twoList = Get-DetailsText $script:Details.Graphics
+    $twoCards = ($twoList -match '\[Test 4060\]') -and ($twoList -match '\[Intel Test Graphics\]') -and ($script:TileGpu.Extra.Text -match 'Also Intel Test Graphics: 12%')
+    $one = $bare.PSObject.Copy()
+    $one.Gpus = @($two.Gpus[1])
+    Update-LiveTiles $one
+    $builtIn = Get-DetailsText $script:Details.Graphics
+    $builtInQuiet = ($builtIn -notmatch 'Temperature') -and ($builtIn -match 'borrowed from memory')
+
+    Update-DriveCard $null
+    $script:DriveRead = $false; $script:DriveLast = $null; $script:LastReading = $null
+    'verdict worst first: {0}; held back named: {1}; memory word: {2}; drive heat: {3}; video memory folded in: {4}; {5}; drive life: {6}; calm: {7}; nothing invented: {8}; two cards: {9}; built-in graphics quiet: {10}; no battery box: {11}; drive temperature not shared: {12}' -f
         [bool]($hot -match 'held back to cool off'), [bool]($hot -match 'running at 61%'),
-        [bool]($hot -match 'nearly full'), [bool]($hot -match '47.C'), [bool]($hot -match 'Video memory 75%'),
+        [bool]($hot -match 'nearly full'), [bool]($hot -match '47.C'), [bool]($hot -match 'Video memory: 75% of'),
         $merged,
-        [bool](($card -match '4% of its rated life used') -and ($card -match '861 hours') -and ($card -match 'written to it')),
+        [bool](($card -match 'Rated life used: 4%') -and ($card -match 'Switched on for: about 861 hours') -and ($card -match 'Written to it so far: ')),
         [bool]($quiet -match 'calm'),
-        [bool](($quiet -match 'not shared') -and ($quiet -notmatch '\| 0%'))
+        [bool](($quiet -match 'not shared') -and ($quiet -notmatch '\| 0%') -and ($bareList -match 'Temperature: not shared') -and ($bareList -notmatch ': 0%|: 0 MHz|: 0\.0 W')),
+        [bool]$twoCards, [bool]$builtInQuiet, [bool]$noBattery,
+        [bool](($driveQuiet -match 'Temperature: not shared') -and ($driveQuiet -notmatch 'Rated life|Switched on|Written'))
+}
+function Test-HealthFacts {
+    <#
+        The new rows, drawn from made-up PCs: one that shares everything (with a graphics fan that has
+        stopped), one that shares nothing, and one that is offline. Temperatures follow the unit chosen.
+    #>
+    $script:FactsLast = [pscustomobject]@{ Cores = 10; Threads = 16; MemoryType = 'DDR5'; MemorySpeedMTs = 5200; MemorySticks = 2; MemorySlots = 4
+        Maker = 'Test Maker'; Model = 'Book 15'; Windows = 'Windows 11 Home'; WindowsVersion = '25H2'; WindowsBuild = '26200.1'
+        Screens = @('1920 x 1080, 144 Hz', '3840 x 2160, 60 Hz'); PowerPlan = 'Balanced' }
+    $r = [pscustomobject]@{
+        CpuName = 'Test processor'; CpuUsage = 20; CpuTempC = 47; CpuTempStuck = $false; CpuThrottled = $false; SpeedMhz = 2400
+        CpuTop = @(); MemUsed = [double]8GB; MemTotal = [double]16GB; CommitPct = 50; DiskBusyPct = 3; DiskReadBps = 541; DiskWriteBps = 2048; Battery = $null
+        Network = @([pscustomobject]@{ Kind = 'Wi-Fi'; DownBps = 44032; UpBps = 512 })
+        Gpus = @([pscustomobject]@{ Name = 'Test card'; Usage = 10; TempC = 50; TempMaxC = 95; Discrete = $true; DedicatedUsed = [double]1GB; DedicatedTotal = [double]8GB
+            SharedUsed = 0; SharedTotal = 0; EngineClockMhz = 1905; MemoryClockMhz = 7001; FanRpm = 0; Top = @() }) }
+    Update-LiveTiles $r
+    $all = (@(foreach ($box in $script:Details.Values) { Get-DetailsText $box }) -join ' | ')
+    # The same PC, but a driver that says nothing about clocks or fan, a network Windows won't describe,
+    # and no facts at all.
+    $script:FactsLast = $null
+    $r2 = $r.PSObject.Copy(); $r2.Network = $null
+    $r2.Gpus = @([pscustomobject]@{ Name = 'Test card'; Usage = 10; TempC = 50; TempMaxC = 95; Discrete = $true; DedicatedUsed = [double]1GB; DedicatedTotal = [double]8GB
+        SharedUsed = 0; SharedTotal = 0; EngineClockMhz = $null; MemoryClockMhz = $null; FanRpm = $null; Top = @() })
+    Update-LiveTiles $r2
+    $bare = (@(foreach ($box in $script:Details.Values) { Get-DetailsText $box }) -join ' | ')
+    $r3 = $r2.PSObject.Copy(); $r3.Network = @()
+    Update-LiveTiles $r3
+    $offline = Get-DetailsText $script:Details.Network
+    # Fahrenheit, for this window only: nothing is written.
+    [void](Set-QpTempUnit -Unit F -SessionOnly)
+    Update-LiveTiles $r
+    $fahrenheit = (Get-DetailsText $script:Details.Processor) + ' | ' + $script:TileCpu.Heat.Text
+    [void](Set-QpTempUnit -Unit C -SessionOnly)
+    $script:LastReading = $null
+    Update-HealthDetails
+    'cores: {0}; memory: {1}; clocks: {2}; fan stopped: {3}; no clock or fan noise: {4}; network: {5}; not connected: {6}; network not shared: {7}; power plan: {8}; fans not shared: {9}; this pc: {10}; drive speeds: {11}; fahrenheit: {12}' -f
+        [bool]($all -match 'Cores: 10 cores, 16 threads'),
+        [bool](($all -match 'Type: DDR5') -and ($all -match 'Speed: 5,200 MT/s') -and ($all -match 'Slots used: 2 of 4')),
+        [bool](($all -match 'Graphics clock: 1,905 MHz') -and ($all -match 'Video memory clock: 7,001 MHz')),
+        [bool]($all -match 'Fan: stopped'),
+        [bool](($bare -notmatch 'Graphics clock|Video memory clock|Fan:') -and ($bare -cnotmatch 'Cores:|Type:|Slots used|Power plan|Maker and model|Windows:')),
+        [bool]($all -match 'Wi-Fi: 43\.0 KB/s down, 512 B/s up'),
+        [bool]($offline -match 'Connection: not connected'),
+        [bool]($bare -match 'Speed: not shared'),
+        [bool]($all -match 'Power plan: Balanced'),
+        [bool]($all -match "Fan speed: not shared by the maker"),
+        [bool](($all -match 'Maker and model: Test Maker Book 15') -and ($all -match 'Windows: Windows 11 Home 25H2 \(build 26200\.1\)') -and ($all -match 'Screens: 1920 x 1080, 144 Hz; 3840 x 2160, 60 Hz')),
+        [bool](($all -match 'Reading right now: 541 B/s') -and ($all -match 'Writing right now: 2\.0 KB/s')),
+        [bool](($fahrenheit -match '117.F') -and ($fahrenheit -notmatch '47.C'))
+}
+function Test-Switches {
+    <#
+        The two switches in Settings, flipped the way a person flips them, against a pretend sign-in task
+        (nothing on this PC is touched). A switch may show "on" only once the change has been made and read
+        back: while it is being made it still shows how things were, and a change that fails leaves it
+        where it was, with a message.
+    #>
+    $script:FakeTask = $null; $script:FakeFail = $false; $script:SeenDuring = @()
+    $names = 'Get-QpSignInTask', 'Test-QpTaskWatches', 'Test-QpShortcuts', 'Enable-QpSignInStart', 'Disable-QpSignInStart'
+    $real = @{}; foreach ($n in $names) { $real[$n] = (Get-Command $n -CommandType Function).ScriptBlock }
+    Set-Item function:script:Get-QpSignInTask { $script:FakeTask }
+    Set-Item function:script:Test-QpTaskWatches { param($t) [bool]$t.Watch }
+    Set-Item function:script:Test-QpShortcuts { [pscustomobject]@{ StartMenu = $false; Desktop = $false } }
+    Set-Item function:script:Enable-QpSignInStart { param([switch]$Watch)
+        $script:SeenDuring += [bool]$script:SignInBox.IsChecked
+        if ($script:FakeFail) { return [pscustomobject]@{ Ok = $false; Note = 'Task Scheduler said no.'; Copy = $null } }
+        $script:FakeTask = [pscustomobject]@{ State = 'Ready'; Watch = [bool]$Watch }
+        [pscustomobject]@{ Ok = $true; Note = 'Quietpane will start when you sign in.'; Copy = $null } }
+    Set-Item function:script:Disable-QpSignInStart {
+        if ($script:FakeFail) { throw 'Access is denied.' }
+        $script:FakeTask = $null
+        [pscustomobject]@{ Ok = $true; Note = 'Quietpane will no longer start when you sign in.'; Copy = $null } }
+    $flip = { param($box) ([System.Windows.Automation.Peers.CheckBoxAutomationPeer]::new($box)).Toggle() }
+    try {
+        $script:SignInBox.IsEnabled = $false   # as the window starts: nothing known yet
+        $greyedUntilKnown = -not $script:SignInBox.IsEnabled
+        Update-PlaceControls
+        $startsOff = (-not $script:SignInBox.IsChecked) -and (-not $script:WatchBox.IsEnabled) -and $script:SignInBox.IsEnabled
+        & $flip $script:SignInBox
+        $on = [bool]$script:SignInBox.IsChecked -and $script:WatchBox.IsEnabled
+        $notEarly = ($script:SeenDuring.Count -eq 1 -and $script:SeenDuring[0] -eq $false)
+        & $flip $script:WatchBox
+        $watching = [bool]$script:WatchBox.IsChecked -and $script:FakeTask.Watch
+        $script:FakeFail = $true; $script:LastMessage = $null
+        & $flip $script:SignInBox                      # switching off fails: it must stay on, and say why
+        $staysOn = [bool]$script:SignInBox.IsChecked -and ($script:LastMessage -match 'Access is denied')
+        $script:FakeTask = $null; Update-PlaceControls; $script:LastMessage = $null
+        & $flip $script:SignInBox                      # switching on fails: it must stay off, and say why
+        $staysOff = (-not $script:SignInBox.IsChecked) -and ($script:LastMessage -match 'Task Scheduler said no')
+        # Fahrenheit, picked in Settings: every temperature changes at once, and nothing is written here.
+        $script:TempButtons['F'].IsChecked = $true
+        $f = (Get-QpTempUnit) -eq 'F'
+        $script:TempButtons['C'].IsChecked = $true
+        $c = (Get-QpTempUnit) -eq 'C'
+    } finally {
+        # The real ones back, exactly as they were.
+        foreach ($n in $names) { Set-Item "function:script:$n" $real[$n] }
+        $script:FakeTask = $null; $script:LastMessage = $null
+    }
+    'greyed until known: {7}; starts off: {0}; on only once done: {1}; not shown early: {2}; watch follows: {3}; a failed switch-off stays on: {4}; a failed switch-on stays off: {5}; unit: {6}' -f
+        $startsOff, $on, $notEarly, $watching, $staysOn, $staysOff, ($f -and $c), $greyedUntilKnown
+}
+function Test-Glance {
+    <#
+        The "At a glance" boxes, filled from a made-up PC: a leftover to clear, a restore point, an app
+        that starts at sign-in and nothing else. Each box sums up its tab; a box with nothing says so.
+    #>
+    Update-FromState @{
+        Privacy = @{}; Vendors = @(); Apps = @(); Devices = @(); Addons = @(); Problems = @()
+        Startup = @([pscustomobject]@{ Id = 'a'; Name = 'Chat app'; On = $true; Keep = $false; Locked = $false; Publisher = 'Test'; Command = 'a.exe'; Note = ''; Missing = $false; Everyone = $false },
+                    [pscustomobject]@{ Id = 'b'; Name = 'Old helper'; On = $false; Keep = $false; Locked = $false; Publisher = 'Test'; Command = 'b.exe'; Note = ''; Missing = $false; Everyone = $false })
+        Cleanup = @([pscustomobject]@{ Id = 'temp'; Title = 'Temporary files'; Description = 'Left behind by programs.'; SizeBytes = [int64]5MB; Recommended = $true })
+        Restore = @([pscustomobject]@{ Name = '20260930-101500-one-click'; Path = 'C:\nowhere'; Changes = 3; Undone = $false })
+    }
+    $g = @{}
+    foreach ($k in 'apps', 'cleanup', 'undo', 'vendors') { $g[$k] = Get-DetailsText $script:GlanceBoxes[$k] }
+    'apps: {0}; leftovers: {1}; drive: {2}; restore points: {3}; brands: {4}' -f
+        [bool](($g.apps -match 'Start when you sign in: 1 on, 1 off') -and ($g.apps -match 'Apps you could remove: none found')),
+        [bool]($g.cleanup -match 'Leftovers you could clear: 5\.0 MB'), [bool]($g.cleanup -match 'Drive [A-Z]:: .+ free of '),
+        [bool](($g.undo -match 'Restore points: 1') -and ($g.undo -match 'Newest: .*Quiet my PC now')),
+        [bool](($g.vendors -match 'Brand software found: none that Quietpane knows') -and ($g.vendors -match 'Still switched on: nothing'))
+}
+
+function Test-HealthLayout {
+    <#
+        The two columns at the window's usual width and at its narrowest: side by side when there is
+        room, the list underneath when there is not - and nothing cut off at the right either way.
+    #>
+    $was = $ui.Tabs.SelectedIndex
+    $ui.Tabs.SelectedIndex = 1
+    $wasWidth = $window.Width
+    $result = foreach ($w in 1100, 760) {
+        $window.Width = $w
+        Update-TabIcons $w
+        $root = $window.Content
+        $size = [System.Windows.Size]::new([double]$w, 900)
+        $root.Measure($size); $root.Arrange([System.Windows.Rect]::new($size)); $root.UpdateLayout()
+        $at = $healthRight.TranslatePoint([System.Windows.Point]::new(0, 0), $healthLeft)
+        $sv = $healthPanel.Parent
+        $fits = ($healthLeft.ActualWidth + $healthLeft.Margin.Right -le $sv.ViewportWidth) -and ($healthRight.ActualWidth -le $sv.ViewportWidth)
+        $side = ($at.X -gt 0 -and [math]::Abs($at.Y) -lt 1)
+        $under = ($at.Y -ge $healthLeft.ActualHeight - 1)
+        $tabRow = @($ui.Tabs.Items | ForEach-Object { [math]::Round($_.TranslatePoint([System.Windows.Point]::new(0, 0), $ui.Tabs).Y) } | Sort-Object -Unique).Count -eq 1
+        '{0}: {1}, fits {2}, tabs on one row {3}' -f $w, $(if ($side) { 'side by side' } elseif ($under) { 'list underneath' } else { 'overlapping' }), $fits, $tabRow
+    }
+    $window.Width = $wasWidth
+    Update-TabIcons $wasWidth
+    $ui.Tabs.SelectedIndex = $was
+    $result -join '; '
 }
 
 function Test-Theme {
@@ -4379,7 +4960,7 @@ function Test-Theme {
         the same shared brushes - and every colour written anywhere in this file must have a dark partner.
     #>
     $was = $script:ActiveTheme
-    $ink = $script:VerdictText.Foreground; $bar = $script:TileCpu.Fill.Background
+    $ink = $script:VerdictText.Foreground; $bar = $script:TileCpu.Fill.Stroke
     $shared = [object]::ReferenceEquals($ink, (Get-Brush '#0F1B1C')) -and [object]::ReferenceEquals($bar, (Get-Brush 'bar.ok'))
     $want = { param($k, $t) '#FF' + $script:Palette[$k][$t].Substring(1) }
     Set-Theme 'Dark'
@@ -4412,7 +4993,7 @@ function Test-Theme {
 
 function Test-UpdateOffer {
     <#
-        The About line and the Home offer, drawn into the real window from a made-up Downloads folder: a
+        The Settings line and the Home offer, drawn into the real window from a made-up Downloads folder: a
         newer Quietpane ZIP must be offered by version, an older one must not, and nothing else is read.
     #>
     $t = Join-Path $env:TEMP ('qp-offer-' + [guid]::NewGuid().ToString('N'))
@@ -4473,13 +5054,14 @@ if ($SelfTest) {
         $ui.LogBox.Text = "[12:00:00] STEP    Quietpane $($info.Version) - Developed by KomodoWorks.com`r`n[12:00:01] OK      Ready."
         $ui.Status.Text = 'Ready when you are.'
         $ui.Tabs.SelectedIndex = $SnapshotTab
-        if ($SnapshotTab -eq ($ui.Tabs.Items.Count - 1)) { $script:PrivacyExpander.IsExpanded = $true }
         if ([string]$ui.Tabs.SelectedItem.Tag -eq 'health') {
             # Real readings for the picture. The slow ones are read first, so the tiles have the drive's
             # temperature to show, and then several live ones a second apart, so the trends have a shape
             # rather than being a single dot.
             $monitor = New-QpLiveMonitor
             $script:BatteryHealth = Get-QpBatteryHealth
+            try { $d = New-Object IO.DriveInfo ($env:SystemDrive + '\'); $script:SpaceLast = @{ Free = [double]$d.AvailableFreeSpace; Total = [double]$d.TotalSize } } catch { }
+            $script:FactsLast = Get-QpSystemFacts
             Update-DriveCard (Get-QpDriveHealth)
             Update-SteadyCard (Get-QpReliability)
             foreach ($i in 1..8) {
@@ -4488,6 +5070,10 @@ if ($SelfTest) {
             }
         }
         Update-Buttons
+        Update-PlaceControls   # read-only: shows the sign-in switches as they really are
+        if ($SnapshotWidth -gt 0) { $window.Width = $SnapshotWidth }
+        Update-TabIcons $window.Width
+        if ($SnapshotHeight -gt 0) { $window.Height = $SnapshotHeight }
         $root = $window.Content
         $size = [System.Windows.Size]::new([double]$window.Width, [double]$window.Height - 40)
         $root.Measure($size)
@@ -4510,6 +5096,10 @@ if ($SelfTest) {
     'add-ons: ' + (Test-AddonList)
     'easy wins: ' + (Test-SpaceWins)
     'live tiles: ' + (Test-LiveTiles)
+    'health layout: ' + (Test-HealthLayout)
+    'health facts: ' + (Test-HealthFacts)
+    'switches: ' + (Test-Switches)
+    'at a glance: ' + (Test-Glance)
     'session: ' + (Test-SessionCard)
     'holding up: ' + (Test-SteadyCard)
     'theme: ' + (Test-Theme)
@@ -4526,7 +5116,7 @@ function Show-Welcome {
            "Settings you change can be undone, and cleaned-up files go to the Recycle Bin.`n" +
            "Anything that can't be undone tells you so before you confirm it.`n" +
            "It is free, open source, and comes with no warranty - use it on PCs that are yours to look after.`n`n" +
-           "The full privacy policy and terms are in the About tab. Sound good?"
+           "The full privacy policy and terms are in the Settings tab. Sound good?"
     if ([System.Windows.MessageBox]::Show($window, $msg, 'Quietpane', 'YesNo', 'Information') -ne 'Yes') { return $false }
     try {
         New-Item -ItemType Directory -Path $info.DataRoot -Force | Out-Null

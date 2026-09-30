@@ -24,12 +24,17 @@ Developed by KomodoWorks.com  |  free  |  open source  |  collects nothing
 ALSO IN THE APP
    Health     Opens with one line telling you how your PC is doing, so you
               aren't left to work it out from a screen of numbers. Under it,
-              matching tiles for the processor, graphics, memory and drive -
-              each with its figure, how warm it is in plain words, and the
-              last two minutes drawn underneath. Then one list of whatever
-              is keeping your PC busiest, and how the battery and drive are
-              holding up. The drive's heat and wear come from the drive
-              itself, because Windows' own figures for it are often invented.
+              a ring each for how hard the processor and graphics are
+              working, and a big number with a bar for memory and the
+              drive, each with how warm it is in plain words. Then one list
+              of whatever is keeping your PC busiest. On the right, one
+              list of everything else, name on the left, value on the right:
+              cores, clocks, memory type and slots, the drive's health and
+              speed, the battery, network speed, the power plan, and which
+              PC and Windows this is. Anything your PC doesn't share is
+              left out or says "not shared" - never a made-up number.
+              The drive's heat and wear come from the drive itself, because
+              Windows' own figures for it are often invented.
               "Watch this session" keeps an eye on it while you work and
               tells you afterwards how hot it got, when it was held back
               to cool off, and how far memory went. It speaks up once if
@@ -51,13 +56,14 @@ ALSO IN THE APP
               have not changed in ages. One button sends them to the
               Recycle Bin. Under it, "Where your space went" shows the
               biggest folders and files, so you can see where it all went.
-   About      One button puts Quietpane in your Start menu and on your
-              desktop, and a tick box starts it when you sign in. Both
+   Settings   One row per setting. A switch starts Quietpane when you sign
+              in, and another has it tell you - with a small badge on its
+              taskbar icon - if Windows switches things back on. One button
+              puts Quietpane in your Start menu and on your desktop. All
               keep working even if you move or delete this folder.
-              Another tick box has it tell you - with a small badge on
-              its taskbar icon - if Windows switches things back on.
               Quietpane follows Windows' light or dark setting; under
-              Appearance you can fix it to Light or Dark instead.
+              Appearance you can fix it to Light or Dark instead, and
+              under Temperatures pick degrees C or F.
               Updates: "Look for a newer version" opens the release
               page in your browser (Quietpane itself never goes online).
               Download the new Quietpane.zip, open Quietpane again, and
@@ -90,7 +96,7 @@ A WINDOW FULL OF CODE OPENED?
 REMOVING QUIETPANE
    Removing it does not undo its changes, so use Undo first if you want
    your PC back exactly as it was. If you added shortcuts or the sign-in
-   start, take them away in About - Quietpane's copy in Program Files
+   start, take them away in Settings - Quietpane's copy in Program Files
    goes to the Recycle Bin with them. Then delete the Quietpane folder
    and any Quietpane-Report files on your Desktop.
    Your undo history stays in C:\ProgramData\Quietpane - delete that too

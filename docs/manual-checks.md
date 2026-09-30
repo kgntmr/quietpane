@@ -92,22 +92,22 @@ These need eyes, not assertions:
   website and the browser should appear within about five seconds; close everything and the list
   shrinks. Compare it with Resource Monitor > Network > TCP Connections: the same programs, allowing
   for QUIC, which Windows does not list.
-- **Start menu and desktop.** About > Add to Start menu and desktop. Both shortcuts show the emblem,
+- **Start menu and desktop.** Settings > Add to Start menu and desktop. Both shortcuts show the emblem,
   open Quietpane, and right-click > Pin to taskbar gives one taskbar button, not two, while it runs.
   `C:\Program Files\Quietpane` now exists. Close Quietpane, move or rename the folder you unzipped,
   and check the Start menu, desktop and taskbar shortcuts all still open it.
 - **Old shortcuts are repaired.** With a shortcut made by 1.10.0 (it opens the unzipped folder), open
   1.11.0 from its folder once. The details log says each shortcut now opens Quietpane's own copy.
-- **Starting when you sign in.** Tick "Start Quietpane when I sign in", sign out and back in. About
+- **Starting when you sign in.** Switch on "Start Quietpane when I sign in", sign out and back in. About
   20 seconds later Quietpane is on the taskbar, minimised, without taking the focus, and Windows did
   not ask for administrator rights. Task Manager shows it using no processor time until you click it;
   then it opens and looks at the PC as usual. The Safety scan lists the task as "Quietpane's own
   sign-in start".
-- **Told when things come back.** Tick "Also tell me if Windows switches things back on" too. Switch
+- **Told when things come back.** Switch on "Also tell me if Windows switches things back on" too. Switch
   one of your startup items back on in Task Manager, sign out and back in. Quietpane's taskbar icon
   shows a small amber "1", and hovering it says "1 thing switched itself back on"; opening it shows
   the Welcome back panel. "That was me" (or switching it off again) clears the badge. With nothing
-  back on, the icon has no badge at all. Untick the box and the next sign-in doesn't check.
+  back on, the icon has no badge at all. Switch it off and the next sign-in doesn't check.
 - **What signing in costs.** Apps > Starts when you sign in. Each program that is running says how much
   memory it is using and how long after sign-in it started; the heaviest is at the top, and the line
   above adds them up. Open something heavy (a browser), press F5, and its figure goes up. A program
@@ -125,10 +125,36 @@ These need eyes, not assertions:
   never says it a second time however long the heat lasts. Minimise Quietpane first and the taskbar
   icon carries a badge; restore the window and the badge clears. With a "came back" badge already
   showing, that one stays - it is about a choice you made.
-- **The trend under each tile.** Open Health and leave it a minute: a line grows under each number with
-  a dot on the newest reading. Start something heavy and the line climbs where Task Manager's graph
-  climbs, at the same moment. Switch tabs for five minutes and come back - the line starts again rather
-  than drawing a straight line across the time nobody was reading.
+- **The rings and big numbers.** Open Health and start something heavy: the processor and graphics
+  rings fill where Task Manager's figures climb, at the same moment, and turn amber or red only when
+  the words under them say "hot" or "very hot". Point at a number after a minute: it says how high it
+  went in the last two minutes. Make the window as narrow as it goes: the list on the right moves
+  underneath, nothing is cut off, and the tabs stay on one row (their icons step aside).
+- **The Health list against Windows' own figures.** With Task Manager > Performance open beside it:
+  - Processor: cores and threads (Task Manager calls threads "logical processors") and the speed.
+  - Graphics: the graphics clock and video memory clock. Task Manager doesn't show these; on an NVIDIA
+    card compare `nvidia-smi --query-gpu=clocks.gr,clocks.mem --format=csv` - they should match to
+    within a moment's change. On built-in graphics the clock is lower and there is no temperature row.
+  - Graphics fan: shown only if the driver reports one. On most laptops it isn't there, and that is right.
+  - Memory: type, speed (MT/s) and "Slots used" match Task Manager > Memory.
+  - Drive: reading and writing speed follow Task Manager > Disk while you copy a big folder.
+  - Network: Wi-Fi or wired speed follows Task Manager > Wi-Fi / Ethernet while something downloads.
+    Connect a VPN, or run WSL: the figure must not double.
+  - Fan speed: "not shared by the maker" on a PC whose maker keeps it to its own app. It must never be a
+    number that doesn't move.
+  - Power plan: the one in Control Panel > Power Options.
+  - This PC: the maker and model on the sticker, Windows as Settings > System > About says, each screen.
+- **Laptop and desktop.** On a desktop there is no Battery box at all, rather than one that says nothing.
+  On a laptop the battery's charge, whether it is plugged in, the watts, and how much it holds.
+- **Two graphics cards.** On a gaming laptop the Graphics box has a heading for each card, and the ring
+  shows the one with its own memory, with "Also <the other one>: N%" under it.
+- **Celsius or Fahrenheit.** Settings > Temperatures > F: every temperature on Health, in the session
+  card and in a saved session report changes at once; close and reopen Quietpane and it is still F.
+  `%ProgramData%\Quietpane\temperature.txt` holds one letter. Back to C the same way.
+- **Switches say how things are.** Settings > Start Quietpane when I sign in: the switch moves only once
+  the task is made. Turn Narrator on, Tab to it and flip it with the Space bar: the same happens, and
+  Task Scheduler has the task. Where making the task fails (a work PC whose policy blocks it, say), the
+  switch stays off and says why.
 - **The session timeline.** While watching, the strip under the headline grows from the left. Run
   something heavy: the columns get taller and darker, and the thin row underneath fills in while the
   processor is held back. Put the PC to sleep and wake it: that stretch is blank, not stretched over.
@@ -221,7 +247,7 @@ These need eyes, not assertions:
   unpacks to `Downloads\Quietpane <version>`, closes, and **Windows asks for permission** before
   the new one opens - if it opens without asking, stop: that is a bug. Check one unpacked file in
   PowerShell with `Get-Content <file> -Stream Zone.Identifier`: it must say `ZoneId=3`.
-- **The old folder after an update.** With shortcuts added in About, open the old unzipped folder:
+- **The old folder after an update.** With shortcuts added in Settings, open the old unzipped folder:
   the newer copy opens instead, once, with no loop.
 
 ## 4. What is deliberately not tested
