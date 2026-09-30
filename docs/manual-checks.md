@@ -69,8 +69,8 @@ These need eyes, not assertions:
   Task Manager > Processes, sorted by CPU and by GPU. Quietpane lists itself as "Quietpane (this app)".
 - **Battery and drive.** On a laptop, the Battery card's "holds N% of what it did when new" should
   match Windows' own report (`powercfg /batteryreport`). The Drive card should say what Windows says
-  in Settings > System > Storage > Disks & volumes. Wear and temperature need Quietpane's usual
-  administrator rights; without them the card just says "Healthy".
+  in Settings > System > Storage > Disks & volumes. Wear and temperature come from the drive itself
+  without administrator rights; only Windows' own fallback needs them, and then the row says so.
 - **Came back.** Switch one of Quietpane's privacy settings back on yourself in Windows Settings,
   then open Quietpane: Home says one setting came back. "That was me" hides it for good; doing it
   again and choosing "Switch them off again" puts exactly that one setting right, with a restore point.
@@ -150,7 +150,7 @@ These need eyes, not assertions:
   shows the one with its own memory, with "Also <the other one>: N%" under it.
 - **Celsius or Fahrenheit.** Settings > Temperatures > F: every temperature on Health, in the session
   card and in a saved session report changes at once; close and reopen Quietpane and it is still F.
-  `%ProgramData%\Quietpane\temperature.txt` holds one letter. Back to C the same way.
+  `%LOCALAPPDATA%\Quietpane\temperature.txt` holds one letter. Back to C the same way.
 - **Switches say how things are.** Settings > Start Quietpane when I sign in: the switch moves only once
   the task is made. Turn Narrator on, Tab to it and flip it with the Space bar: the same happens, and
   Task Scheduler has the task. Where making the task fails (a work PC whose policy blocks it, say), the
@@ -244,12 +244,70 @@ These need eyes, not assertions:
   to switch Smart App Control off. Repeat once releases are signed: it should then simply start.
 - **An update, end to end.** Put a newer `Quietpane.zip`, downloaded through a browser, in
   Downloads. Open the older Quietpane: Home offers it. *Install it* shows the version and SHA256,
-  unpacks to `Downloads\Quietpane <version>`, closes, and **Windows asks for permission** before
-  the new one opens - if it opens without asking, stop: that is a bug. Check one unpacked file in
+  unpacks to `Downloads\Quietpane <version>`, closes, and the new one opens the way a double-click
+  would, with your own rights and Windows' downloaded-file checks. Check one unpacked file in
   PowerShell with `Get-Content <file> -Stream Zone.Identifier`: it must say `ZoneId=3`.
 - **The old folder after an update.** With shortcuts added in Settings, open the old unzipped folder:
   the newer copy opens instead, once, with no loop.
 
+## 3a. Admin rights, since 2.1
+
+Quietpane opens without administrator rights and asks only for changes that need them. The automated
+tests cover the rules; these need real Windows prompts, real accounts, or a tool watching the disk.
+
+**On the maintainer's PC, before each release that touches this:**
+
+- **Opening.** Double-click *Start Quietpane*: no permission prompt. Health, add-ons, camera history,
+  startup costs and Where your space went all work. Hidden system tasks say "needs admin rights to
+  check", Windows' temp folder says its size needs admin rights, and the quarantine and "Changes made
+  with admin rights" show a button with the shield.
+- **A change of your own.** Tick an HKCU-only privacy item (for example *Turn off ads on the lock screen*),
+  Apply: no prompt, and it is done. Undo it: no prompt.
+- **A change to Windows.** Tick a service item: the shield appears on Apply. Press it, say **No**:
+  nothing changes and the window is usable. Press it again, say **Yes**: Quietpane opens again with
+  "(admin)" in its title, on Privacy, with the same ticks and a note - and **nothing has run**. Press
+  Apply: it is done.
+- **The handover.** With the console host and again with Windows Terminal as the default terminal,
+  the first window closes only once the admin window is showing, never while a console flashes up.
+  Say No: the first window stays. There is never a moment with two usable windows.
+- **A folder with awkward characters.** Unzip to `...\Desktop\Quiet pane & 100% (1)\` and repeat the
+  shield flow: the tab and ticks arrive intact. If you can, repeat under a folder with non-English
+  letters.
+- **Safety scan only.** No prompt, a useful report, and a short list of what an administrator would
+  also see. "Check and ask Defender to scan" works without admin rights.
+- **Moving from 2.0.** The first ordinary window uses the default appearance and degrees. After the
+  first admin window, Light/Dark and C/F from 2.0 carry over - unless they were already set in 2.1.
+- **Older undo records.** In the admin window, points made by 2.0 are listed as made by an older
+  Quietpane, with no Undo. A hash of `%ProgramData%\Quietpane\restore` before and after is the same.
+- **The locked folders.** After the first admin window, `Get-Acl` on `%ProgramData%\Quietpane` and on
+  `machine\quarantine` shows owner Administrators, inheritance off, and only SYSTEM and
+  Administrators. Files quarantined by 2.0 (in the old `quarantine` folder) are listed by name as
+  kept by an older Quietpane, with no buttons, and are left exactly where they are. From an ordinary PowerShell, listing either folder or reading any `meta.json` is
+  denied. In the admin window, quarantine a harmless test file you made in `%TEMP%`, then list, put
+  back and delete it.
+- **Sign-in start.** An existing task set to run with highest privileges becomes limited the next time
+  an admin window opens. After the next sign-in, Task Manager's *Elevated* column says **No** for it.
+- **Brand extras.** On the Apps tab, compare each extra's shield with where it is registered. One
+  registered for your account whose uninstaller is known to run as you has no shield; one that needs
+  admin, or that Quietpane can't classify, has it; every machine-wide one has it. Uninstall nothing.
+- **Nothing touches the admin-only folder (release blocker).** Run Process Monitor with two filters:
+  the unelevated Quietpane `powershell.exe` (Task Manager's *Elevated* column says No), and a path
+  beginning with `C:\ProgramData\Quietpane`. Go through first start, every tab, Settings, a report, a
+  user-only Apply and its Undo, the Undo tab with its two shielded buttons, a `-Watch` run, a `-Scan`
+  run, and a shielded click answered **No**. Expected: **0 events**. Anything else blocks the release.
+
+**Needs another account or PC:**
+
+- **A standard account, with a different administrator answering the prompt.** The admin window says
+  it is running as the other account. A batch of the user's own settings is refused; a mixed batch is
+  refused before anything is written (the registry values and the audit log are unchanged); a batch
+  of machine-wide changes only runs. Nothing appears in the administrator's own profile: no
+  `%LOCALAPPDATA%\Quietpane`, no task, no shortcut.
+- **A Microsoft account and a local account:** the sign-in start opens Quietpane without admin rights
+  in the right session.
+- **Windows 10:** the shield on the buttons is Windows' own shield.
+- **A PC with `%ProgramData%\CleanMyPC\restore` points:** listed in the admin window, never replayed.
+- **A Windows user name with non-English letters:** the shield flow and the per-account folder.
 ## 4. What is deliberately not tested
 
 - Live ransomware, remote access tools, stealers or loaders. Never, in any environment.

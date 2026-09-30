@@ -16,7 +16,7 @@
 </p>
 
 <p align="center">
-  <sub><b>No <code>.exe</code>, no installer, no precompiled binary.</b> Quietpane is readable PowerShell plus a few short C# blocks that PowerShell compiles on your PC as it runs, so you can read every line before you run it - and you should, with anything that asks for administrator rights. <a href="#verify-it-yourself">How to check it in four steps</a>.</sub>
+  <sub><b>No <code>.exe</code>, no installer, no precompiled binary.</b> Quietpane is readable PowerShell plus a few short C# blocks that PowerShell compiles on your PC as it runs, so you can read every line before you run it - and you should, with anything that can ask for administrator rights. <a href="#verify-it-yourself">How to check it in four steps</a>.</sub>
 </p>
 
 <p align="center"><img src="docs/screenshot-home.png" width="820" alt="Quietpane home screen: cards showing what could be better, and one button that does it"></p>
@@ -27,7 +27,7 @@
 2. **Unzip it:** right-click **Quietpane.zip** → **Extract All** → **Extract**. It can't start from inside the ZIP.
 3. In the new folder, double-click **Start Quietpane**, then press **Quiet my PC now**.
 
-It shows what it will do before doing anything, and takes about a minute. **Undo everything** puts every setting back; cleared files wait in your Recycle Bin, and any pre-installed app it removed can be reinstalled from the Microsoft Store. You need Windows 10 or 11 and an administrator account. Nothing is installed.
+It shows what it will do before doing anything, and takes about a minute. **Undo everything** puts every setting back; cleared files wait in your Recycle Bin, and any pre-installed app it removed can be reinstalled from the Microsoft Store. You need Windows 10 or 11. Quietpane opens with your own rights and asks for administrator rights only when you press a change to Windows itself. Nothing is installed.
 
 Quietpane isn't [digitally signed](#code-signing-policy) yet, so Windows asks a few questions first:
 
@@ -35,11 +35,15 @@ Quietpane isn't [digitally signed](#code-signing-policy) yet, so Windows asks a 
 |---|---|
 | "Windows protected your PC" | **More info** → **Run anyway** |
 | "Do you want to run this file?" | **Run** |
-| "Do you want to allow this app to make changes?" | **Yes** |
+| "Do you want to allow this app to make changes?" (only when you press something with the shield) | **Yes** |
 
 **You should be suspicious of that**, and of anything else that asks for administrator rights. A signing certificate has been [applied for](#code-signing-policy); until it comes through, the honest answer is that a signature only tells you who published something, not what it does. Quietpane offers you the stronger thing instead: there is no `.exe` and no precompiled binary - even its few C# blocks ship as source and are compiled on your PC as it runs - so you can read the whole app before running it, and [check in about a minute](#verify-it-yourself) that it makes no network connections at all.
 
-**Want to look before you leap?** Double-click **Safety scan only**. It changes nothing on your PC - it only looks and tells you what it found.
+**Want to look before you leap?** Double-click **Safety scan only**. It changes nothing on your PC and needs no administrator rights - it only looks, tells you what it found, and names the few things only an administrator can see.
+
+### The shield
+
+Windows' own shield sits on a button when that change needs administrator rights - a service, a machine-wide setting, the quarantine. Everything else (your own settings, your startup apps, your Store apps, your own temp files) happens straight away, with no question. Press a shielded button and Windows asks. Say **No** and nothing changes. Say **Yes** and Quietpane opens again with administrator rights, on the same tab, with the same boxes ticked - and does nothing by itself. You press the button again, and you see the same preview and the same question as always.
 
 > **A good start, not a guarantee.** Quietpane tidies up the usual troublemakers, but it can't promise a PC is clean. If yours still feels wrong, run a deeper scan with a dedicated security tool too.
 
@@ -121,7 +125,7 @@ Then: which apps used your camera, microphone and location, and when, as Windows
 
 **Undo** puts back every recorded change, each with the value and type it had before. **Settings** is one row per setting, with the choice on the right: **Appearance**, **Temperatures** (°C or °F), and two switches - a switch is used only where flipping it changes things there and then, and it shows "on" only once that has worked. **Start Quietpane when I sign in** has it wait on the taskbar, doing nothing until you click it. **Also tell me if Windows switches things back on** has it check once as you sign in (about a second of work) and badge its taskbar icon with the number, only if something came back. One button adds it to your Start menu and desktop with its own icon, so it is easy to find and pins to the taskbar properly. The policies are at the bottom, readable offline. Both open Quietpane's own copy in `C:\Program Files\Quietpane`, so moving or deleting the folder you unzipped never breaks them. Opening a newer Quietpane brings that copy up to date, an older one never replaces it, and an old unzipped folder opened afterwards opens the newer copy instead.
 
-**Updates, without going online.** Quietpane never checks the internet for a newer version. **Settings > Updates > Look for a newer version** says first that it will open GitHub in your browser, and only then does - your browser connects, Quietpane doesn't. If a newer `Quietpane.zip` is already in your Downloads folder, Home says so in one line and **Install it** does the rest: it unpacks it next to the file, keeping Windows' downloaded-from-the-internet mark on every file so SmartScreen still checks it, and starts it the way a double-click would, so Windows asks for permission as usual. **Install an update from a file...** does the same for a ZIP you pick. Only files named `Quietpane*.zip` are looked at, and only the version written inside them is read.
+**Updates, without going online.** Quietpane never checks the internet for a newer version. **Settings > Updates > Look for a newer version** says first that it will open GitHub in your browser, and only then does - your browser connects, Quietpane doesn't. If a newer `Quietpane.zip` is already in your Downloads folder, Home says so in one line and **Install it** does the rest: it unpacks it next to the file, keeping Windows' downloaded-from-the-internet mark on every file so SmartScreen still checks it, and starts it the way a double-click would, so SmartScreen checks it as usual. **Install an update from a file...** does the same for a ZIP you pick. Only files named `Quietpane*.zip` are looked at, and only the version written inside them is read.
 
 ## What it deliberately doesn't do
 
@@ -143,18 +147,24 @@ Then: which apps used your camera, microphone and location, and when, as Windows
    ```
    You'll find exactly two matches: the scanner's **detection patterns** in `src/Quietpane.psm1`, which are text it looks *for* in malicious startup entries, not network calls.
 3. **Watch it.** Open **Resource Monitor** (`resmon`) → **Network** while you use the app. Nothing connects. Your browser opens only when **you** click a link.
-4. **See what it keeps.** `%ProgramData%\Quietpane` holds restore points and their logs, the audit log, the quarantine, and a few small notes (see the [Privacy Policy](PRIVACY.md)). Scan reports go on your Desktop. Delete any of it whenever you like. Only if you add shortcuts or the sign-in start: `C:\Program Files\Quietpane` holds a copy of the app's own files, and Task Scheduler has one task, **Quietpane (KomodoWorks)**, which the Safety scan labels as Quietpane's own.
+4. **See what it keeps.** `%LOCALAPPDATA%\Quietpane` holds your own settings, notes and restore points. `%ProgramData%\Quietpane`, which only administrators can open, holds restore points for changes made with administrator rights, their audit log, and the quarantine (see the [Privacy Policy](PRIVACY.md)). Scan reports go on your Desktop. Delete any of it whenever you like. Only if you add shortcuts or the sign-in start: `C:\Program Files\Quietpane` holds a copy of the app's own files, and Task Scheduler has one task, **Quietpane (KomodoWorks)**, which the Safety scan labels as Quietpane's own.
 
 ## FAQ
 
 **Isn't this just another "PC optimizer"?**
 That's a fair question to lead with - it's a category full of scams, and several famous names in it ended up shipping adware or worse. Quietpane is free with nothing to upsell, there is no "pro" version and no account. It never invents problems: a setting your PC doesn't have is shown as **[not on this PC]** rather than as something to fix, a reading your PC won't share says **not shared** rather than showing a zero, and it says plainly that it **cannot** promise a PC is clean. It doesn't promise to make anything faster. And it's MIT-licensed plain text, so none of this has to be taken on trust - see [Verify it yourself](#verify-it-yourself).
 
-**Why does it need administrator rights?**
-Because the things it changes are system settings - services, scheduled tasks, machine-wide registry values. Anything that could change those without administrator rights would be a Windows security flaw. Use **Safety scan only** if you'd rather it just looked, and read [what it deliberately doesn't do](#what-it-deliberately-doesnt-do) before you give it anything.
+**When does it need administrator rights?**
+Only for changes to Windows itself - services, scheduled tasks, machine-wide registry values, the quarantine - and those buttons carry Windows' shield. Anything that could change those without administrator rights would be a Windows security flaw. Looking, reading your PC's health, the Safety scan, and changes to your own account's settings need none, so Quietpane doesn't ask for them. Read [what it deliberately doesn't do](#what-it-deliberately-doesnt-do) before you give it anything.
+
+**I said Yes, and Quietpane opened again but didn't do anything.**
+That's on purpose. Saying yes to Windows only gives Quietpane the rights; you still decide. Your boxes are still ticked - press the button again.
+
+**My undo list says some changes were "made by an older Quietpane".**
+Versions before 2.1 kept their undo records in a folder other accounts on the PC could change, so Quietpane can't be sure a record is genuine and won't replay one. They stay listed so you can see what was changed, and you can change any of those settings back in Windows yourself.
 
 **Windows says "Unknown publisher". Should I be worried?**
-You should be careful with any unsigned app that wants administrator rights, including this one. A certificate has been [applied for](#code-signing-policy). Until it arrives, the thing worth knowing is that Quietpane ships no `.exe` and no precompiled binary - its few C# blocks are source, compiled on your PC as it runs - so you can read the entire app, and confirm in a minute that it never connects to anything. Anyone offering you a Quietpane `.exe` or a "cracked" version is offering you something else; see the [Security Policy](SECURITY.md#getting-a-genuine-copy).
+You should be careful with any unsigned app that can ask for administrator rights, including this one. A certificate has been [applied for](#code-signing-policy). Until it arrives, the thing worth knowing is that Quietpane ships no `.exe` and no precompiled binary - its few C# blocks are source, compiled on your PC as it runs - so you can read the entire app, and confirm in a minute that it never connects to anything. Anyone offering you a Quietpane `.exe` or a "cracked" version is offering you something else; see the [Security Policy](SECURITY.md#getting-a-genuine-copy).
 
 **Smart App Control blocked it, or Quietpane says it "can't start on this PC yet".**
 Windows 11 on that PC only runs signed apps, and Quietpane isn't signed yet. There's no safe way round that, so please wait for the signed release rather than turning Smart App Control off - on many PCs it can't be turned back on without resetting Windows. [More in the Security Policy](SECURITY.md#if-your-antivirus-or-windows-blocked-it).
@@ -190,7 +200,7 @@ Only download from this repository's [Releases](https://github.com/kgntmr/quietp
 Shortcuts made before 1.11.0 opened the folder you unzipped. Double-click **Start Quietpane** in the folder's new place once: it points every Quietpane shortcut, including one pinned to the taskbar, at its own copy in Program Files, so it can't happen again.
 
 **How do I remove Quietpane?**
-Removing it doesn't undo its changes, so use **Undo** first if you want your PC back as it was. If you added shortcuts or the sign-in start, take them away in **Settings** (Quietpane's copy in Program Files goes to the Recycle Bin with them). Then delete the Quietpane folder and any Quietpane-Report or Quietpane-Session files on your Desktop. Your undo history stays in `C:\ProgramData\Quietpane` until you delete that too.
+Removing it doesn't undo its changes, so use **Undo** first if you want your PC back as it was. If you added shortcuts or the sign-in start, take them away in **Settings** (Quietpane's copy in Program Files goes to the Recycle Bin with them). Then delete the Quietpane folder and any Quietpane-Report or Quietpane-Session files on your Desktop. Your undo history stays in `%LOCALAPPDATA%\Quietpane` and `C:\ProgramData\Quietpane` until you delete those too.
 
 ## Privacy, terms and security
 
@@ -225,11 +235,11 @@ Free code signing provided by [SignPath.io](https://about.signpath.io), certific
 - **Run from source:** clone the repository and double-click `Start Quietpane.cmd` (or `Safety scan only.cmd`).
 - **Build the download:** `powershell -ExecutionPolicy Bypass -File tools\build-release.ps1` creates `dist\Quietpane.zip` and prints its SHA256. The ZIP holds the app's files from this repository, unchanged; the tests and build tools are left out.
 - **Try the window safely:** `.\Quietpane.ps1 -SelfTest` builds it without showing it; add `-Snapshot file.png -SnapshotTab 0` to save a picture (`-SnapshotWidth` and `-SnapshotHeight` choose its size, `-Theme Dark` its colours).
-- **Run the tests:** `powershell -ExecutionPolicy Bypass -File tests\Run-QuietpaneTests.ps1`, and add `-Live` for the EICAR check. No real malware is used anywhere, and the EICAR string is built at runtime, so it's never stored here. The six quarantine tests need administrator rights. From the repository folder, run this in an ordinary PowerShell window and answer **Yes**:
+- **Run the tests:** `powershell -ExecutionPolicy Bypass -File tests\Run-QuietpaneTests.ps1`, and add `-Live` for the EICAR check. No real malware is used anywhere, and the EICAR string is built at runtime, so it's never stored here. The quarantine tests, and the checks on the locked data folder, need administrator rights. From the repository folder, run this in an ordinary PowerShell window and answer **Yes**:
   ```powershell
   Start-Process powershell -Verb RunAs -ArgumentList '-NoExit','-ExecutionPolicy','Bypass','-File',"$PWD\tests\Run-QuietpaneTests.ps1",'-Live'
   ```
-  An elevated window says "Administrator:" in its title bar. Without administrator rights **264 checks run and 10 are skipped** - the quarantine round trip, permanent deletion, the audit log, the sign-in start and EICAR; the elevated window runs those too. One check only ever runs on a PC without Defender.
+  An elevated window says "Administrator:" in its title bar. Without administrator rights **324 checks run and 15 are skipped** - the quarantine round trip, permanent deletion, the audit log, the sign-in start, the locked data folder and EICAR; the elevated window runs 337 of them, leaving only EICAR (add `-Live`). One check only ever runs on a PC without Defender.
 - **Check by hand:** [`docs/manual-checks.md`](docs/manual-checks.md) lists what still needs a person, including the AMTSO feature checks. Those stay manual on purpose: automating them would mean the app downloading files.
 - **Contribute:** the lists in [`src/catalog/`](src/catalog) are plain data, so adding a setting, app, folder, brand or startup note needs no code. Describe side effects honestly, and test with **Preview** first. [`CONTRIBUTING.md`](CONTRIBUTING.md) shows a real entry, the word limits the tests enforce, and the two tests that catch people out. The reasons behind a few design choices are in [`docs/LESSONS-LEARNED.md`](docs/LESSONS-LEARNED.md).
 - **What CI checks:** every push and pull request runs the full suite on `windows-latest`, builds the ZIP, and verifies that every script file is still plain ASCII with CRLF endings - see [`.github/workflows/tests.yml`](.github/workflows/tests.yml).

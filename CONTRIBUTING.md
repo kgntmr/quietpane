@@ -16,7 +16,7 @@ Everyone taking part is expected to follow the [Code of Conduct](CODE_OF_CONDUCT
 
 **Please don't open an issue.** Email **info@komodoworks.com** with the subject "Security: Quietpane".
 The [Security Policy](SECURITY.md) says what to include and what happens next. This matters more than
-usual here: Quietpane asks for administrator rights, so a flaw in it is worth handling quietly until
+usual here: Quietpane can run with administrator rights, so a flaw in it is worth handling quietly until
 there's a fix.
 
 ## Reporting a bug
@@ -122,7 +122,7 @@ and the budget is how that promise is kept.
 - **Run it from source:** clone the repository and double-click `Start Quietpane.cmd`.
 - **Try the window without showing it:** `.\Quietpane.ps1 -SelfTest`.
 - **Run the checks:** `powershell -ExecutionPolicy Bypass -File tests\Run-QuietpaneTests.ps1`.
-  Without administrator rights **229 checks run and 10 are skipped**. The
+  Without administrator rights **324 checks run and 15 are skipped**. The
   [README](README.md#for-developers) has the elevated recipe for the rest.
 - **Use Preview first.** If a change alters what happens to a PC, exercise it through Preview before
   proposing it. Preview is what stands between a person and a surprise.
