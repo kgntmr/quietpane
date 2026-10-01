@@ -212,6 +212,8 @@ The optional sign-in task now runs Quietpane with limited rights (it ran with hi
 
 ## 6. Verification performed
 
+The test, self-test and Process Monitor output behind this section is published, cleaned of machine-specific details, in [docs/security/evidence/2.1](../evidence/2.1/README.md).
+
 ### 6.1 Automated functional tests
 
 `tests/Run-QuietpaneTests.ps1` runs the engine and the catalogues directly, with fake inputs where Windows state would otherwise be needed. Since 2.1 every run uses its own stores in a fresh folder under `%TEMP%`, and the last two tests confirm that the real `%LOCALAPPDATA%\Quietpane` (and, with administrator rights, the real `%ProgramData%\Quietpane`) is byte-for-byte unchanged afterwards.
@@ -313,7 +315,7 @@ An earlier -Scan capture that was closed after about 40 minutes also recorded ze
 
 Not covered by these captures: a shielded click answered *No*. The UAC checks are separate sessions, run without Process Monitor by design.
 
-Raw captures (`.PML`, `.CSV`) are not published: they are large and contain machine-specific paths and process details.
+Raw captures (`.PML`, `.CSV`) are not published: they are large and contain machine-specific paths and process details. A cleaned summary of each capture, listing every event under the store, is in [evidence/2.1](../evidence/2.1/README.md).
 
 ## 8. Known limitations
 

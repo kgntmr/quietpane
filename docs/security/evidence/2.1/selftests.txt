@@ -1,0 +1,56 @@
+Quietpane 2.1 window self-test (Quietpane.ps1 -SelfTest): builds the whole window without showing it and checks it.
+
+=== With administrator rights, 1 October 2026 ===
+9 tabs, 32 privacy items, logo loaded: True, icon sizes: 8, unnamed controls: 0 , badge: OK, finding quarantine buttons: 4 (unnamed 0), window built OK
+sign-in costs: Slow starter,Heavy app,Idle helper; total line: True; restart line: True; windows timing: True; copies: True
+add-ons: Coupon Helper,Old Toolbar,Docs Offline; reads every site: True; count: True; parts summed up: True; firefox: True
+easy wins: rows: 2; move button: True; size: True; windows only: True; stopped looking: True; files hidden: True
+live tiles: verdict worst first: True; held back named: True; memory word: True; drive heat: True; video memory folded in: True; 2 rows: A game 88% of the graphics card / Windows Explorer 6% of the processor; drive life: True; calm: True; nothing invented: True; two cards: True; built-in graphics quiet: True; no battery box: True; drive temperature not shared: True
+health layout: 1100: side by side, fits True, tabs on one row True; 760: list underneath, fits True, tabs on one row True
+health facts: cores: True; memory: True; clocks: True; fan stopped: True; no clock or fan noise: True; network: True; not connected: True; network not shared: True; power plan: True; fans not shared: True; this pc: True; drive speeds: True; fahrenheit: True
+switches: greyed until known: True; starts off: True; on only once done: True; not shown early: True; watch follows: True; a failed switch-off stays on: True; a failed switch-on stays off: True; unit: True; without admin rights it asks and changes nothing: True
+shields: follows the ticks: True; only for what needs it: True; named with help: True; asks instead of changing: True; one-click, shortcuts and machine undo: True; none with admin rights: True; unnamed controls: 0
+relaunch view: tab: True; ticks, and only real ones: True; note: True; hostile values ignored: True; nothing changed: True
+handoff: declined: True; failure: True; exits: True; flash: True; ready: True; slow: True; third: True; oneThread: True; abandoned: True; foreign: True; command line: True
+at a glance: apps: True; leftovers: True; drive: True; restore points: True; brands: True
+session: Stop watching; very hot: True; held back: True; gap owned up to: True; busiest: True; stops: True; alerts: memory,drive; said once: True; report: Visible offered, 30948 characters, 0 scripts; timeline: 96 columns, 92 a gap, 3 held back, 4 legend words
+holding up: score: True; crashes named: True; sudden stops: True; awake: True; unscored says so: True
+theme: live switch: True; back to light: True; shared: True; follows Windows: True; a fixed choice holds: True; frozen: none; every colour has a dark partner: True (26 colours)
+updates: offered: True; older ignored: True; version line: True
+
+
+=== Without administrator rights, light, 1 October 2026 ===
+9 tabs, 32 privacy items, logo loaded: True, icon sizes: 8, unnamed controls: 0 , badge: OK, finding quarantine buttons: 4 (unnamed 0), window built OK
+sign-in costs: Slow starter,Heavy app,Idle helper; total line: True; restart line: True; windows timing: True; copies: True
+add-ons: Coupon Helper,Old Toolbar,Docs Offline; reads every site: True; count: True; parts summed up: True; firefox: True
+easy wins: rows: 2; move button: True; size: True; windows only: True; stopped looking: True; files hidden: True
+live tiles: verdict worst first: True; held back named: True; memory word: True; drive heat: True; video memory folded in: True; 2 rows: A game 88% of the graphics card / Windows Explorer 6% of the processor; drive life: True; calm: True; nothing invented: True; two cards: True; built-in graphics quiet: True; no battery box: True; drive temperature not shared: True
+health layout: 1100: side by side, fits True, tabs on one row True; 760: list underneath, fits True, tabs on one row True
+health facts: cores: True; memory: True; clocks: True; fan stopped: True; no clock or fan noise: True; network: True; not connected: True; network not shared: True; power plan: True; fans not shared: True; this pc: True; drive speeds: True; fahrenheit: True
+switches: greyed until known: True; starts off: True; on only once done: True; not shown early: True; watch follows: True; a failed switch-off stays on: True; a failed switch-on stays off: True; unit: True; without admin rights it asks and changes nothing: True
+shields: follows the ticks: True; only for what needs it: True; named with help: True; asks instead of changing: True; one-click, shortcuts and machine undo: True; none with admin rights: True; unnamed controls: 0
+relaunch view: tab: True; ticks, and only real ones: True; note: True; hostile values ignored: True; nothing changed: True
+handoff: declined: True; failure: True; exits: True; flash: True; ready: True; slow: True; third: True; oneThread: True; abandoned: True; foreign: True; command line: True
+at a glance: apps: True; leftovers: True; drive: True; restore points: True; brands: True
+session: Stop watching; very hot: True; held back: True; gap owned up to: True; busiest: True; stops: True; alerts: memory,drive; said once: True; report: Visible offered, 30945 characters, 0 scripts; timeline: 96 columns, 92 a gap, 3 held back, 4 legend words
+holding up: score: True; crashes named: True; sudden stops: True; awake: True; unscored says so: True
+theme: live switch: True; back to light: True; shared: True; follows Windows: True; a fixed choice holds: True; frozen: none; every colour has a dark partner: True (26 colours)
+updates: offered: True; older ignored: True; version line: True
+
+=== Without administrator rights, dark, 1 October 2026 ===
+9 tabs, 32 privacy items, logo loaded: True, icon sizes: 8, unnamed controls: 0 , badge: OK, finding quarantine buttons: 4 (unnamed 0), window built OK
+sign-in costs: Slow starter,Heavy app,Idle helper; total line: True; restart line: True; windows timing: True; copies: True
+add-ons: Coupon Helper,Old Toolbar,Docs Offline; reads every site: True; count: True; parts summed up: True; firefox: True
+easy wins: rows: 2; move button: True; size: True; windows only: True; stopped looking: True; files hidden: True
+live tiles: verdict worst first: True; held back named: True; memory word: True; drive heat: True; video memory folded in: True; 2 rows: A game 88% of the graphics card / Windows Explorer 6% of the processor; drive life: True; calm: True; nothing invented: True; two cards: True; built-in graphics quiet: True; no battery box: True; drive temperature not shared: True
+health layout: 1100: side by side, fits True, tabs on one row True; 760: list underneath, fits True, tabs on one row True
+health facts: cores: True; memory: True; clocks: True; fan stopped: True; no clock or fan noise: True; network: True; not connected: True; network not shared: True; power plan: True; fans not shared: True; this pc: True; drive speeds: True; fahrenheit: True
+switches: greyed until known: True; starts off: True; on only once done: True; not shown early: True; watch follows: True; a failed switch-off stays on: True; a failed switch-on stays off: True; unit: True; without admin rights it asks and changes nothing: True
+shields: follows the ticks: True; only for what needs it: True; named with help: True; asks instead of changing: True; one-click, shortcuts and machine undo: True; none with admin rights: True; unnamed controls: 0
+relaunch view: tab: True; ticks, and only real ones: True; note: True; hostile values ignored: True; nothing changed: True
+handoff: declined: True; failure: True; exits: True; flash: True; ready: True; slow: True; third: True; oneThread: True; abandoned: True; foreign: True; command line: True
+at a glance: apps: True; leftovers: True; drive: True; restore points: True; brands: True
+session: Stop watching; very hot: True; held back: True; gap owned up to: True; busiest: True; stops: True; alerts: memory,drive; said once: True; report: Visible offered, 30945 characters, 0 scripts; timeline: 96 columns, 92 a gap, 3 held back, 4 legend words
+holding up: score: True; crashes named: True; sudden stops: True; awake: True; unscored says so: True
+theme: live switch: True; back to light: True; shared: True; follows Windows: True; a fixed choice holds: True; frozen: none; every colour has a dark partner: True (26 colours)
+updates: offered: True; older ignored: True; version line: True

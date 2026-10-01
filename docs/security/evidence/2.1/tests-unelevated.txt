@@ -1,0 +1,622 @@
+Quietpane 2.1 test suite, run WITHOUT administrator rights on 30 September 2026 (code as merged in PR #6).
+
+
+Threat names to plain language
+  ok    ransomware becomes Critical
+  ok    the family name is recognised
+  ok    a stealer becomes High
+  ok    unwanted software becomes Low
+  ok    the EICAR test file is only Info
+  ok    an unknown name still lands somewhere sensible
+  ok    a name with no category at all falls back to Defender severity
+  ok    an unknown family is never given a family name
+
+The shape every finding has
+  ok    a finding carries the facts the card needs
+  ok    the same thing always gets the same id
+  ok    different things get different ids
+  ok    severity outside the five tiers is refused
+
+Hashing
+  ok    a readable file is hashed
+  ok    a missing file returns nothing instead of throwing
+  ok    a locked file does not break the scan
+
+The doughnut
+  ok    counts add up to the number in the middle
+  ok    one slice per severity that has findings
+  ok    empty severities draw no slice
+  ok    no findings at all still renders
+  ok    the chart describes itself for screen readers
+
+The report
+  ok    the report is built and contains the chart
+  ok    the report runs no scripts and fetches nothing
+  ok    every severity appears in the legend, even the empty ones
+  ok    Defender findings show their source and confidence
+  ok    a report with nothing in it still renders
+
+Filtering, the way the window does it
+  ok    filtering by severity returns only that severity
+  ok    filtering an empty severity returns nothing, not everything
+  ok    the same threat found twice is counted once
+
+Talking to Defender
+  ok    Defender state can always be read, even when Defender is missing
+  SKIP  when Defender is unavailable the scan says so instead of pretending
+  ok    reading detections never throws
+[23:40:29] WARN    Only Defender can remove its own detections. This finding came from a Quietpane check, so there is nothing for Defender to remove.
+  ok    a Quietpane heuristic can never be sent to Defender for removal
+
+Leaving something alone
+[23:40:29] WARN    Left in place on purpose: Test:Win32/AllowMe. It is still on this PC, and Quietpane will keep showing it.
+  ok    allowing an item never creates a Defender exclusion
+  ok    every action is written to the audit log
+
+Quarantine, restore and delete
+  ok    protected Windows folders are refused
+  ok    a folder is never treated as a file to remove
+  ok    a drive root is refused
+  ok    a finding whose file has changed is refused
+  ok    a finding whose file is gone is refused
+  SKIP  quarantine round trip puts back a byte-identical file
+  SKIP  quarantined files are stored where they cannot run
+  SKIP  permanent deletion refuses without an explicit confirmation
+  SKIP  permanent deletion works when it is confirmed
+  SKIP  the Recycle Bin keeps the file rather than destroying it
+[23:40:30] WARN    Not done: Remediate C:\WINDOWS\System32\notepad.exe - it needs administrator rights.
+  ok    a file in a protected folder is refused, not deleted
+[23:40:30] WARN    Not done: Quarantine nothing-like-this - it needs administrator rights.
+  ok    restoring something that is no longer quarantined fails cleanly
+  SKIP  quarantine actions are all written to the audit log
+
+Stopping a check, and saying where it has got to
+  ok    nothing is treated as stopped when nobody is asking
+  ok    the engine sees Stop the moment the window sets it
+  ok    a progress update can never break a check
+[23:40:30] STEP    Scan started (read-only - nothing will be changed)
+[23:40:30] INFO    Asking Microsoft Defender what it has found...
+[23:40:32] WARN    Stopped at your request. Nothing on this PC was changed.
+  ok    a stopped check says it was stopped
+  ok    a stopped check reports nothing rather than half a picture
+  ok    a stopped check writes no report
+  ok    a stopped check still says how long it ran and how much it saw
+  ok    progress says which step of how many, and what it is doing
+
+The summary at the end of a check
+  ok    it says how much was looked at, in words a person reads
+  ok    every severity is named, including the empty ones
+  ok    what was done about it is counted
+  ok    nothing done means no "dealt with" line at all
+  ok    serious findings get a next step that points at them
+  ok    a failed action without admin rights explains why
+  ok    a clean check ends calmly rather than inventing work
+  ok    a stopped check is never dressed up as a finished one
+
+What starts when you sign in
+  ok    what Windows and drivers need is always kept on
+  ok    common items get a plain-language note
+  ok    switching off writes exactly what Task Manager writes
+  ok    on and off are read the way Task Manager records them
+  ok    Store apps are read, and policy-set ones are locked
+[23:40:33] WARN    Windows Security notification icon stays on: It is Windows Security's icon by the clock, which shows at a glance whether your PC is protected.
+  ok    a kept item is refused, whatever is ticked
+[23:40:33] WARN    Policy App is set by a policy on this PC, so it can't be changed here.
+  ok    a policy-set item is refused
+[23:40:33] WARN    Windows Security notification icon stays on: It is Windows Security's icon by the clock, which shows at a glance whether your PC is protected.
+[23:40:33] WARN    Policy App is set by a policy on this PC, so it can't be changed here.
+  ok    refusing everything leaves no empty restore point behind
+[23:40:33] STEP    PREVIEW - nothing will be changed.
+[23:40:33] PREVIEW Would stop Notepad starting when you sign in
+[23:40:33] WARN    Windows Security notification icon stays on: It is Windows Security's icon by the clock, which shows at a glance whether your PC is protected.
+[23:40:33] WARN    Policy App is set by a policy on this PC, so it can't be changed here.
+[23:40:33] PREVIEW Would stop Startup App starting when you sign in
+[23:40:33] OK      Preview finished. Nothing was changed.
+  ok    preview changes nothing
+[23:40:33] STEP    Restore point: C:\Users\<user>\AppData\Local\Temp\qp-run-ef77a8d6\LocalAppData\Quietpane\restore\20260930-234033-startup
+[23:40:34] OK      Notepad won't start when you sign in any more. It still opens normally when you start it.
+[23:40:34] OK      Startup App won't start when you sign in any more. It still opens normally when you start it.
+[23:40:34] OK      Finished. 2 change(s) recorded - they can be undone from the Undo tab.
+[23:40:34] STEP    Undoing 2 change(s) from 20260930-234033-startup
+[23:40:34] OK      HKCU:\Software\QuietpaneTest\Apps\Test.StartupApp_abc123\StartIt\State restored
+[23:40:34] OK      Notepad will start when you sign in again
+[23:40:34] OK      Undo finished. Restart the PC to make sure everything is back in effect.
+  ok    switching off and Undo round-trip, for a Run entry and a Store app
+[23:40:34] STEP    Restore point: C:\Users\<user>\AppData\Local\Temp\qp-run-ef77a8d6\LocalAppData\Quietpane\restore\20260930-234034-startup
+[23:40:34] OK      Notepad won't start when you sign in any more. It still opens normally when you start it.
+[23:40:34] OK      Finished. 1 change(s) recorded - they can be undone from the Undo tab.
+[23:40:34] STEP    Undoing 1 change(s) from 20260930-234034-startup
+[23:40:34] OK      Notepad will start when you sign in again
+[23:40:34] OK      Undo finished. Restart the PC to make sure everything is back in effect.
+  ok    Undo puts back exactly the bytes that were there before
+  ok    reading the real sign-in list never throws
+
+Who used your camera, microphone and location
+  ok    times are put in plain words
+  ok    who used the camera is read, in use first, then newest
+  ok    each app's own setting is read: allowed, off, asks first, or managed by Windows
+  ok    one line per program, however many copies of it Windows noted
+  ok    a device switched off for the whole PC says so
+[23:40:37] STEP    PREVIEW - nothing will be changed.
+[23:40:37] PREVIEW Would stop Video Caller using the camera
+[23:40:37] PREVIEW Would stop all desktop programs using the camera
+[23:40:37] OK      Preview finished. Nothing was changed.
+  ok    preview changes nothing
+[23:40:37] WARN    System App is part of Windows, so Windows decides its camera access.
+[23:40:37] WARN    Windows can't stop one desktop program at a time - caller left as is.
+  ok    Windows' own apps and single desktop programs are refused, with no empty restore point
+[23:40:38] STEP    Restore point: C:\Users\<user>\AppData\Local\Temp\qp-run-ef77a8d6\LocalAppData\Quietpane\restore\20260930-234038-devices
+[23:40:38] OK      Video Caller can't use the camera any more. Settings shows it switched off too, and Undo turns it back on.
+[23:40:38] OK      Finished. 1 change(s) recorded - they can be undone from the Undo tab.
+[23:40:38] STEP    Undoing 1 change(s) from 20260930-234038-devices
+[23:40:38] OK      HKCU:\Software\QuietpaneTest\Consent\webcam\Test.VideoCaller_1234567890abc\Value restored
+[23:40:38] OK      Undo finished. Restart the PC to make sure everything is back in effect.
+  ok    switching an app off writes what Settings writes, and Undo puts it back
+[23:40:38] STEP    Restore point: C:\Users\<user>\AppData\Local\Temp\qp-run-ef77a8d6\LocalAppData\Quietpane\restore\20260930-234038-devices
+[23:40:38] OK      All desktop programs can't use the camera any more. Settings shows it switched off too, and Undo turns it back on.
+[23:40:38] OK      Finished. 1 change(s) recorded - they can be undone from the Undo tab.
+[23:40:38] STEP    Undoing 1 change(s) from 20260930-234038-devices
+[23:40:38] OK      HKCU:\Software\QuietpaneTest\Consent\webcam\NonPackaged\Value restored
+[23:40:38] OK      Undo finished. Restart the PC to make sure everything is back in effect.
+  ok    the one switch for all desktop programs, and Undo, work too
+  ok    reading the real record never throws, and covers all three
+
+Your browser add-ons
+  ok    what an add-on may do turns into plain words, and anything unknown is counted, not guessed
+  ok    the sites it can reach are read from its manifest, and the browser's own pages are not sites
+  ok    one line says how far it reaches, whether it is on, and when it arrived
+  ok    the browser's own install date is read the way the browser writes it
+  ok    every add-on in a profile is read, with where it came from
+  ok    an add-on the browser has switched off says so, however the browser wrote it down
+  ok    a name written for several languages is read from the add-on's own message file
+[23:40:41] STEP    PREVIEW - nothing will be changed.
+[23:40:41] PREVIEW Would stop TestBrowser loading Coupon Saver
+[23:40:41] OK      Preview finished. Nothing was changed.
+  ok    preview changes nothing
+[23:40:41] WARN    PDF Viewer is part of TestBrowser itself, so it stays.
+[23:40:41] WARN    Work Add-on is set by a policy on this PC, so it stays as it is.
+  ok    the browser's own parts, and anything a policy controls, are refused - with no empty restore point
+[23:40:41] STEP    Restore point: C:\Users\<user>\AppData\Local\Temp\qp-run-ef77a8d6\LocalAppData\Quietpane\restore\20260930-234041-browser-add-ons
+[23:40:41] OK      TestBrowser will not load Coupon Saver any more. It says an administrator blocked it, which is you; Undo puts it back and it works again.
+[23:40:41] INFO    The browser picks this up on its own; close it and open it again if you want to see it straight away.
+[23:40:41] OK      Finished. 1 change(s) recorded - they can be undone from the Undo tab.
+[23:40:41] STEP    Undoing 1 change(s) from 20260930-234041-browser-add-ons
+[23:40:41] OK      TestBrowser can load Coupon Saver again the next time you open it
+[23:40:41] OK      Undo finished. Restart the PC to make sure everything is back in effect.
+  ok    switching one off writes the policy the browser reads, and Undo takes it away again
+[23:40:41] STEP    Restore point: C:\Users\<user>\AppData\Local\Temp\qp-run-ef77a8d6\LocalAppData\Quietpane\restore\20260930-234041-browser-add-ons
+[23:40:42] OK      TestBrowser will not load Coupon Saver any more. It says an administrator blocked it, which is you; Undo puts it back and it works again.
+[23:40:42] INFO    The browser picks this up on its own; close it and open it again if you want to see it straight away.
+[23:40:42] OK      Finished. 1 change(s) recorded - they can be undone from the Undo tab.
+[23:40:42] STEP    Undoing 1 change(s) from 20260930-234041-browser-add-ons
+[23:40:42] OK      TestBrowser can load Coupon Saver again the next time you open it
+[23:40:42] OK      Undo finished. Restart the PC to make sure everything is back in effect.
+  ok    a blocklist that is already there keeps its entries
+[23:40:42] OK      TestBrowser is already told not to load Coupon Saver
+  ok    one that is already blocked is left alone rather than listed twice
+  ok    Firefox add-ons are read too, and Quietpane says it cannot switch those off
+  ok    reading the real browsers on this PC never throws
+
+Live readings on Home
+  ok    heat is always put into words, not left to colour
+  ok    a driver's own limit brings "very hot" forward
+  ok    a missing temperature says "not shared", never zero
+  ok    setting up the readers never throws
+  ok    a reading stays within believable ranges
+  ok    a thermal sensor that never moves is flagged rather than shown as live
+  ok    Windows slowing the processor to cool it is noticed, and only then
+  ok    the graphics-driver code only asks questions
+  ok    live readings write nothing to disk
+
+Watching a whole session
+  ok    a session keeps the peaks, because an average hides the moment it choked
+  ok    minutes hot and minutes held back are counted, and spells are counted separately
+  ok    a stretch with no readings is a gap, never drawn through
+  ok    a processor idling at a low clock is never called throttling
+  ok    the summary says nothing this PC did not report
+  ok    the headline is the worst thing that happened, or plainly nothing
+  ok    a length of time is put in plain words
+  ok    an alert is raised when it is worth interrupting for, and never twice
+  ok    nothing is raised below the mark, or about a number this PC does not report
+  ok    a battery running out is worth saying, once it really is running out
+  ok    the session draws as a timeline: worst wins a column, and a gap stays a gap
+  ok    a column takes the worst of what it covers, never the average
+  ok    a session can be written up as a page, with nothing in it that was not measured
+  ok    a report leaves out what the PC never reported
+[23:40:54] OK      Session report saved to C:\Users\<user>\AppData\Local\Temp\qp-report-49ef3357\session.html
+  ok    saving a report writes one file and nothing else
+  ok    Windows' own steadiness record is read, and an update that installed is not a problem
+  ok    the four new vitals are read, and a PC that reports none of them still gives a whole reading
+  ok    counters are asked for in English, whatever language the PC is set to
+
+What's using it
+  ok    the busiest programs come with a name and a believable share
+  ok    every graphics card says what is using it (possibly nothing)
+  ok    Quietpane names itself honestly
+  ok    Windows' own processes get plain names
+  ok    the battery reading is a real percentage, or absent on a desktop
+
+Battery and drive health
+  ok    battery health is a share of what it held new, or nothing
+  ok    the battery report file is always deleted afterwards
+  ok    drive health uses Windows' own verdict, and never throws
+  ok    drives have their own, cooler idea of hot
+  ok    the drive is asked about itself, and answers something possible
+  ok    asking the drive twice does not change it
+
+One sentence for the whole tab
+  ok    a PC with nothing wrong is told so, not left silent
+  ok    being held back to cool off outranks everything else
+  ok    running out of memory beats merely being busy
+  ok    promised memory counts even when the chips look half empty
+  ok    a drive flat out while the processor idles is named as such
+  ok    a busy PC is told it is busy, and that nothing is wrong
+  ok    the graphics card being very hot counts as much as the processor
+  ok    a sensor that has stopped moving is not treated as a reading
+  ok    half a PC in use is not called calm
+  ok    a PC that shares nothing gets no invented verdict
+  ok    no reading at all still comes back with something to show
+
+What came back since last time
+  ok    the first look just takes a note and reports nothing
+  ok    a setting that switched itself back on is reported, by name
+  ok    it keeps being reported until it is dealt with
+  ok    things that got quieter are never reported, only noted
+  ok    "That was me" clears it, and it stays cleared
+  ok    an app that came back is reported; one that went is not
+  ok    a setting this PC no longer has, or Quietpane no longer lists, is never reported as back
+  ok    a brand extra is reported when it is back on, not when its app was uninstalled
+  ok    a startup item back on is reported; an uninstalled one is not
+  ok    a Windows update in between is named as the likely reason
+[23:41:04] OK      Nothing came back - nothing to do.
+  ok    switching off what came back, when nothing did, changes nothing and saves nothing
+
+Reading the PC quickly, without cutting corners
+  ok    the shared lookups give exactly the same answers as asking one by one
+  ok    the whole state comes back in one pass, and the shared lookups are let go afterwards
+  ok    asking Task Scheduler directly lists exactly the tasks Get-ScheduledTask lists
+  ok    every task line in the catalogs finds the same tasks all three ways
+  ok    a task folder ending in * covers every folder under it, as Get-ScheduledTask reads it
+  ok    registry values are read exactly as stored, with their type, however the path is written
+  ok    the installed-programs list is the same as reading it the slow way
+
+Undo tells the truth
+[23:41:36] STEP    Restore point: C:\Users\<user>\AppData\Local\Temp\qp-run-ef77a8d6\LocalAppData\Quietpane\restore\20260930-234136-undo-kind-test
+[23:41:36] OK      HKCU:\Software\QuietpaneTest-UndoKind\V = 0
+[23:41:36] OK      Finished. 1 change(s) recorded - they can be undone from the Undo tab.
+[23:41:36] STEP    Undoing 1 change(s) from 20260930-234136-undo-kind-test
+[23:41:36] OK      HKCU:\Software\QuietpaneTest-UndoKind\V restored
+[23:41:36] OK      Undo finished. Restart the PC to make sure everything is back in effect.
+  ok    Undo puts a setting back with its old type, not just its old value
+[23:41:36] STEP    Undoing 1 change(s) from 20260930-234136-undo-fail-test
+[23:41:36] WARN    Could not undo Reg VHKCU:\Software\QuietpaneTest\Locked: Exception calling "CreateSubKey" with "1" argument(s): "Access to the registry key 'HKEY_CURRENT_USER\Software\QuietpaneTest\Locked' is denied."
+[23:41:36] WARN    1 of 1 change(s) could not be put back. The rest are back as they were. This restore point stays in the Undo list, so you can try again.
+  ok    an Undo that cannot put everything back says so, and stays in the list to try again
+  ok    restore points are dated on the ordinary calendar, whatever the PC's language
+  ok    an uninstall command is split safely, and only Windows Installer's install switch becomes remove
+  ok    catalogs are read once and remembered
+[23:41:37] STEP    Restore point: C:\Users\<user>\AppData\Local\Temp\qp-run-ef77a8d6\LocalAppData\Quietpane\restore\20260930-234137-apps
+[23:41:37] SKIP    Quietpane.Test.NotAnApp is not installed - skipped
+[23:41:37] OK      Nothing needed changing, so no restore point was kept.
+  ok    when nothing changes, no restore point is kept
+  ok    an empty restore point is never offered in Undo
+
+Where your space went
+  ok    folder sizes add up, and the small ones are summed up in a line
+  ok    a program's own folder is spotted, and so is a folder holding one
+  ok    links are not followed, so nothing is counted twice
+  ok    Windows, programs, games and app data are explained instead of offered
+  ok    your own files are yours to move, and OneDrive says what else it means
+  ok    a folder Windows knows a program lives in is left alone, both ways round
+  ok    installed programs are read from where Windows lists them
+[23:41:39] WARN    big.bin is bigger than the Recycle Bin can hold, so it was left where it is (Windows would have deleted it for good).
+[23:41:40] WARN    big.bin stays where it is: It's bigger than your Recycle Bin can hold (0 KB), so Windows would delete it for good. Quietpane won't. If you're sure, delete it yourself in File Explorer.
+  ok    nothing too big for the Recycle Bin is ever sent there
+[23:41:40] WARN    System32 stays where it is: Windows itself. Quietpane never touches it.
+  ok    a place that is not yours to move is refused, with what to do instead
+  ok    a real drive comes back with its own figures
+
+The room worth clearing first
+  ok    old files are found by the date on the file, and links are never followed
+  ok    installers are one suggestion and forgotten downloads another, with the desktop left out of the downloads
+  ok    a big file nobody has changed in years is offered, and one that is part of a program is not
+  ok    nothing bigger than the Recycle Bin can hold is ever offered
+  ok    what only Windows can clear is explained, never touched
+  ok    the ones you can act on come first, biggest first
+[23:46:01] STEP    PREVIEW - nothing will be changed.
+[23:46:01] PREVIEW Would move C:\Users\<user>\QuietpaneWinsTest\Downloads\setup_thing.exe (2 KB)
+[23:46:01] PREVIEW Would move C:\Users\<user>\QuietpaneWinsTest\Downloads\office.msi (1 KB)
+[23:46:01] PREVIEW Would move C:\Users\<user>\QuietpaneWinsTest\Desktop\driver.exe (1 KB)
+[23:46:01] OK      Preview finished. 3 file(s), 4 KB. Nothing was changed.
+  ok    preview changes nothing at all
+[23:46:01] STEP    Restore point: C:\Users\<user>\AppData\Local\Temp\qp-run-ef77a8d6\LocalAppData\Quietpane\restore\20260930-234601-space-tidy
+[23:46:02] OK      Moved setup_thing.exe (2 KB) to the Recycle Bin. It stays there until you empty the bin, so you can still put it back.
+[23:46:02] OK      Moved office.msi (1 KB) to the Recycle Bin. It stays there until you empty the bin, so you can still put it back.
+[23:46:03] OK      Moved driver.exe (1 KB) to the Recycle Bin. It stays there until you empty the bin, so you can still put it back.
+[23:46:03] OK      Installers you have already used: 3 file(s) moved to the Recycle Bin, 4 KB in all. They stay there until you empty it.
+[23:46:03] OK      Finished. 3 change(s) recorded - they can be undone from the Undo tab.
+  ok    moving a suggestion sends every file to the Recycle Bin, in one restore point
+
+What's talking to the internet
+  ok    your own network is told apart from the internet
+  ok    who is behind an address is named, and a reporting address is only ever a hint
+  ok    connections are grouped by program, with the places that have names first
+  ok    reading the real list never throws
+
+Start menu, desktop and sign-in
+  ok    a shortcut carries the app id, so the taskbar treats it as Quietpane
+  ok    shortcuts go in your own Start menu and desktop, and open Quietpane's own copy in Program Files
+  ok    version numbers compare as numbers, not as text
+[23:46:07] OK      Quietpane's own copy in C:\Users\<user>\AppData\Local\Temp\QpCopyTest-5ba190b1\Program Files\Quietpane was made (2.1.0).
+  ok    Quietpane's own copy has everything it needs to run, and none of the tests or tools
+  ok    opening the same version again leaves the copy alone
+[23:46:08] OK      Quietpane's own copy in C:\Users\<user>\AppData\Local\Temp\QpCopyTest-5ba190b1\Program Files\Quietpane was put right.
+  ok    a copy that was changed or only half made is put right
+  ok    an older Quietpane never replaces a newer copy
+[23:46:09] WARN    C:\Users\<user>\AppData\Local\Temp\QpCopyTest-5ba190b1\Not Quietpane does not look like Quietpane, so it was left alone.
+  ok    a folder that isn't Quietpane is never sent to the Recycle Bin
+[23:46:09] OK      Quietpane's own copy in C:\Users\<user>\AppData\Local\Temp\QpCopyTest-5ba190b1\Program Files 2\Quietpane was made (2.1.0).
+[23:46:09] OK      This shortcut now opens Quietpane's own copy: C:\Users\<user>\AppData\Local\Temp\QpCopyTest-5ba190b1\links\Quietpane.lnk
+[23:46:09] OK      This shortcut now opens Quietpane's own copy: C:\Users\<user>\AppData\Local\Temp\QpCopyTest-5ba190b1\links\TaskBar\Quietpane.lnk
+  ok    shortcuts that still open a moved folder are pointed at Quietpane's own copy, and yours are left alone
+  ok    with no shortcuts and no sign-in start, opening Quietpane changes nothing at all
+  ok    starting at sign-in waits for sign-in to finish, runs on battery, and is never stopped for running too long
+  ok    the safety scan knows Quietpane's own sign-in task, but not one that only borrows its name
+  ok    the sign-in start can also check once for things that came back, and the task itself carries that choice
+  ok    the safety scan knows both kinds of Quietpane sign-in task as its own, and nothing with extras
+  SKIP  switching the sign-in start on and off (needs administrator rights)
+  ok    opened minimised at sign-in, the window still starts working the first time it is opened
+
+The app icon
+  ok    the icon has every size Windows asks for
+  ok    the icon is the KomodoWorks emblem, on a see-through background
+  ok    the window's calls into Windows only name the app, ask for a sharp picture and colour its title bar
+
+What signing in costs
+  ok    what a startup program costs is measured from the program itself, never guessed
+  ok    Windows' own timing is used where there is one, and left out where there isn't
+  ok    a cost reads as plain words, and says nothing it cannot back up
+  SKIP  Windows' restart record is read if it is there, and simply absent if not
+  ok    the heaviest comes first, with the total and Windows' own figure
+
+Plain words, and something to do about them
+  ok    a check's detail splits into plain words on the card and technical lines underneath
+  ok    every privacy setting has a plain title and a short line, with the full text kept for the tooltip
+  ok    the session card names the worst of it, counts the minutes and owns up to the gap
+  ok    the live tiles rank what matters, merge the busy list and never draw an invented zero
+  ok    Health keeps two columns when there is room, and puts the list underneath when there is not
+  ok    the Health list shows what the PC shares, and leaves out or says "not shared" for what it does not
+  ok    a switch in Settings shows on only once the change is made, and a failed change leaves it where it was
+  ok    Windows' shield follows what is ticked, is named for screen readers, and a shielded Apply asks instead of changing
+  ok    a window opened with admin rights shows the same tab, the real ticks and a note - and changes nothing
+  ok    asking for admin rights: declined, failed, crashed, slow, raced and ready are all handled, and the window never vanishes
+  ok    each list tab opens with a short summary of what is below it
+  ok    the live tiles cope with two graphics cards, built-in graphics, no battery and a silent drive
+  ok    light and dark switch live in the real window, and every colour has a dark partner
+  ok    the steadiness card shows Windows' score, or says plainly that there isn't one
+  ok    the easy wins show what they mean, and what only Windows can clear says where to go
+  ok    the add-ons that see the most come first, and the browser's own parts stay out of the way
+  ok    files found by Quietpane's own checks can be quarantined or removed, whatever their level
+  ok    the window keeps its words down
+
+What the PC is, and how fast it is going (2.0)
+  ok    the facts come through as Windows gives them, and Windows 11 is not called Windows 10
+  ok    memory slots come from the board, never worked out from the sticks
+  ok    sticks that disagree give no type or speed, rather than one of them
+  ok    placeholder maker names, missing screens and a default refresh rate are left out
+  ok    the power plan is named by Windows' own plans, whatever language powercfg speaks
+  ok    this PC's facts are read without a zero anywhere
+  ok    only real Wi-Fi and wired cards are counted, so no traffic is counted twice
+  ok    network speed adds up connected cards of a kind, and says nothing it was not told
+  ok    drive and network speeds are Windows' per-second rates, never running totals
+  ok    a speed never rounds a trickle down to nothing, and nothing stays nothing
+  ok    the graphics clock, memory clock and fan come back as the driver said, or empty - never zero
+  ok    the graphics driver is still only asked questions: no new native calls anywhere
+  ok    a temperature is written in the unit chosen, and thresholds stay in Celsius
+  ok    the unit is remembered in one small file, and anything odd in it means Celsius
+  ok    a unit that cannot be saved says so, so Settings never shows a choice that did not stick
+
+Updates, without a connection
+  ok    which Quietpane is in a ZIP is read from inside it, without unpacking anything
+  ok    a ZIP without both halves of Quietpane is not taken for one
+  ok    a ZIP that names a path outside itself is never offered
+  ok    only the newest download newer than this one is offered, and only files named Quietpane
+  ok    an older or same version is refused, not installed
+  ok    unpacking keeps Windows' downloaded-from-the-internet mark on every file
+  ok    installing the same download twice reuses what was unpacked
+  ok    nothing is ever written outside the update's own folder
+  ok    an old folder opens the newer installed copy - and that copy never sends itself anywhere
+  ok    a downloaded update is started the way a double-click starts it, never with this window's rights
+  ok    looking for a newer version says it opens the browser, and only then does
+  ok    the Settings line and the Home offer draw from a made-up Downloads folder
+  ok    every launcher explains a PC that only runs signed apps, instead of failing silently
+
+Keyboards and screen readers
+  ok    every control you can reach with the keyboard has a name a screen reader can say
+  ok    the taskbar badge for things that came back draws, and clears again
+  ok    the newer accessibility features are switched on before the window's code loads
+  ok    all text is dark enough to read (WCAG AA, 4.5 to 1)
+  ok    in the dark as well: every text colour and every badge still reads (WCAG AA, 4.5 to 1)
+  ok    the choice dialog closes with Esc and starts on the safest choice
+
+When things go wrong
+  ok    the window still draws on a PC with nothing on it, and says what could not be read
+  ok    a part of the read that fails does not take the rest with it
+  ok    one job at a time is enforced in the window, not left to chance
+
+Admin rights only when a change needs them (2.1)
+  ok    every privacy setting is classified by its own changes, and the counts are as checked on real Windows
+  ok    scope and privilege are separate: your own policy keys are yours, but need admin rights
+  ok    startup items, clean-up places and Undo points are classified by where they are
+  ok    the privilege probe opens an existing key to ask, and changes nothing
+  ok    the probe says no - needs admin rights - for a key this account may not change
+  ok    a privilege probe never creates a missing key, a value, an undo entry or a restore point
+
+Uninstallers: where they are registered says whose they are, not what they need
+  ok    an HKCU uninstaller in your own folders that asks for your own rights needs no shield
+  ok    an HKCU uninstaller whose program asks for administrator rights is shielded
+  ok    Windows Installer, and any command that can't be pinned down, need admin rights by safe default
+  ok    an HKLM uninstaller is the whole PC's, and needs admin rights, whatever it runs
+  ok    a program that merely contains the right words, without a real manifest, is not trusted
+[23:46:47] ERROR   Quietpane's data folder isn't safe to use - nothing was changed. (Windows would not lock it: Exception calling "CreateDirectory" with "2" argument(s): "This security ID may not be assigned as the owner of this object.
+")
+  ok    a window working for another account refuses to uninstall your own programs, and never runs them
+
+The engine checks, however it is called
+[23:46:47] WARN    Not done: HKLM:\SOFTWARE\QuietpaneTest\X - it needs administrator rights.
+[23:46:47] WARN    Not done: environment variable QUIETPANE_TEST_NEVER - it needs administrator rights.
+  ok    without admin rights, an admin change is refused before anything is touched
+[23:46:47] WARN    Not done: HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection\AllowTelemetry - it needs administrator rights.
+[23:46:47] WARN    Not done: HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection\DoNotShowFeedbackNotifications - it needs administrator rights.
+[23:46:47] WARN    Not done: HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection\LimitDiagnosticLogCollection - it needs administrator rights.
+[23:46:47] WARN    Not done: HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection\LimitDumpCollection - it needs administrator rights.
+[23:46:47] WARN    Not done: HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection\AllowDeviceNameInTelemetry - it needs administrator rights.
+[23:46:47] WARN    Nothing was changed.
+  ok    a whole privacy batch that needs admin rights is refused as one, with no restore point
+[23:46:47] STEP    Restore point: C:\Users\<user>\AppData\Local\Temp\qp-run-ef77a8d6\LocalAppData\Quietpane\restore\20260930-234647-outcome-test
+[23:46:47] OK      HKCU:\Software\QuietpaneTest\Writable\V = 1
+[23:46:47] OK      HKCU:\Software\QuietpaneTest\Writable\V is already 1
+[23:46:47] ERROR   Could not set HKCU:\Software\QuietpaneTest\Locked2\V : Requested registry access is not allowed.
+[23:46:47] WARN    Finished, but not everything worked. 1 change(s) were made and recorded, and they can be undone from the Undo tab.
+  ok    a change that fails is Failed, and leaves nothing to undo
+  ok    a batch summary counts changed, unchanged, failed and not done separately
+
+What can't be seen without admin rights is said, never guessed
+  ok    a scheduled task an ordinary account can't see is "needs admin rights to check", never "not on this PC"
+  ok    something that can't be seen is never reported as having come back
+  ok    a folder this account may not look inside is "needs admin rights", never 0 KB
+  ok    the scan summary names exactly what it could not see
+  ok    the report says the same, in so many words
+
+Your own store, and settings carried over from 2.0
+  ok    your own settings live in your own profile, never the shared machine folder
+  ok    only the four plain settings are carried over, only when valid, and never over your own
+  ok    a window working for another account writes nothing to anyone's own store
+[23:46:48] WARN    Your own settings belong to S-1-5-21-1111111111-2222222222-3333333333-1001; this window has admin rights as <PC>\<user>. Nothing was changed. Change your own settings from your normal Quietpane window.
+[23:46:48] WARN    Not done: ProgramFilesCopy C:\Users\<user>\AppData\Local\Temp\qp21-ac1efa2d\pf - it belongs to another account.
+[23:46:48] WARN    Not done: SignInTask Quietpane test - never made - it belongs to another account.
+[23:46:48] WARN    Nothing was changed.
+  ok    the sign-in start runs with your own rights, and is never set up for another account
+
+Restore points and quarantine are privileged input (security)
+  ok    a well-formed point of your own is read and can be undone
+[23:46:48] ERROR   That restore point can't be used, so nothing was undone: its state.json: it has a field Quietpane doesn't write (Extra).
+[23:46:48] ERROR   That restore point can't be used, so nothing was undone: a Reg entry: it has a field Quietpane doesn't write (Extra).
+[23:46:48] ERROR   That restore point can't be used, so nothing was undone: a Reg entry: Existed is the wrong type.
+[23:46:48] ERROR   That restore point can't be used, so nothing was undone: its state.json: SchemaVersion is the wrong type.
+[23:46:48] ERROR   That restore point can't be used, so nothing was undone: its state.json: SchemaVersion is the wrong type.
+[23:46:48] ERROR   That restore point can't be used, so nothing was undone: a Reg entry: it is missing Kind.
+[23:46:48] ERROR   That restore point can't be used, so nothing was undone: it was written in a form Quietpane doesn't read (version 3).
+[23:46:49] ERROR   That restore point can't be used, so nothing was undone: its state.json can't be read: it names the same field twice.
+[23:46:49] ERROR   That restore point can't be used, so nothing was undone: its state.json: it is missing Outcome.
+[23:46:49] ERROR   That restore point can't be used, so nothing was undone: its state.json can't be read: it names the same field twice.
+  ok    unknown, missing, wrong-typed, duplicated or oddly spelled fields refuse the whole point
+[23:46:49] ERROR   That restore point can't be used, so nothing was undone: its state.json can't be read: Exception calling "DeserializeObject" with "1" argument(s): "Invalid object passed in, ':' or '}' expected. (22): { "SchemaVersion": 2, ".
+[23:46:49] ERROR   That restore point can't be used, so nothing was undone: its state.json is missing, too large or behind a link.
+[23:46:52] ERROR   That restore point can't be used, so nothing was undone: it holds more changes than Quietpane ever records at once.
+[23:46:52] ERROR   That restore point can't be used, so nothing was undone: it holds a kind of change Quietpane doesn't make (Script).
+[23:46:52] ERROR   That restore point can't be used, so nothing was undone: a registry value doesn't fit its kind (HKCU:\Software\QuietpaneTest\Undo\V).
+[23:46:52] ERROR   That restore point can't be used, so nothing was undone: a registry value doesn't fit its kind (HKCU:\Software\QuietpaneTest\Undo\V).
+  ok    malformed, oversized, over-long or unknown kinds of point are refused cleanly
+[23:46:52] ERROR   That restore point can't be used, so nothing was undone: a registry place is not written the way Quietpane writes it (HKU:\S-1-5-18\Software\X).
+[23:46:52] ERROR   That restore point can't be used, so nothing was undone: a registry place is not written the way Quietpane writes it (HKCR:\exefile).
+[23:46:53] ERROR   That restore point can't be used, so nothing was undone: a registry place is not written the way Quietpane writes it (Registry::HKEY_USERS\S-1-5-18\X).
+[23:46:53] ERROR   That restore point can't be used, so nothing was undone: a registry place is not written the way Quietpane writes it (HKLM:\SOFTWARE\..\SYSTEM\X).
+[23:46:53] ERROR   That restore point can't be used, so nothing was undone: a registry place is not written the way Quietpane writes it (HKCU:\Software\QuietpaneTest\..\..\X).
+[23:46:53] ERROR   That restore point can't be used, so nothing was undone: it names a registry value Quietpane doesn't change (HKCU:\Software\Microsoft\NotInAnyCatalog\V).
+[23:46:53] ERROR   That restore point can't be used, so nothing was undone: a registry value has no proper name.
+  ok    registry targets: another hive, an arbitrary HKLM key, odd spellings and uncatalogued HKCU keys are refused
+[23:46:53] ERROR   That restore point can't be used, so nothing was undone: a change that needs administrator rights doesn't belong among your own settings (HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection\AllowTelemetry).
+[23:46:53] ERROR   That restore point can't be used, so nothing was undone: a change that needs administrator rights doesn't belong among your own settings (HKCU:\Software\Policies\Microsoft\Office\Common\ClientTelemetry\DisableTelemetry).
+[23:46:53] ERROR   That restore point can't be used, so nothing was undone: a Service change doesn't belong among your own settings.
+[23:46:53] ERROR   That restore point can't be used, so nothing was undone: it says it belongs somewhere else.
+[23:46:53] ERROR   That restore point can't be used, so nothing was undone: it belongs to S-1-5-21-1111111111-2222222222-3333333333-1001.
+  ok    a point of your own may not hold admin-only changes, whatever it says
+[23:46:53] ERROR   That restore point can't be used, so nothing was undone: it names a file Quietpane doesn't change (C:\WINDOWS\System32\drivers\etc\hosts).
+[23:46:53] ERROR   That restore point can't be used, so nothing was undone: it names a file Quietpane doesn't change (C:\Users\Someone Else\AppData\Roaming\Code\User\settings.json).
+[23:46:53] ERROR   That restore point can't be used, so nothing was undone: it names a file Quietpane doesn't change (C:\Users\<user>\AppData\Roaming\Code\User\settings.json.).
+[23:46:53] ERROR   That restore point can't be used, so nothing was undone: it names a file Quietpane doesn't change (\\?\C:\Users\<user>\AppData\Roaming\Code\User\settings.json).
+[23:46:53] ERROR   That restore point can't be used, so nothing was undone: it names a file Quietpane doesn't change (C:\Users\<user>\AppData\Roaming\Code\User\..\User\settings.json).
+[23:46:53] ERROR   That restore point can't be used, so nothing was undone: its backup is not a file inside the restore point.
+[23:46:53] ERROR   That restore point can't be used, so nothing was undone: its backup is missing (missing.bak).
+  ok    file restores: only your own VS Code settings, with a backup inside the point, never through a link
+[23:46:54] ERROR   That restore point can't be used, so nothing was undone: it holds a file Quietpane didn't put there (payload.ps1).
+[23:46:54] ERROR   That restore point can't be used, so nothing was undone: it holds a folder Quietpane didn't put there (C:\Users\<user>\AppData\Local\Temp\qp-run-ef77a8d6\LocalAppData\Quietpane\restore\20260930-234654-extra\sub).
+  ok    a point that holds something Quietpane didn't put there, or is a link, is refused
+[23:46:54] ERROR   That restore point can't be used, so nothing was undone: it is one of your own restore points: undo it from your normal Quietpane window.
+  ok    an administrator window never replays a point from your own store
+  ok    a machine point whose folder isn't locked to administrators is refused
+
+Restore points made before 2.1 are listed, never replayed (security)
+[23:46:54] ERROR   That restore point was made by an older Quietpane. It can't be replayed safely, so it is listed for reference only. Nothing was undone.
+[23:46:54] ERROR   That restore point was made by an older Quietpane. It can't be replayed safely, so it is listed for reference only. Nothing was undone.
+  ok    older restore points are listed, labelled, and cannot be undone - even with valid contents
+  ok    listing older points never opens their state.json
+  ok    without admin rights, older points are not even looked for
+  SKIP  locking an older point to administrators does not make it trusted (needs administrator rights)
+
+The machine store is locked, and checked before every use (security)
+  ok    the lock Quietpane applies passes its own check; any other entry, or taking from above, fails it
+[23:46:54] ERROR   Quietpane's data folder isn't safe to use - nothing was changed. (a link or junction is in the way)
+[23:46:54] ERROR   Quietpane's data folder isn't safe to use - nothing was changed. (a link or junction is inside it (C:\Users\<user>\AppData\Local\Temp\qp21-ac1efa2d\store-with-link\restore\x\link))
+  ok    a store that is a junction, or holds one anywhere, is refused and its permissions are left as they were
+[23:46:54] ERROR   Quietpane's data folder isn't safe to use - nothing was changed. (it is only opened with administrator rights)
+  ok    an ordinary Quietpane can never reach the machine store
+  SKIP  the store is created locked, its 2.1 folders inherit the lock, and it reads back exactly (needs administrator rights)
+  SKIP  a 2.1 folder someone else made first is never adopted (needs administrator rights)
+  SKIP  quarantine is stricter than the store: it takes nothing from above, so a Users entry there never reaches it (needs administrator rights)
+  ok    a quarantined item holding anything but its two files, or described in a form Quietpane doesn't write, is left alone
+  ok    a quarantined item that checks out in every other way is still refused unless administrators own it
+[23:46:54] WARN    Exception calling "CreateDirectory" with "2" argument(s): "This security ID may not be assigned as the owner of this object.
+"
+[23:46:55] WARN    Exception calling "CreateDirectory" with "2" argument(s): "This security ID may not be assigned as the owner of this object.
+"
+[23:46:55] WARN    Exception calling "CreateDirectory" with "2" argument(s): "This security ID may not be assigned as the owner of this object.
+"
+  ok    files quarantined before 2.1 are listed by name, never opened, put back, moved or deleted
+  SKIP  putting a file back refuses Windows, another account's files, an existing file and a changed fingerprint (needs administrator rights)
+[23:46:55] STEP    Restore point: C:\Users\<user>\AppData\Local\Temp\qp-run-ef77a8d6\LocalAppData\Quietpane\restore\20260930-234655-cleanup
+[23:46:55] STEP    Test area
+[23:46:55] OK      Moved 1 item(s), 0 KB, from C:\Users\<user>\AppData\Local\Temp\qp21-ac1efa2d\cleanup-area to the Recycle Bin (items in use were skipped)
+[23:46:55] OK      Finished. 1 change(s) recorded - they can be undone from the Undo tab.
+[23:46:55] OK      About 0 KB moved to the Recycle Bin. Empty the Recycle Bin yourself when you are happy - clean-up never deletes anything for good.
+  ok    clearing a folder never follows a link inside it
+
+Whole batches are checked before the first change (security)
+[23:46:55] WARN    Your own settings belong to S-1-5-21-1111111111-2222222222-3333333333-1001; this window has admin rights as <PC>\<user>. Nothing was changed. Change your own settings from your normal Quietpane window.
+[23:46:55] WARN    Not done: HKCU:\Software\Microsoft\Windows\CurrentVersion\AdvertisingInfo\Enabled - it belongs to another account.
+[23:46:55] WARN    Nothing was changed.
+  ok    a mixed batch under another administrator account is refused as a whole, with nothing written
+  ok    a batch that only changes Windows itself is allowed under another administrator account
+  ok    a machine change that reads your own settings counts as yours, and is refused under another account
+[23:46:55] WARN    Not done: StartupApproved HKU:\S-1-5-18\Software\X App - that is not a registry place Quietpane changes (HKU:\S-1-5-18\Software\X).
+[23:46:55] WARN    Nothing was changed.
+  ok    one change Quietpane doesn't make, among good ones, stops the batch before anything is written
+[23:46:55] WARN    Your own settings belong to S-1-5-21-1111111111-2222222222-3333333333-1001; this window has admin rights as <PC>\<user>. Nothing was changed. Change your own settings from your normal Quietpane window.
+[23:46:55] WARN    Not done: HKCU:\Software\QuietpaneTest\Bypass\V - it belongs to another account.
+  ok    skipping the batch check still gets every single change refused
+  ok    identity is the SID: an account that happens to share a name is still another account
+
+Asking Windows for admin rights: what travels, and how (security)
+  ok    ticks from the wrong tab, unknown values and hostile notes are dropped, and never run
+  ok    the command line is built from a closed vocabulary, and anything else is refused before a launch
+  ok    a real child PowerShell receives every value exactly as sent, from a path with spaces, symbols and Unicode
+  ok    the window restores the view and changes nothing when it is opened with admin rights
+
+An ordinary Quietpane never touches the machine store (release gate)
+  ok    nothing outside the engine's own store functions refers to the machine store
+  ok    without admin rights, reading this PC, the sign-in check, undo and quarantine never touch it
+  ok    your own Undo only ever reads your own store
+
+The tests themselves leave your real Quietpane folders alone
+  ok    every store this run used was its own, under %TEMP%
+  ok    this run left your real Quietpane folders exactly as they were (the machine store only checked with administrator rights)
+
+The checks a person has to do by hand
+  ok    the manual test pages are written down, including the AMTSO ones
+  ok    the app itself never downloads a test file
+
+With the real antivirus (needs -Live and administrator rights)
+  SKIP  EICAR detection (run with -Live to include it)
+
+326 passed, 0 failed, 15 skipped

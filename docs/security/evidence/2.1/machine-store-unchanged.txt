@@ -1,0 +1,17 @@
+The real %ProgramData%\Quietpane\machine folder before and after the elevated test run and self-test (1 October 2026): every folder's permissions (SDDL), every file's size, SHA256 and time.
+
+VERDICT: UNCHANGED: every file, hash, size, time and permission under the real machine folder is as it was.
+
+--- before ---
+C:\ProgramData\Quietpane\machine O:BAG:<SID>D:AI(A;OICIID;FA;;;SY)(A;OICIID;FA;;;BA)
+C:\ProgramData\Quietpane\machine\allowed.json 314 E5E2F595176316C29BDFC24F8AB28DAD0B9DF57C8BBD668D57AA763CD00C731E 2026-09-30T17:47:50.8893979Z
+C:\ProgramData\Quietpane\machine\audit.log 2938 9476C76BF0F173E0A7E2348BAABCFA0447B743341B84DD4B2CBDB3117E9A171B 2026-09-30T17:47:51.6161637Z
+C:\ProgramData\Quietpane\machine\points folder O:BAG:<SID>D:AI(A;OICIID;FA;;;SY)(A;OICIID;FA;;;BA)
+C:\ProgramData\Quietpane\machine\quarantine folder O:BAG:<SID>D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)
+
+--- after ---
+C:\ProgramData\Quietpane\machine O:BAG:<SID>D:AI(A;OICIID;FA;;;SY)(A;OICIID;FA;;;BA)
+C:\ProgramData\Quietpane\machine\allowed.json 314 E5E2F595176316C29BDFC24F8AB28DAD0B9DF57C8BBD668D57AA763CD00C731E 2026-09-30T17:47:50.8893979Z
+C:\ProgramData\Quietpane\machine\audit.log 2938 9476C76BF0F173E0A7E2348BAABCFA0447B743341B84DD4B2CBDB3117E9A171B 2026-09-30T17:47:51.6161637Z
+C:\ProgramData\Quietpane\machine\points folder O:BAG:<SID>D:AI(A;OICIID;FA;;;SY)(A;OICIID;FA;;;BA)
+C:\ProgramData\Quietpane\machine\quarantine folder O:BAG:<SID>D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)

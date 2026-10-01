@@ -1,0 +1,27 @@
+Quietpane 2.1 - Process Monitor capture: is %ProgramData%\Quietpane ever touched by an ordinary (unelevated) Quietpane?
+Date: 30 September 2026. Tool: Process Monitor 4.11 (Microsoft Sysinternals, signature verified). Windows 11 25H2, build 26200.
+Exercised: Quietpane started as the sign-in task starts it (-Minimized -Watch), left for 45 seconds, opened from the taskbar, then closed.
+Filter: Path contains ProgramData\Quietpane, PROGRA~3\Quietpane, PROGRA~3\QUIETP~1, ProgramData\QUIETP~1 (every spelling of the folder), plus the app's own <repo>\src\ folder as a check that Quietpane's activity was captured. Filtered-out events dropped; all processes, System included.
+Positive control: the elevated test harness checks that %ProgramData%\Quietpane\machine exists at the start and end, so the capture must show those events.
+
+
+--- Summary written by the harness ---
+Part: watch
+Capture: 2659 events kept by the filter; exercise 22:12:09.062 - 22:13:10.298
+Quietpane processes seen: 1 PowerShell (19160 elevated=0), 4 processes in all
+Positive control (app activity): 2622 reads of the app's own src folder by the ordinary Quietpane
+Events under %ProgramData%\Quietpane, by who made them: this harness (positive control): 10
+Other processes or elevated Quietpane under the machine store: 0
+VERDICT: PASS - zero accesses to %ProgramData%\Quietpane from the ordinary Quietpane process tree
+
+--- Every event under %ProgramData%\Quietpane in this capture ---
+22:12:09.0600338  powershell.exe  pid 6928   QueryOpen                          C:\ProgramData\Quietpane\machine           FAST IO DISALLOWED   [this harness (positive control)]
+22:12:09.0600829  powershell.exe  pid 6928   CreateFile                         C:\ProgramData\Quietpane\machine           SUCCESS              [this harness (positive control)]
+22:12:09.0601388  powershell.exe  pid 6928   QueryNetworkOpenInformationFile    C:\ProgramData\Quietpane\machine           SUCCESS              [this harness (positive control)]
+22:12:09.0601452  powershell.exe  pid 6928   CloseFile                          C:\ProgramData\Quietpane\machine           SUCCESS              [this harness (positive control)]
+22:12:09.0601519  powershell.exe  pid 6928   IRP_MJ_CLOSE                       C:\ProgramData\Quietpane\machine           SUCCESS              [this harness (positive control)]
+22:13:15.3086382  powershell.exe  pid 6928   QueryOpen                          C:\ProgramData\Quietpane\machine           FAST IO DISALLOWED   [this harness (positive control)]
+22:13:15.3086759  powershell.exe  pid 6928   CreateFile                         C:\ProgramData\Quietpane\machine           SUCCESS              [this harness (positive control)]
+22:13:15.3086991  powershell.exe  pid 6928   QueryNetworkOpenInformationFile    C:\ProgramData\Quietpane\machine           SUCCESS              [this harness (positive control)]
+22:13:15.3087071  powershell.exe  pid 6928   CloseFile                          C:\ProgramData\Quietpane\machine           SUCCESS              [this harness (positive control)]
+22:13:15.3087344  powershell.exe  pid 6928   IRP_MJ_CLOSE                       C:\ProgramData\Quietpane\machine           SUCCESS              [this harness (positive control)]

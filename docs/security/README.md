@@ -14,7 +14,7 @@ The architecture says what Quietpane is designed to do. An audit is the evidence
 
 | Release | Review | Date |
 |---|---|---|
-| 2.1 | [Quietpane 2.1 Security Engineering Audit](audits/2026-09-quietpane-2.1-security-audit.md) | September 2026 |
+| 2.1 | [Quietpane 2.1 Security Engineering Audit](audits/2026-09-quietpane-2.1-security-audit.md) - and its [verification evidence](evidence/2.1/README.md) | September 2026 |
 
 These reports are internal engineering reviews, carried out by the project itself, unless a report explicitly says otherwise. None is an independent audit, a certification or a penetration test.
 

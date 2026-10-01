@@ -13,7 +13,7 @@
 
 <p align="center">
   <b>Admin rights only when the action needs them.</b><br>
-  <sub>Runs without admin by default &middot; Offline &middot; No telemetry &middot; <a href="#security-by-design">Security-focused design</a></sub>
+  <sub>Runs without admin by default &middot; Offline &middot; No telemetry &middot; <a href="docs/security/audits/2026-09-quietpane-2.1-security-audit.md">Read the security review</a> and <a href="docs/security/evidence/2.1/README.md">its evidence</a></sub>
 </p>
 
 <p align="center">
@@ -67,6 +67,8 @@ Windows' own shield sits on a button when that change needs administrator rights
 
 ## Security by design
 
+**[Read the Quietpane 2.1 Security Engineering Audit →](docs/security/audits/2026-09-quietpane-2.1-security-audit.md)** &nbsp;·&nbsp; [See the test and Process Monitor evidence](docs/security/evidence/2.1/README.md)
+
 **Admin rights only when the action needs them.** Quietpane doesn't run as administrator by default. It asks Windows for elevation - the UAC prompt - only for operations that need it, saying yes never runs anything by itself, and every privileged action is checked again by the engine before it runs, whatever the window, a command line or a file says.
 
 Quietpane 2.1 went through an extensive internal security engineering review covering the UAC handoff, privilege boundaries, restore and quarantine safety, folder permissions, SID handling, reparse points, malformed state files, alternate administrator accounts, and unelevated access to protected application data. We publish the security reasoning and verification behind privilege-related changes, including what is still outstanding.
@@ -78,7 +80,6 @@ Quietpane 2.1 went through an extensive internal security engineering review cov
 - Undo records from before 2.1 are never trusted or replayed
 - Real-Windows checks, with the ones still outstanding listed openly
 
-[Read the Quietpane 2.1 Security Engineering Audit →](docs/security/audits/2026-09-quietpane-2.1-security-audit.md)
 ## A look around
 
 <table>

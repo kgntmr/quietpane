@@ -1,0 +1,34 @@
+Quietpane 2.1 - Process Monitor capture: is %ProgramData%\Quietpane ever touched by an ordinary (unelevated) Quietpane?
+Date: 1 October 2026. Tool: Process Monitor 4.11 (Microsoft Sysinternals, signature verified). Windows 11 25H2, build 26200.
+Exercised: "Safety scan only" (-Scan), left to finish completely and write its report (41.5 minutes under Process Monitor).
+Filter: Path contains ProgramData\Quietpane, PROGRA~3\Quietpane, PROGRA~3\QUIETP~1, ProgramData\QUIETP~1 (every spelling of the folder), plus the app's own <repo>\src\ folder as a check that Quietpane's activity was captured. Filtered-out events dropped; all processes, System included.
+Positive control: the elevated test harness checks that %ProgramData%\Quietpane\machine exists at the start and end, so the capture must show those events.
+
+
+--- Summary written by the harness ---
+Part: scan
+Capture: 1955 events kept by the filter; exercise 00:36:08.451 - 01:18:00.552
+Quietpane processes seen: 1 PowerShell (18112 elevated=0), 4 processes in all
+Positive control (app activity): 1805 reads of the app's own src folder by the ordinary Quietpane
+Events under %ProgramData%\Quietpane, by who made them: this harness (positive control): 11; System (pid 4): 6
+Other processes or elevated Quietpane under the machine store: 0
+VERDICT: PASS - zero accesses to %ProgramData%\Quietpane from the ordinary Quietpane process tree
+
+--- Every event under %ProgramData%\Quietpane in this capture ---
+00:36:08.4457478  powershell.exe  pid 11404  ReadFile                           C:\ProgramData\Quietpane                   SUCCESS              [this harness (positive control)]
+00:36:08.4466294  powershell.exe  pid 11404  QueryOpen                          C:\ProgramData\Quietpane\machine           FAST IO DISALLOWED   [this harness (positive control)]
+00:36:08.4467329  powershell.exe  pid 11404  CreateFile                         C:\ProgramData\Quietpane\machine           SUCCESS              [this harness (positive control)]
+00:36:08.4472320  powershell.exe  pid 11404  QueryNetworkOpenInformationFile    C:\ProgramData\Quietpane\machine           SUCCESS              [this harness (positive control)]
+00:36:08.4472525  powershell.exe  pid 11404  CloseFile                          C:\ProgramData\Quietpane\machine           SUCCESS              [this harness (positive control)]
+00:36:08.4472731  powershell.exe  pid 11404  IRP_MJ_CLOSE                       C:\ProgramData\Quietpane\machine           SUCCESS              [this harness (positive control)]
+00:36:19.5033313  System          pid 4      IRP_MJ_CLOSE                       C:\ProgramData\Quietpane\restore           SUCCESS              [System (pid 4)]
+00:36:19.5033400  System          pid 4      IRP_MJ_CLOSE                       C:\ProgramData\Quietpane\restore           SUCCESS              [System (pid 4)]
+00:36:19.5045925  System          pid 4      IRP_MJ_CLOSE                       C:\ProgramData\Quietpane\machine           SUCCESS              [System (pid 4)]
+00:36:19.5045996  System          pid 4      IRP_MJ_CLOSE                       C:\ProgramData\Quietpane\machine           SUCCESS              [System (pid 4)]
+00:36:19.5047836  System          pid 4      IRP_MJ_CLOSE                       C:\ProgramData\Quietpane                   SUCCESS              [System (pid 4)]
+00:37:58.8494709  System          pid 4      IRP_MJ_CLOSE                       C:\ProgramData\Quietpane                   SUCCESS              [System (pid 4)]
+01:18:05.6205437  powershell.exe  pid 11404  QueryOpen                          C:\ProgramData\Quietpane\machine           FAST IO DISALLOWED   [this harness (positive control)]
+01:18:05.6208871  powershell.exe  pid 11404  CreateFile                         C:\ProgramData\Quietpane\machine           SUCCESS              [this harness (positive control)]
+01:18:05.6214079  powershell.exe  pid 11404  QueryNetworkOpenInformationFile    C:\ProgramData\Quietpane\machine           SUCCESS              [this harness (positive control)]
+01:18:05.6214389  powershell.exe  pid 11404  CloseFile                          C:\ProgramData\Quietpane\machine           SUCCESS              [this harness (positive control)]
+01:18:05.6214876  powershell.exe  pid 11404  IRP_MJ_CLOSE                       C:\ProgramData\Quietpane\machine           SUCCESS              [this harness (positive control)]
