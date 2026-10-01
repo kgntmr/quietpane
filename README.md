@@ -179,6 +179,9 @@ Only for changes to Windows itself - services, scheduled tasks, machine-wide reg
 **I said Yes, and Quietpane opened again but didn't do anything.**
 That's on purpose. Saying yes to Windows only gives Quietpane the rights; you still decide. Your boxes are still ticked - press the button again.
 
+**I'm updating from an older Quietpane. What changes?**
+Quietpane opens without administrator rights and asks only when you press a button with the shield. The first time you say yes, its copy in `C:\Program Files\Quietpane` is brought up to date and the start when you sign in switches to your own rights. Light or Dark and degrees C or F carry over once you have said yes; older undo records stay listed but aren't replayed (see the next question). How and why is in the [2.1 security review](docs/security/audits/2026-09-quietpane-2.1-security-audit.md).
+
 **My undo list says some changes were "made by an older Quietpane".**
 Versions before 2.1 kept their undo records in a folder other accounts on the PC could change, so Quietpane can't be sure a record is genuine and won't replay one. They stay listed so you can see what was changed, and you can change any of those settings back in Windows yourself.
 
