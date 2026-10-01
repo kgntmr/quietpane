@@ -24,7 +24,7 @@
 #>
 
 $script:AppVersion  = '2.1.0'
-$script:AppReleased = '2026-09-30'   # the day this version was published; bumped with the version
+$script:AppReleased = '2026-10-01'   # the day this version was published; bumped with the version
 $script:Brand       = @{ Name = 'KomodoWorks'; Url = 'https://www.komodoworks.com'; Email = 'info@komodoworks.com'; Repo = 'https://github.com/kgntmr/quietpane' }
 $script:AssetsRoot  = Join-Path (Split-Path $PSScriptRoot -Parent) 'assets'
 $script:LogSink     = $null
