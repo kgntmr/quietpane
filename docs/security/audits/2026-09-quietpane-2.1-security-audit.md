@@ -193,7 +193,7 @@ Reads that can be blocked report `Available`, `NeedsAdmin` or `Unavailable` alon
 
 ### 4.14 Sign-in start
 
-The optional sign-in task now runs Quietpane with limited rights (it ran with highest privileges in 2.0), is registered for the asking account only, and is refused under another account. An existing task is moved to limited the next time an administrator window opens for the same account. **Automated.** The migration on a real PC, and the next sign-in starting Quietpane unelevated, are **Outstanding**.
+The optional sign-in task now runs Quietpane with limited rights (it ran with highest privileges in 2.0), is registered for the asking account only, and is refused under another account. An existing task is moved to limited the next time an administrator window opens for the same account. **Automated**, and observed on the test PC. The next sign-in starting Quietpane unelevated is **Outstanding**.
 
 ## 5. Risk, response and verification at a glance
 
@@ -242,18 +242,20 @@ Representative cases, each an automated test (**Automated**). Names are paraphra
 
 ### 6.3 Elevated and unelevated runs
 
-The suite was run both ways on the test PC on 30 September 2026, on the code in pull request #6 with the test-isolation follow-up.
+The suite was run both ways on the test PC on 30 September and 1 October 2026, on the final code in pull request #6.
 
 | Run | Passed | Failed | Skipped | What was skipped |
 |---|---|---|---|---|
 | Without administrator rights | **326** | **0** | 15 | 13 tests that need administrator rights (quarantine storage and round trip, permanent deletion, the Recycle Bin, the audit log, the sign-in start, Windows' restart record, the machine-store and quarantine locks, putting a quarantined file back); EICAR (needs `-Live`); and one check that only runs on a PC without Defender |
 | With administrator rights | **339** | **0** | 2 | EICAR (needs `-Live`), and the check that only runs on a PC without Defender |
 
-After the elevated run, the real machine store's `audit.log` and `allowed.json` were compared with SHA256 hashes taken before it, together with every file's size, time and permissions under the real machine folder: **unchanged**.
+Before and after each elevated run, every file's SHA256, size and time, and every folder's permissions, under the real machine folder were recorded: **unchanged** both times.
 
 ### 6.4 Window self-tests
 
-`Quietpane.ps1 -SelfTest` builds the whole window without showing it and checks it, including the shield on every control that needs it, relaunched views that tick only real items and change nothing, and the handoff state machine with a simulated prompt. It passed with administrator rights on the test PC, with 0 unnamed controls. The light and dark runs, and the self-test of the ZIP extracted to a folder with spaces and symbols, are part of the final release checks and are recorded in [Outstanding verification](#9-outstanding-verification) until they have run on the final build.
+`Quietpane.ps1 -SelfTest` builds the whole window without showing it and checks it, including the shield on every control that needs it, relaunched views that tick only real items and change nothing, and the handoff state machine with a simulated prompt. On the final build it passed in light and dark, without and with administrator rights, and again from the release ZIP extracted to a folder named `qp final & 100% (1)` in light and dark: every check true, 0 unnamed controls.
+
+**Static checks on the final code:** every script file is plain ASCII with CRLF line endings; native-code imports are unchanged (6 in the engine, 3 in the window); the network-code search in the README finds exactly its two expected matches, both detection patterns.
 
 ### 6.5 Real-Windows verification
 
@@ -267,7 +269,7 @@ All on the test PC, 30 September 2026 unless stated.
 | A change of your own with no prompt, and its Undo with no prompt | **Done** | MSI Center's startup entry switched off and undone through Quietpane; the real registry value read back from outside the app each time; Apply showed no shield |
 | `-Watch` (sign-in check) unelevated | **Done** | Started as the sign-in task starts it, then opened from the taskbar |
 | In-window Safety scan unelevated, to completion | **Done** | 34.9 minutes under Process Monitor; report produced |
-| `Safety scan only` (`-Scan`) unelevated, to completion | **Outstanding** | A capture ran for about 40 minutes with zero machine-store accesses, but the scan was closed before it finished ([7](#7-protected-machine-store-isolation)) |
+| `Safety scan only` (`-Scan`) unelevated, to completion | **Done** | 41.5 minutes under Process Monitor; report produced ([7](#7-protected-machine-store-isolation)) |
 | Machine-store lock applied and verified | **Done** | Owner, protection and entries read before and after the first 2.1 administrator window |
 | Lock propagation does not follow a junction | **Done** | Real probe on the test PC |
 | Elevated token's default owner | **Done** | BUILTIN\Administrators, so new privileged files are owned by Administrators |
@@ -276,7 +278,9 @@ All on the test PC, 30 September 2026 unless stated.
 | UAC declined through the shield | **Outstanding** | |
 | UAC accepted: tab and ticks restored, nothing runs, second click, restore point, Undo | **Outstanding** | |
 | Handoff with Windows Terminal and with Windows Console Host as the default terminal | **Outstanding** | |
-| Sign-in task moved from highest to limited; next sign-in unelevated | **Outstanding** | |
+| First administrator window for the same account updates the installed copy | **Done** | Observed on 1 October 2026: the installed 2.0 copy in Program Files became 2.1, and the Start-menu shortcut was left unchanged |
+| Sign-in task moved from highest to limited | **Done** | Observed at the same time: run level Highest became Limited, same command line |
+| Next sign-in starts Quietpane unelevated | **Outstanding** | |
 
 ## 7. Protected machine-store isolation
 
@@ -299,13 +303,15 @@ All on the test PC, 30 September 2026 unless stated.
 | 1 | Start-up, Home, Health, Privacy, Telemetry, Apps (including startup costs), Free up space with *Where your space went*, Settings, the Undo tab and its static shielded button, the Safety scan tab and its static quarantine button, a change of your own (MSI Center startup) and its Undo | 6,236 reads of `src` | **0** | 5, all the harness's own control |
 | 2 | `-Minimized -Watch`, then opened from the taskbar | 2,622 reads of `src` | **0** | 10, all the harness's own control |
 | 3 | The in-window Safety scan, to completion (34.9 min) | 4,120 reads of `src` | **0** | 10 harness control; 1 System (PID 4) `IRP_MJ_CLOSE` on the store's root folder |
-| 4 | `Safety scan only` (`-Scan`) - **partial**: closed after about 40 minutes, before the report | 909 reads of `src` | **0** while it ran | 5 harness control; Defender (`MsMpEng`) and System reads; one elevated PowerShell process that read the 2.0-era files at the store's root for 8 seconds - consistent with the installed 2.0 being opened with administrator rights. None were the ordinary Quietpane. |
+| 4 | `Safety scan only` (`-Scan`), to completion (41.5 min), including writing its report | 1,805 reads of `src` | **0** | 11 harness control; 6 System (PID 4) |
 
 Capture 1 was run on the release candidate; its `-Watch` step failed because of a fault in the test harness (not in Quietpane) and was repeated as capture 2. Earlier attempts of capture 1 that stopped part-way, also for harness reasons, recorded no accesses either.
 
-**Result so far: zero accesses from the ordinary Quietpane process tree in every capture.** System (PID 4), Defender and elevated processes are outside the invariant and are recorded here only for completeness.
+An earlier -Scan capture that was closed after about 40 minutes also recorded zero accesses from the ordinary Quietpane while it ran. In that capture, Defender (`MsMpEng`) and one elevated PowerShell process (consistent with the installed 2.0 being opened with administrator rights) read files at the store's root; neither was the ordinary Quietpane.
 
-**Verification in progress:** the `-Scan` capture has to be repeated to completion. A shielded click answered *No* was not captured under Process Monitor; the UAC checks were deliberately run as separate sessions without it.
+**Result: zero accesses from the ordinary Quietpane process tree in every capture.** System (PID 4), Defender and elevated processes are outside the invariant and are recorded here only for completeness.
+
+Not covered by these captures: a shielded click answered *No*. The UAC checks are separate sessions, run without Process Monitor by design.
 
 Raw captures (`.PML`, `.CSV`) are not published: they are large and contain machine-specific paths and process details.
 
@@ -327,10 +333,8 @@ Raw captures (`.PML`, `.CSV`) are not published: they are large and contain mach
 - the UAC prompt declined through a shielded action: the window stays usable, nothing changes, no restore point;
 - the UAC prompt accepted: the admin window opens on the same tab with the same ticks and a note, nothing runs by itself, the second press changes the setting once, a restore point is created only after success, and Undo puts it back;
 - the same handover with Windows Terminal, and with Windows Console Host, as the default terminal;
-- the sign-in task moved from highest to limited privileges, and the next sign-in starting Quietpane unelevated;
-- `Safety scan only` (`-Scan`) under Process Monitor, to completion;
+- the next sign-in starting Quietpane unelevated, now that the task runs with limited privileges;
 - the admin window's listing of the PC's real pre-2.1 records, checked by eye;
-- the final build: both suites, light, dark and elevated self-tests, the ZIP extracted to a folder with spaces and symbols and self-tested, and the static checks (ASCII and CRLF, native-code imports, the network search).
 
 **Needs another account, PC or Windows version** (also listed in [docs/manual-checks.md](../../manual-checks.md#3a-admin-rights-since-21)):
 

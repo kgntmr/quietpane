@@ -74,7 +74,7 @@ Quietpane 2.1 went through an extensive internal security engineering review cov
 **Security verification (2.1)**
 - Separate test runs without and with administrator rights: 326 and 339 checks passed, 0 failed
 - Adversarial security regression tests: malformed and tampered records, junctions, permission takeover, another administrator account
-- Process Monitor checks of the protected machine-store boundary: zero accesses from the ordinary app in every capture so far
+- Process Monitor checks of the protected machine-store boundary: zero accesses from the ordinary app in every capture
 - Undo records from before 2.1 are never trusted or replayed
 - Real-Windows checks, with the ones still outstanding listed openly
 
