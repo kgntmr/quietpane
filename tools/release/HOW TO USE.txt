@@ -86,14 +86,6 @@ ALSO IN THE APP
    Quietpane works with just a keyboard (Tab, arrow keys, Enter, Esc, and
    F5 to look again) and with screen readers such as Narrator.
 
-COMING FROM AN OLDER QUIETPANE?
-   Quietpane no longer asks for administrator rights as it opens - only
-   when you press a button with the shield. The first time you say "Yes",
-   its copy in Program Files is brought up to date, and the start when
-   you sign in switches to your own rights.
-   Undo records made by older versions stay in the list but can't be
-   replayed: they were kept where other accounts could change them. You
-   can still change those settings back in Windows yourself.
 JUST WANT A CHECK-UP THAT CHANGES NOTHING?
    Double-click "Safety scan only". It needs no administrator rights.
    For anything it finds, you choose what

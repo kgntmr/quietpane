@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Release** | Quietpane 2.1.0 (pull request #6, branch `v2-1-no-admin`) |
+| **Release** | Quietpane 2.1.0, published 1 October 2026 (developed in pull request #6) |
 | **Date** | September 2026 |
 | **Kind of review** | Internal security engineering review and verification, carried out by the maintainer as part of 2.1 development. It is **not** an independent audit, a certification, a penetration test or a formal verification. |
 | **Test PC** | Windows 11 25H2 (build 26200), Windows PowerShell 5.1, one administrator account used without and with elevation |
