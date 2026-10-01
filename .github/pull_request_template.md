@@ -9,7 +9,7 @@
 
 ## Checked
 
-- [ ] `tests\Run-QuietpaneTests.ps1` passes (229 pass, 10 skipped without administrator rights)
+- [ ] `tests\Run-QuietpaneTests.ps1` passes (326 pass, 15 skipped without administrator rights)
 - [ ] Tried it with **Preview** first, if it changes what happens to a PC
 - [ ] Side effects are in `Short`, in words describing what a person would notice
 - [ ] Bumped the item count in the test, if a catalog grew
