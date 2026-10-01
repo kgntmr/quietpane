@@ -6,7 +6,7 @@
 | **Date** | September 2026 |
 | **Kind of review** | Internal security engineering review and verification, carried out by the maintainer as part of 2.1 development. It is **not** an independent audit, a certification, a penetration test or a formal verification. |
 | **Test PC** | Windows 11 25H2 (build 26200), Windows PowerShell 5.1, one administrator account used without and with elevation |
-| **Status** | **Verification in progress.** Everything marked *Done* below was run and recorded. Everything marked *Outstanding* has not been, and is listed in [Outstanding verification](#9-outstanding-verification). |
+| **Status** | **Release-gate checks on the test PC complete.** Everything marked *Done* below was run and recorded. Everything marked *Outstanding* - mostly checks that need another account, PC or Windows version - has not been, and is listed in [Outstanding verification](#9-outstanding-verification). |
 
 Quietpane does not ask you to trust a vague "secure" label. This report sets out how 2.1 handles administrator rights, what risks were found in the design it replaces, what changed, how each change was tested, and what limits remain. The evergreen description of the design is in [SECURITY.md](../../../SECURITY.md#how-quietpane-uses-admin-rights). This page is the release-specific evidence.
 
@@ -90,7 +90,7 @@ These were found by reading the 2.0 code and by checking a real PC before 2.1 wa
 
 **Code.** The arguments are built from a closed vocabulary (tab names, item ids, a GUID, a SID); anything outside it is refused before launch rather than escaped. The new window treats them as untrusted and only selects a tab and ticks boxes that really exist there. The first window stays open, disabled, until the new one is visibly up, and comes back if you say no or the new window fails. Only one Quietpane window is usable at a time.
 
-**Automated:** argument vocabulary, hostile values, a real child PowerShell receiving every value exactly (including from a path with spaces, symbols and Unicode), and the handoff state machine (declined, launch failure, child exits, slow child, a third instance, console flash) are tested. **Real Windows:** the readiness signal was measured on a real `RunAs` launch ([6.5](#65-real-windows-verification)). The full shield-to-second-click flow through a real prompt is **Outstanding**.
+**Automated:** argument vocabulary, hostile values, a real child PowerShell receiving every value exactly (including from a path with spaces, symbols and Unicode), and the handoff state machine (declined, launch failure, child exits, slow child, a third instance, console flash) are tested. **Real Windows:** the readiness signal was measured on a real `RunAs` launch ([6.5](#65-real-windows-verification)). The full shield-to-second-click flow was checked through real prompts on the test PC, declined and accepted, with both terminal hosts ([6.5](#65-real-windows-verification)).
 
 ### 4.4 Scope and privilege
 
@@ -200,7 +200,7 @@ The optional sign-in task now runs Quietpane with limited rights (it ran with hi
 | Area | Risk identified | 2.1 response | Verification |
 |---|---|---|---|
 | Startup privilege | Whole app ran elevated | Unelevated start; UAC only on demand | Real Windows (unelevated token, no prompt) |
-| Elevation handoff | Arguments could carry intent into an admin process | Closed vocabulary; view-only restore; nothing runs until the second click | Automated; real `RunAs` readiness check; full real flow **Outstanding** |
+| Elevation handoff | Arguments could carry intent into an admin process | Closed vocabulary; view-only restore; nothing runs until the second click | Automated; real `RunAs` readiness check; real prompt declined and accepted, both terminal hosts |
 | Restore state | Historical records could not be trusted | Legacy records view-only; new ones strictly validated | Security regression tests |
 | Privileged actions | The window could misclassify an action | Engine preflight plus per-operation enforcement | Direct-engine tests |
 | Alternate admin | Per-user changes could land in the wrong account | SID-based scope checks | Identity tests; real second account **Outstanding** |
@@ -275,9 +275,9 @@ All on the test PC, 30 September 2026 unless stated.
 | Elevated token's default owner | **Done** | BUILTIN\Administrators, so new privileged files are owned by Administrators |
 | Elevated test suite executes the admin-only tests | **Done** | [6.3](#63-elevated-and-unelevated-runs) |
 | Readiness signal of a real `RunAs` child | **Done** | The child briefly reports its console, titled "Windows PowerShell", as its main window (about 0.3 s) before Quietpane's window appears; `HasExited` works on it. This is why only a window titled Quietpane counts as ready. |
-| UAC declined through the shield | **Outstanding** | |
-| UAC accepted: tab and ticks restored, nothing runs, second click, restore point, Undo | **Outstanding** | |
-| Handoff with Windows Terminal and with Windows Console Host as the default terminal | **Outstanding** | |
+| UAC declined through the shield | **Done** | 1 October 2026, by the maintainer by hand: Apply on a shielded Privacy item, **No** at the prompt; nothing changed and the original window stayed usable |
+| UAC accepted: tab and ticks restored, nothing runs, second click, restore point, Undo | **Done** | 1 October 2026, by hand: **Yes** at the prompt; the admin window opened on the same tab with the same tick and ran nothing by itself; Apply pressed again made the change; Undo put it back |
+| Handoff with Windows Terminal and with Windows Console Host as the default terminal | **Done** | 1 October 2026, by hand: the accepted handoff repeated with each as the default terminal; the setting was then returned to "Let Windows decide" |
 | First administrator window for the same account updates the installed copy | **Done** | Observed on 1 October 2026: the installed 2.0 copy in Program Files became 2.1, and the Start-menu shortcut was left unchanged |
 | Sign-in task moved from highest to limited | **Done** | Observed at the same time: run level Highest became Limited, same command line |
 | Next sign-in starts Quietpane unelevated | **Outstanding** | |
@@ -330,9 +330,6 @@ Raw captures (`.PML`, `.CSV`) are not published: they are large and contain mach
 
 **On the test PC:**
 
-- the UAC prompt declined through a shielded action: the window stays usable, nothing changes, no restore point;
-- the UAC prompt accepted: the admin window opens on the same tab with the same ticks and a note, nothing runs by itself, the second press changes the setting once, a restore point is created only after success, and Undo puts it back;
-- the same handover with Windows Terminal, and with Windows Console Host, as the default terminal;
 - the next sign-in starting Quietpane unelevated, now that the task runs with limited privileges;
 - the admin window's listing of the PC's real pre-2.1 records, checked by eye;
 
