@@ -13,10 +13,16 @@ Developed by KomodoWorks.com  |  free  |  open source  |  collects nothing
    Quietpane isn't digitally signed yet, so Windows asks a few questions:
    - "Windows protected your PC"          -> "More info", then "Run anyway"
    - "Do you want to run this file?"      -> "Run"
-   - "Allow this app to make changes?"    -> "Yes"
+
+   Quietpane opens with your own rights. A button with Windows' shield on
+   it changes Windows itself, so Windows asks "Allow this app to make
+   changes?" first. Say "Yes" and Quietpane opens again with the same
+   boxes ticked - and does nothing until you press the button again.
+   Say "No" and nothing changes.
 
 3. CLICK ONE BUTTON
-   Click "Quiet my PC now", then "Yes". It shows what it will do first and
+   Click "Quiet my PC now" and say "Yes" to Windows. Then click "Quiet my
+   PC now" again, and "Yes" to Quietpane. It shows what it will do first and
    takes about a minute. Restart your PC when it says "All done!".
    Your drivers are never touched.
 
@@ -81,7 +87,8 @@ ALSO IN THE APP
    F5 to look again) and with screen readers such as Narrator.
 
 JUST WANT A CHECK-UP THAT CHANGES NOTHING?
-   Double-click "Safety scan only". For anything it finds, you choose what
+   Double-click "Safety scan only". It needs no administrator rights.
+   For anything it finds, you choose what
    happens next - nothing is removed behind your back.
 
 A GOOD START, NOT A GUARANTEE
@@ -99,8 +106,9 @@ REMOVING QUIETPANE
    start, take them away in Settings - Quietpane's copy in Program Files
    goes to the Recycle Bin with them. Then delete the Quietpane folder
    and any Quietpane-Report files on your Desktop.
-   Your undo history stays in C:\ProgramData\Quietpane - delete that too
-   once you're sure you won't need it.
+   Your undo history stays in %LOCALAPPDATA%\Quietpane and in
+   C:\ProgramData\Quietpane - delete those too once you're sure you won't
+   need them (the second one needs administrator rights).
 
 
 Questions:  info@komodoworks.com

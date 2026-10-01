@@ -22,7 +22,7 @@ Most changes are recorded in a restore point that you can undo, and clean-up onl
 - Use it only on computers you own or are authorised to administer. On a work or school computer, ask the administrator first, because changing settings may conflict with your organisation's policies.
 - Read each item's description, including its side effects, before applying it.
 - Keep backups of important files, as you would before any system change.
-- The app needs administrator rights, because the settings it changes are system settings.
+- The app opens with your own rights and asks Windows for administrator rights only when a change you press needs them, such as a system setting, a service or the quarantine. Saying yes lets that window make the changes you then confirm; it does nothing by itself.
 
 ## 4. No warranty
 Quietpane is provided free of charge, **"as is"**, without warranty of any kind, to the extent permitted by applicable law. Every PC is different, and Windows and third-party updates can change how settings behave. We can't guarantee the app will suit your particular system.

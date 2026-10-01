@@ -12,10 +12,67 @@ We aim to acknowledge reports within **5 working days**, agree a fix and a discl
 ## Supported versions
 Security fixes go into the latest release. **Only the current release is published:** when a new one goes out, the previous one is removed, so everyone downloads the same, current version. The download link on the [README](README.md) always points at it.
 
+## Our approach
+
+- **Admin rights only when the action needs them.** Quietpane opens with your own rights. Windows' permission prompt (UAC) appears only for a change to Windows itself, and saying yes never runs anything by itself.
+- **Offline.** No telemetry, no accounts, no network connections of any kind.
+- **The engine decides, not the window.** What an administrator window will run is checked by the code that runs it, against what that code itself trusts - never against what a button, an argument or a file says.
+- **Nothing to take on trust.** The app is plain text you can read, and for changes that touch administrator rights we publish the reasoning, the tests and the limits (see [Security reviews](#security-reviews)).
+
+## What Quietpane assumes
+
+- **Windows and the PC's administrator accounts are not compromised.** Anything already running with administrator rights can change Quietpane, and everything else on the PC.
+- **The administrator who answers the prompt is trusted with the whole PC, but not with your own settings.** If that is a different account, only machine-wide changes are allowed.
+- **Other accounts and programs on the PC may be hostile.** Nothing they could have written - including anything Quietpane stored before 2.1 - is trusted by an administrator window.
+- **The copy you run is genuine** ([how to check](#check-that-your-download-is-genuine)), and if you run it from a folder you can write to, nothing running as you has changed it.
+## How Quietpane uses admin rights
+
+Since 2.1, Quietpane opens with the rights of the account that started it and asks Windows for administrator rights only when a change needs them. This section is for people reviewing the code; the everyday version is [The shield](README.md#the-shield).
+
+**The rule it is built on:** the ordinary window may describe what you want; the administrator window decides for itself what it trusts and runs. Nothing the ordinary window, another program running as you, or another account on the PC can write is allowed to steer a change made with administrator rights.
+
+**Scope and privilege are two questions.** Every change is described first as an *operation* (its kind, its exact target, and for an uninstaller the exact command). For each one the engine works out, separately:
+- *scope* - whose state it changes: your account's (`User`) or the whole PC's (`Machine`);
+- *privilege* - what it takes to change it: your own rights or administrator rights.
+
+`HKCU\Software\Policies`, for example, is your account's but needs administrator rights. A brand app's uninstaller registered for your account only runs without a prompt if its program lives in your own profile, has no link or junction on the way to it, and its manifest - read from the program's real resource table, never a text search of the file - asks to run as the invoker. Anything else, including anything Quietpane can't classify with certainty, needs administrator rights. Deciding this never changes anything: a check opens an existing registry key for access and closes it, and never creates a key, a value, a task or a permission to find out.
+
+**Enforced in the engine, not the window.** The shield is only a picture. A whole batch - Apply, Quiet my PC now, Undo, removing brand extras - is checked before its first write, and refused whole with nothing written if any part isn't allowed. Every single change checks again just before it happens, so a bug that skips the batch check still can't write. Each change reports what really happened (changed, unchanged, failed or refused); an undo record is written only after a change has actually been made and read back.
+
+**Handing over to the administrator window.** Pressing a shielded button starts Quietpane again through Windows' permission prompt with a short, fixed vocabulary of arguments: the tab, the ticked items, a note to show and the account that asked. They are built from a closed set of characters and refused rather than escaped if anything else turns up; the ticks travel as base64url. The new window treats them as untrusted: it only selects a tab and ticks boxes that really exist there, and **no argument ever runs a change**. The ordinary window stays open, disabled, until the new one is up and showing, and comes back if you say no or the new window fails to open. Windows briefly reports the new process's console as its main window before Quietpane's own appears, so only a window titled Quietpane counts as ready. Only one Quietpane window is usable at a time.
+
+**Another administrator saying yes.** On a standard account, the administrator who answers the prompt is a different account. The administrator window compares the two by SID (never by name) and then allows only changes whose every part is machine-wide. Anything touching the asking account's own settings is refused before anything is written, and nothing is saved into either account's folders.
+
+**Where it keeps things.**
+- `%LOCALAPPDATA%\Quietpane`: your settings, notes, "Leave it for now" choices and restore points for changes made with your own rights. Only the ordinary window replays those restore points. Before writing there, the administrator window checks the folder and file aren't links or junctions and writes through a temporary file.
+- `%ProgramData%\Quietpane`: locked when an administrator window first uses it - owner Administrators, inheritance off, and exactly two entries: SYSTEM and Administrators, full control. There is no entry for any other account, not even to read. The lock is read back and checked, and the folder refused if it is anything else. New restore points go into a `machine\points` folder created inside the locked folder, and quarantined files into `machine\quarantine`, which has its own protected lock, so it stays shut even if the main one is ever changed. A quarantined file is copied into a new file there - so it takes the quarantine's lock rather than keeping the permissions it had - checked against its hash, and only then removed from where it was; putting it back works the same way in reverse.
+- The ordinary window never reads, lists or writes anything in `%ProgramData%\Quietpane`. Buttons that lead there are always shown, never worked out by looking.
+
+**Records are checked before they are trusted.** Restore points and quarantine records are read with a strict schema: exact fields, exact types, no duplicate or case-varied keys, size limits, a known version. Every registry path, service, task, file and variable in them must be one Quietpane itself changes, and the owner, lock and absence of links are checked on the folder and every file. Anything unexpected refuses the whole record. A quarantined file goes back only to a local, existing folder outside Windows and outside another account's profile, never over an existing file, and only if its hash still matches.
+
+**Undo records and quarantined files from before 2.1 are view only.** Older versions kept them in a folder any account on the PC could change - on a real PC, the old quarantine folder turned out to belong to an ordinary account - so nothing from that time can be shown to be genuine, whatever its lock says today. They are listed by folder name without being opened, and never replayed, put back, moved or deleted by Quietpane. The settings they describe can still be changed back in Windows, and an administrator can copy an old quarantined file out by hand.
+
+**Known limits.**
+- Checks on a path and then its use can, in principle, race with a change in between. Quietpane checks immediately before each use, refuses links at every level, creates new files only inside folders it has locked, and never follows a junction when deleting. Closing that window entirely would need a different kind of native call, which Quietpane doesn't add. The largest remaining window is the first time a 2.1 administrator window locks an existing `%ProgramData%\Quietpane` while someone else on the PC is actively racing it.
+- Windows does not treat your own ordinary and administrator windows as a security boundary between themselves. Quietpane hardens that, but can't make it one.
+- If you run Quietpane from a folder you can write to, anything running as you could change the script before you say yes. When it is installed, Quietpane starts its own copy from `C:\Program Files\Quietpane` instead, which ordinary programs can't change.
+- Windows builds, domain policies and account types differ in their default owners, inherited permissions and UAC settings. What has been checked, and on what, is in each release's review.
+- Some checks need another account, another PC or another Windows version. They are listed as outstanding until they have been done, never assumed.
+
+For the release-specific engineering review and verification evidence, see the [Quietpane 2.1 Security Engineering Audit](docs/security/audits/2026-09-quietpane-2.1-security-audit.md).
+
+## Security reviews
+
+Internal engineering reviews of security-sensitive releases, carried out by the project itself - not independent audits. The index is [docs/security](docs/security/README.md).
+
+| Release | Review | Date |
+|---|---|---|
+| 2.1 | [Quietpane 2.1 Security Engineering Audit](docs/security/audits/2026-09-quietpane-2.1-security-audit.md) | September 2026 |
+
 ## Getting a genuine copy
 - The only official source is **[github.com/kgntmr/quietpane](https://github.com/kgntmr/quietpane)**, published by KomodoWorks ([komodoworks.com](https://www.komodoworks.com)).
 - Right now Quietpane is **only** distributed as plain-text PowerShell scripts in `Quietpane.zip`. **There is no `.exe` version.** Treat any `.exe`, installer or "cracked/pro" version claiming to be Quietpane as fake. If that ever changes, it will be announced here and in the [Code Signing Policy](README.md#code-signing-policy) first.
-- Quietpane only ever copies itself to one place, `C:\Program Files\Quietpane`, and only when you add shortcuts or switch on "Start Quietpane when I sign in" in Settings. Program Files is used because ordinary programs can't change it, which matters for something that starts with administrator rights. A Quietpane copy anywhere else, or one you never asked for, isn't ours.
+- Quietpane only ever copies itself to one place, `C:\Program Files\Quietpane`, and only when you add shortcuts or switch on "Start Quietpane when I sign in" in Settings. Program Files is used because ordinary programs can't change it, which matters for something that can run with administrator rights. A Quietpane copy anywhere else, or one you never asked for, isn't ours.
 - Because everything is plain text, you can read every line before running it. See [Verify it yourself](README.md#verify-it-yourself).
 - The ZIP is built with [`tools/build-release.ps1`](tools/build-release.ps1) and contains the app's files from this repository, unchanged (the tests and build tools are left out). Nothing in it is pre-compiled, and nothing is added.
 
@@ -40,7 +97,7 @@ Because it's all plain text, the strongest check isn't a scanner at all - it's r
 
 ## If your antivirus or Windows blocked it
 
-Quietpane is **not signed yet**, it asks for administrator rights, and it changes the kind of settings adware also changes. That combination gets it stopped in three different ways, and each one means something different:
+Quietpane is **not signed yet**, it can ask for administrator rights, and it changes the kind of settings adware also changes. That combination gets it stopped in three different ways, and each one means something different:
 
 | What you see | What it means | What to do |
 |---|---|---|
