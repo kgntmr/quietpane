@@ -6,7 +6,7 @@
 # Four of the checks start a real WPF window (Quietpane.ps1 -SelfTest, in STA, without showing it).
 # They run here like any other check. If a hosted runner ever cannot do that, those checks FAIL and
 # this workflow goes red - which is the point. Narrowing the suite to make the badge green again,
-# while the documentation still says 229 checks pass, would quietly change what "tests pass" means.
+# while the documentation still quotes the full-suite result, would quietly change what "tests pass" means.
 # Whatever CI actually runs is the number the README and CONTRIBUTING quote.
 
 name: Tests
