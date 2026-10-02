@@ -7,7 +7,7 @@ Contact: **info@komodoworks.com**
 
 ## The short version
 
-- **Quietpane collects no personal data.** It has no accounts, analytics, telemetry, crash reporting, advertising, tracking, cookies or fingerprinting.
+- **KomodoWorks receives no personal data from Quietpane.** It has no accounts, analytics, telemetry, crash reporting, advertising, tracking, cookies or fingerprinting.
 - **It makes no network connections.** It never "phones home", checks for updates in the background, downloads anything or uploads anything.
 - **Everything it reads stays on your PC.** KomodoWorks never receives it and has no way to see it.
 - **Nothing is sold or shared**, because nothing is collected.
@@ -16,7 +16,7 @@ You don't have to take our word for it. See [Verify it yourself](README.md#verif
 
 ## What the app looks at on your computer, and why
 
-The app runs only on your PC, only when you start it, and only does what you click.
+The app runs only on your PC. It starts when you launch it, or at sign-in only if you explicitly enable that option. It changes your PC only after an action you choose and confirm; the optional sign-in check only reads whether selected settings came back.
 
 | Feature | What it reads or changes | Where results are kept |
 |---|---|---|
