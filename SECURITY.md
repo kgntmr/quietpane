@@ -59,7 +59,7 @@ Since 2.1, Quietpane opens with the rights of the account that started it and as
 - Windows builds, domain policies and account types differ in their default owners, inherited permissions and UAC settings. What has been checked, and on what, is in each release's review.
 - Some checks need another account, another PC or another Windows version. They are listed as outstanding until they have been done, never assumed.
 
-For the release-specific engineering review and verification evidence, see the [Quietpane 2.1 Security Engineering Audit](docs/security/audits/2026-09-quietpane-2.1-security-audit.md).
+For the release-specific engineering review and verification evidence, see the [Quietpane 2.1 Internal Security Engineering Review](docs/security/audits/2026-09-quietpane-2.1-security-audit.md).
 
 ## Security reviews
 
@@ -67,7 +67,7 @@ Internal engineering reviews of security-sensitive releases, carried out by the 
 
 | Release | Review | Date |
 |---|---|---|
-| 2.1 | [Quietpane 2.1 Security Engineering Audit](docs/security/audits/2026-09-quietpane-2.1-security-audit.md) | September 2026 |
+| 2.1 | [Quietpane 2.1 Internal Security Engineering Review](docs/security/audits/2026-09-quietpane-2.1-security-audit.md) | September 2026 |
 
 ## Getting a genuine copy
 - The only official source is **[github.com/kgntmr/quietpane](https://github.com/kgntmr/quietpane)**, published by KomodoWorks ([komodoworks.com](https://www.komodoworks.com)).
@@ -117,8 +117,8 @@ Quietpane is **not signed yet**, it can ask for administrator rights, and it cha
 2. Submit it to each vendor users have reported, through that vendor's own false-positive form.
 3. Paste this, with the version and SHA256 filled in:
 
-   > Quietpane VERSION, `Quietpane.zip`, SHA256 `...`. Free, open-source (MIT) Windows privacy tool by KomodoWorks, Dublin. Plain-text PowerShell with no executable; full source at https://github.com/kgntmr/quietpane. It changes privacy settings, disables telemetry services, edits the hosts file and can quarantine files - only when the user confirms; most changes can be undone from inside the app. It makes no network connections. We believe this detection is a false positive and are happy to answer questions: info@komodoworks.com.
+   > Quietpane VERSION, `Quietpane.zip`, SHA256 `...`. Free, open-source (MIT) Windows privacy tool by KomodoWorks, Dublin. Plain-text PowerShell with no `.exe` or precompiled binary; its small C# blocks ship as readable source and are compiled locally at runtime; full source at https://github.com/kgntmr/quietpane. It changes privacy settings, disables telemetry services, edits the hosts file and can quarantine files - only when the user confirms; most changes can be undone from inside the app. It makes no network connections. We believe this detection is a false positive and are happy to answer questions: info@komodoworks.com.
 
 4. Keep a note of the vendor, the detection name and the reply. Code is never changed to hide from a scanner - if a detection points at something Quietpane genuinely does badly, that gets fixed openly.
 
-**Signing is the real fix.** A signature from the [SignPath Foundation](README.md#code-signing-policy) certificate is the first thing SmartScreen and Smart App Control look for; SmartScreen also builds trust in a signed app as more people run it. Two things stand in the way: the SignPath application (pending), and GitHub Actions, which SignPath signs from and which is currently unavailable on this account.
+**Signing is the real fix.** A signature from the [SignPath Foundation](README.md#code-signing-policy) certificate is the first thing SmartScreen and Smart App Control look for; SmartScreen also builds trust in a signed app as more people run it. Two things stand in the way: the SignPath application (pending), and GitHub Actions, which SignPath signs from and which is currently disabled at the account level.

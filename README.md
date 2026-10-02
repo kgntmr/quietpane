@@ -5,15 +5,16 @@
 <h1 align="center">Quietpane</h1>
 
 <p align="center">
-  <b>See what your PC is telling on you, and switch it off.</b><br>
-  Your browser add-ons, and what each one is allowed to read. Which apps used your camera and microphone, and when. What is talking to the internet right now. Then the tracking, the bloat and the wasted space.<br>
-  Everything happens on your PC, and nothing leaves it.<br><br>
+  <b>A Windows utility whose claims are inspectable instead of trusted.</b><br>
+  See what your PC is telling on you, and switch it off: browser add-ons, camera and microphone use, live connections, tracking, bloat and wasted space.<br>
+  Quietpane itself sends nothing off your PC.<br><br>
   Developed by <a href="https://www.komodoworks.com"><b>KomodoWorks.com</b></a> &middot; Free &amp; open source (MIT) &middot; Windows 10 / 11
 </p>
 
 <p align="center">
   <b>Admin rights only when the action needs them.</b><br>
-  <sub>Runs without admin by default &middot; Offline &middot; No telemetry &middot; <a href="docs/security/audits/2026-09-quietpane-2.1-security-audit.md">Read the security review</a> and <a href="docs/security/evidence/2.1/README.md">its evidence</a></sub>
+  <sub>Runs without admin by default &middot; Offline &middot; No telemetry &middot; v2.1 evidence: 326 checks without admin + 339 with admin, 0 failures</sub><br>
+  <sub><a href="TRUST.md"><b>Current verification status</b></a> &middot; <a href="docs/security/audits/2026-09-quietpane-2.1-security-audit.md">Internal security review</a> &middot; <a href="docs/security/evidence/2.1/README.md">Evidence</a></sub>
 </p>
 
 <p align="center">
@@ -32,7 +33,7 @@
 2. **Unzip it:** right-click **Quietpane.zip** → **Extract All** → **Extract**. It can't start from inside the ZIP.
 3. In the new folder, double-click **Start Quietpane**, then press **Quiet my PC now**.
 
-It shows what it will do before doing anything, and takes about a minute. **Undo everything** puts every setting back; cleared files wait in your Recycle Bin, and any pre-installed app it removed can be reinstalled from the Microsoft Store. You need Windows 10 or 11. Quietpane opens with your own rights and asks for administrator rights only when you press a change to Windows itself. Nothing is installed.
+It shows what it will do before doing anything, and takes about a minute. **Undo everything** puts every setting back; cleared files wait in your Recycle Bin, and any pre-installed app it removed can be reinstalled from the Microsoft Store. You need Windows 10 or 11. Quietpane opens with your own rights and asks for administrator rights only when you press a change to Windows itself. There is no installer: it runs from the folder you unzip, and copies its own files to Program Files only if you explicitly add shortcuts or enable start-at-sign-in.
 
 Quietpane isn't [digitally signed](#code-signing-policy) yet, so Windows asks a few questions first:
 
@@ -42,7 +43,7 @@ Quietpane isn't [digitally signed](#code-signing-policy) yet, so Windows asks a 
 | "Do you want to run this file?" | **Run** |
 | "Do you want to allow this app to make changes?" (only when you press something with the shield) | **Yes** |
 
-**You should be suspicious of that**, and of anything else that asks for administrator rights. A signing certificate has been [applied for](#code-signing-policy); until it comes through, the honest answer is that a signature only tells you who published something, not what it does. Quietpane offers you the stronger thing instead: there is no `.exe` and no precompiled binary - even its few C# blocks ship as source and are compiled on your PC as it runs - so you can read the whole app before running it, and [check in about a minute](#verify-it-yourself) that it makes no network connections at all.
+**You should be suspicious of that**, and of anything else that asks for administrator rights. A signing certificate has been [applied for](#code-signing-policy); until it comes through, the honest answer is that a signature only tells you who published something, not what it does. Quietpane offers a different kind of check as well: there is no `.exe` and no precompiled binary - even its few C# blocks ship as source and are compiled on your PC as it runs - so you can read the whole app before running it, and [check in about a minute](#verify-it-yourself) that it makes no network connections at all.
 
 **Want to look before you leap?** Double-click **Safety scan only**. It changes nothing on your PC and needs no administrator rights - it only looks, tells you what it found, and names the few things only an administrator can see.
 
@@ -57,17 +58,17 @@ Windows' own shield sits on a button when that change needs administrator rights
 - **Collects nothing, connects to nothing.** No accounts, analytics, telemetry or ads, and no network requests at all. [Check for yourself](#verify-it-yourself).
 - **Tells you first.** Every item explains what it does and its side effects, and **Preview** shows exactly what would change.
 - **Can be undone.** Changes go into a restore point, and clean-up only moves files to your Recycle Bin. The three exceptions say so before you confirm: removing an app, uninstalling a brand extra, and deleting a threat for good.
-- **Leaves your security alone.** Defender, SmartScreen, the firewall and Windows Update are never touched.
+- **Doesn't weaken Windows security.** Quietpane never disables Defender, SmartScreen, the firewall or Windows Update. If you explicitly ask, it can request a Defender scan or let Defender remove one of Defender's own detections.
 - **Owns up when something goes wrong.** If a part of your PC can't be read, that part says so and the rest still works. If Undo can't put something back, it says how many and keeps the restore point so you can try again. One job runs at a time, only one copy of the app opens at once, and an error never takes the window down with it.
 - **Says less, means more.** Every screen is one plain line per thing, in everyday words. The detail behind it is one hover or one Tab away, and the full running commentary is always in **Show details** at the bottom. An automated test keeps the window from filling up with words again.
 - **Light or dark, as you like it.** It follows Windows' own light or dark setting, and changes with it while it is open. Rather it didn't? Pick Light or Dark under **Appearance** in Settings, and °C or °F under **Temperatures**. The dark colours were checked for contrast the same way the light ones were.
 - **Easy to take in.** Every tab reads the same way: a ring for how hard something is working, one big number and a bar for what fills up, and a plain list for the rest - the name on the left, the value on the right. Each list tab opens with a short **At a glance** box. Colour only ever says how something stands, and a word beside it always says the same.
-- **Works for everyone.** Everything can be done with a keyboard alone, with a clear outline showing where you are; every control has a name screen readers such as Narrator can say, and the status line is read out as it changes. All text meets the WCAG AA contrast standard, and the automated tests fail if a control ever loses its name or a colour gets too faint to read.
+- **Built for keyboard and screen-reader use.** Everything can be done with a keyboard alone, with a clear outline showing where you are; every control has a name screen readers such as Narrator can say, and the status line is read out as it changes. All text meets the WCAG AA contrast standard, and the automated tests fail if a control ever loses its name or a colour gets too faint to read.
 - **Hides nothing.** Plain-text PowerShell you can read, plus four short C# blocks (the graphics driver's temperature, clocks and fan, the drive's own temperature and wear, adding up folder sizes, and making the Start-menu shortcut) and three one-line C# declarations that give the app its own taskbar icon, a sharp window and a dark title bar when it is dark - all shipped as source, and compiled on your PC by PowerShell as it runs. No installer and no `.exe`: it runs from the folder you unzip, and only copies itself to Program Files if you ask for shortcuts or to start it when you sign in.
 
 ## Security by design
 
-**[Read the Quietpane 2.1 Security Engineering Audit →](docs/security/audits/2026-09-quietpane-2.1-security-audit.md)** &nbsp;·&nbsp; [See the test and Process Monitor evidence](docs/security/evidence/2.1/README.md)
+**[Read the Quietpane 2.1 Internal Security Engineering Review →](docs/security/audits/2026-09-quietpane-2.1-security-audit.md)** &nbsp;·&nbsp; [See the test and Process Monitor evidence](docs/security/evidence/2.1/README.md)
 
 **Admin rights only when the action needs them.** Quietpane doesn't run as administrator by default. It asks Windows for elevation - the UAC prompt - only for operations that need it, saying yes never runs anything by itself, and every privileged action is checked again by the engine before it runs, whatever the window, a command line or a file says.
 
@@ -75,7 +76,7 @@ Quietpane 2.1 went through an extensive internal security engineering review cov
 
 **Security verification (2.1)**
 - Separate test runs without and with administrator rights: 326 and 339 checks passed, 0 failed
-- Adversarial security regression tests: malformed and tampered records, junctions, permission takeover, another administrator account
+- Automated adversarial security regression tests: malformed and tampered records, junctions, permission takeover, and alternate-account/SID cases
 - Process Monitor checks of the protected machine-store boundary: zero accesses from the ordinary app in every capture
 - Undo records from before 2.1 are never trusted or replayed
 - Real-Windows checks, with the ones still outstanding listed openly
@@ -133,11 +134,11 @@ While it watches, it speaks up about the handful of things worth interrupting fo
 
 Every finding says who found it: **Microsoft Defender** (a real detection, named by Defender and explained in plain words) or a **Quietpane check** (a warning sign, not proof, and never a malware family). You decide what happens: let Defender handle it, quarantine it (you can put it back), move it to the Recycle Bin, or delete it for good (you're asked twice). Anything with a real file behind it can be acted on, whatever its level - including the everyday Medium and Low ones such as unsigned programs, cracked-software files and a service running from a user folder. Several files found together share one card, with buttons on each. Findings about settings have no buttons, because there is no file to remove; they say what to do instead. **Leave it for now** never creates a Defender exclusion. Windows' own folders are refused, and every action is logged.
 
-**Privacy.** **Your browser add-ons** first, because they see more of your browsing than anything else: every add-on in Edge, Chrome, Brave, Vivaldi, Opera and Firefox, the ones that see the most at the top, each with one plain line - "Reads and changes everything on every site you visit", or the handful of sites it is limited to - plus where it came from (you, or a program on this PC), whether it is on, and when it arrived. Tick one and the browser is told not to load it; the browser then says an administrator blocked it, which is you, and Undo takes that away again. The browser's own files are never written to, and its own parts (its PDF viewer, its store) are summed up in a line rather than filling the list. For Firefox, Vivaldi and Opera the list is read-only, and says where to switch one off instead of pretending.
+**Privacy.** **Your browser add-ons** first, because they see more of your browsing than anything else: every add-on in Edge, Chrome, Brave, Vivaldi, Opera, Opera GX and Firefox, the ones that see the most at the top, each with one plain line - "Reads and changes everything on every site you visit", or the handful of sites it is limited to - plus where it came from (you, or a program on this PC), whether it is on, and when it arrived. Tick one and the browser is told not to load it; the browser then says an administrator blocked it, which is you, and Undo takes that away again. The browser's own files are never written to, and its own parts (its PDF viewer, its store) are summed up in a line rather than filling the list. For Firefox, Vivaldi and Opera the list is read-only, and says where to switch one off instead of pretending.
 
 Then: which apps used your camera, microphone and location, and when, as Windows itself records it. Switch any Store app off (the same switch as in Settings, with Undo); desktop programs share one switch in Windows, and Quietpane says so. Also **what's talking to the internet right now**: the programs with a connection open and where it goes, named from the addresses Windows has already looked up. It is a live list while you watch it, nothing is blocked, and Quietpane still makes no connections of its own. Then 32 settings in five sections: what Windows sends to Microsoft, privacy, ads and tips, background services, and browsers and other software (Edge, Chrome, Office, VS Code and more). Each is one plain line, with the full explanation when you point at it or Tab to it. Anything already done says so.
 
-**Telemetry.** The background extras your PC's makers left running (NVIDIA, Intel, AMD, MSI, ASUS, Dell, HP, Lenovo, Acer), listed only if they're actually on your PC. It switches off reporting, updaters and helpers; drivers are never touched and the brand's own app still works. Extras you could remove are left unticked, and Quietpane warns you before removing one because that can't be undone.
+**Telemetry.** The background extras your PC's makers left running (NVIDIA, Intel, AMD, MSI, ASUS, Dell, HP, Lenovo, Acer), listed only if they're actually on your PC. It targets known reporting, updater and helper components rather than drivers, and each item says what it changes and what should keep working. Extras you could remove are left unticked, and Quietpane warns you before removing one because that can't be undone.
 
 **Apps.** *Starts when you sign in:* **what each one costs you**, worst first - the memory it is using right now, how long after you signed in it started, and the time Windows itself recorded for it where there is one. Windows only times a full restart (not waking from sleep), so that figure is shown with its date and never mixed up with today's. Switch items off the way Task Manager does, with Undo; Windows Security and driver helpers are never offered. *Apps you could remove:* known bloat only. The Store, Camera, Photos, Calculator, Notepad, Paint and Snipping Tool are never on the list.
 
@@ -208,7 +209,7 @@ You opened one of the app's own files. Close it, pick nothing, and double-click 
 That appears whenever a browser policy is set, which is how the telemetry switches are locked. Nobody controls your browser, and Undo removes the policies.
 
 **Windows still says diagnostic data is "Required".**
-Windows Home and Pro can't go below Required. Switching off the DiagTrack service is what actually stops it, and Quietpane does that.
+Windows Home and Pro can't go below Required. Quietpane disables the Connected User Experiences and Telemetry service and separately configures the related diagnostic policies, reporting tasks and crash-reporting settings it knows about.
 
 **Some items say [not on this PC].**
 That service, task or program isn't on your Windows version, or is already gone.
@@ -224,7 +225,7 @@ Removing it doesn't undo its changes, so use **Undo** first if you want your PC 
 
 ## Privacy, terms and security
 
-- **[Privacy Policy](PRIVACY.md):** collects no personal data and makes no network connections.
+- **[Privacy Policy](PRIVACY.md):** Quietpane sends no personal data to KomodoWorks and makes no network connections of its own.
 - **[Terms of Use](TERMS.md):** free, open source, provided as is. Irish law; your consumer rights are unaffected.
 - **[Security Policy](SECURITY.md):** how Quietpane uses administrator rights, reporting a vulnerability, and telling a genuine copy from a fake. Release security reviews are in [docs/security](docs/security/README.md).
 - **[Contributing](CONTRIBUTING.md):** how to add to the lists, and the rules the tests enforce.
@@ -241,7 +242,7 @@ Free code signing provided by [SignPath.io](https://about.signpath.io), certific
 
 **What gets signed:** only files published on this repository's [Releases](https://github.com/kgntmr/quietpane/releases) page. Every signing request is approved by hand.
 
-**How releases are built today, stated plainly:** GitHub Actions builds and tests Quietpane from this repository's source on every push and pull request, and keeps the resulting ZIP as a build artifact. **Release publication is currently performed manually** - the file attached to a release is built on a maintainer's PC and uploaded by hand, so the published download is not yet the artifact Actions produced. Until that changes, treat the SHA256 on the release page and the readable source as the things to check, not the build pipeline. This section will say so when the release pipeline consumes the Actions-built artifact.
+**How releases are built today, stated plainly:** GitHub Actions is configured to build and test Quietpane from this repository's source on pushes to `main`, pull requests targeting `main`, and manual runs, and to keep the resulting ZIP as a build artifact. **Release publication is currently performed manually** - the file attached to a release is built on a maintainer's PC and uploaded by hand, so the published download is not yet the artifact Actions produced. Until that changes, treat the SHA256 on the release page and the readable source as the things to check, not the build pipeline. This section will say so when the release pipeline consumes the Actions-built artifact.
 
 | Role | Members |
 |---|---|
@@ -262,7 +263,7 @@ Free code signing provided by [SignPath.io](https://about.signpath.io), certific
   An elevated window says "Administrator:" in its title bar. Without administrator rights **326 checks run and 15 are skipped** - the quarantine round trip, permanent deletion, the audit log, the sign-in start, the locked data folder and EICAR; the elevated window runs 339 of them, leaving only EICAR (add `-Live`). One check only ever runs on a PC without Defender.
 - **Check by hand:** [`docs/manual-checks.md`](docs/manual-checks.md) lists what still needs a person, including the AMTSO feature checks. Those stay manual on purpose: automating them would mean the app downloading files.
 - **Contribute:** the lists in [`src/catalog/`](src/catalog) are plain data, so adding a setting, app, folder, brand or startup note needs no code. Describe side effects honestly, and test with **Preview** first. [`CONTRIBUTING.md`](CONTRIBUTING.md) shows a real entry, the word limits the tests enforce, and the two tests that catch people out. The reasons behind a few design choices are in [`docs/LESSONS-LEARNED.md`](docs/LESSONS-LEARNED.md).
-- **What CI checks:** every push and pull request runs the full suite on `windows-latest`, builds the ZIP, and verifies that every script file is still plain ASCII with CRLF endings - see [`.github/workflows/tests.yml`](.github/workflows/tests.yml).
+- **What CI checks:** pushes to `main`, pull requests targeting `main`, and manual runs run the full suite on `windows-latest`, build the ZIP, and verify that every script file is still plain ASCII with CRLF endings - see [`.github/workflows/tests.yml`](.github/workflows/tests.yml).
 
 ---
 

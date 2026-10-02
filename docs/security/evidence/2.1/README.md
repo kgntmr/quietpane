@@ -1,6 +1,6 @@
 # Quietpane 2.1 - verification evidence
 
-The output behind the figures in the [Quietpane 2.1 Security Engineering Audit](../../audits/2026-09-quietpane-2.1-security-audit.md), so you can check them rather than take them on trust. Recorded on the maintainer's test PC (Windows 11 25H2, build 26200) on 30 September and 1 October 2026.
+The output behind the figures in the [Quietpane 2.1 Internal Security Engineering Review](../../audits/2026-09-quietpane-2.1-security-audit.md), so you can check them rather than take them on trust. Recorded on the maintainer's test PC (Windows 11 25H2, build 26200) on 30 September and 1 October 2026.
 
 | File | What it shows | SHA256 |
 |---|---|---|

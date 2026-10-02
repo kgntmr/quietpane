@@ -134,7 +134,7 @@ anything - what's in the repository is exactly what lands on someone's PC. Those
 with **CRLF line endings and pure ASCII**, so that "Download ZIP" works on every PC, including ones
 where PowerShell is fussier than yours.
 
-You don't have to remember this. **CI checks it on every push**, and tells you which file and how many
+You don't have to remember this. **CI checks it on pushes to `main`, pull requests targeting `main`, and manual runs**, and tells you which file and how many
 lines are wrong. Markdown and YAML aren't covered, so they can be whatever your editor prefers.
 
 ## Why a thing is the way it is

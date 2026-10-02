@@ -255,7 +255,7 @@ These need eyes, not assertions:
 Quietpane opens without administrator rights and asks only for changes that need them. The automated
 tests cover the rules; these need real Windows prompts, real accounts, or a tool watching the disk.
 
-**On the maintainer's PC, before each release that touches this:**
+**Repeatable checks on the maintainer's PC:** The release-specific review records which of these were actually completed. This checklist describes how to perform them; being listed here does not mean a check has passed for every release or environment.
 
 - **Opening.** Double-click *Start Quietpane*: no permission prompt. Health, add-ons, camera history,
   startup costs and Where your space went all work. Hidden system tasks say "needs admin rights to
