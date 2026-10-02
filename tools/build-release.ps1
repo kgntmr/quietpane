@@ -28,7 +28,7 @@ Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'release\Safety scan only.cmd') 
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'release\HOW TO USE.txt') -Destination $stage
 
 # App files folder: the program, its own start files and its documents
-foreach ($f in 'Start Quietpane.cmd', 'Safety scan only.cmd', 'Quietpane.ps1', 'README.md', 'PRIVACY.md', 'TERMS.md', 'SECURITY.md', 'LICENSE') {
+foreach ($f in 'Start Quietpane.cmd', 'Safety scan only.cmd', 'Quietpane.ps1', 'README.md', 'TRUST.md', 'PRIVACY.md', 'TERMS.md', 'SECURITY.md', 'LICENSE') {
     Copy-Item -LiteralPath (Join-Path $repo $f) -Destination $app
 }
 foreach ($d in 'src', 'assets', 'docs') {
