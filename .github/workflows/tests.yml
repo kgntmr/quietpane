@@ -1,4 +1,4 @@
-# Builds and tests Quietpane from source on every push and pull request.
+# Builds and tests Quietpane from source on pushes to main, pull requests targeting main, and manual runs.
 #
 # Windows PowerShell 5.1 on purpose: that is what Quietpane targets and what people actually run it
 # with, so testing under PowerShell 7 would be testing something else.
@@ -13,8 +13,12 @@ name: Tests
 
 on:
   push:
-    branches: ["**"]
+    branches:
+      - main
   pull_request:
+    branches:
+      - main
+  workflow_dispatch:
 
 jobs:
   windows:
