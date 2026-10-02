@@ -5,15 +5,16 @@
 <h1 align="center">Quietpane</h1>
 
 <p align="center">
-  <b>See what your PC is telling on you, and switch it off.</b><br>
-  Your browser add-ons, and what each one is allowed to read. Which apps used your camera and microphone, and when. What is talking to the internet right now. Then the tracking, the bloat and the wasted space.<br>
+  <b>A Windows utility whose claims are inspectable instead of trusted.</b><br>
+  See what your PC is telling on you, and switch it off: browser add-ons, camera and microphone use, live connections, tracking, bloat and wasted space.<br>
   Quietpane itself sends nothing off your PC.<br><br>
   Developed by <a href="https://www.komodoworks.com"><b>KomodoWorks.com</b></a> &middot; Free &amp; open source (MIT) &middot; Windows 10 / 11
 </p>
 
 <p align="center">
   <b>Admin rights only when the action needs them.</b><br>
-  <sub>Runs without admin by default &middot; Offline &middot; No telemetry &middot; <a href="docs/security/audits/2026-09-quietpane-2.1-security-audit.md">Read the security review</a> and <a href="docs/security/evidence/2.1/README.md">its evidence</a></sub>
+  <sub>Runs without admin by default &middot; Offline &middot; No telemetry &middot; v2.1 evidence: 326 checks without admin + 339 with admin, 0 failures</sub><br>
+  <sub><a href="TRUST.md"><b>Current verification status</b></a> &middot; <a href="docs/security/audits/2026-09-quietpane-2.1-security-audit.md">Internal security review</a> &middot; <a href="docs/security/evidence/2.1/README.md">Evidence</a></sub>
 </p>
 
 <p align="center">
