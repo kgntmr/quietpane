@@ -1128,7 +1128,7 @@ function Add-Option {
 # 0. Home - the one-click screen for everyone
 $homePanel = New-TabPage 'Home' 'home' ''
 [void]$homePanel.Children.Add((New-Text 'Make this PC yours again.' 28 'SemiBold' '#0F1B1C' '0,4,0,6' 'Fraunces, Georgia'))
-[void]$homePanel.Children.Add((New-Text 'One click switches off tracking and ads, clears out unwanted apps and frees up space. You can put it all back.' 14.5 'Normal' '#4B5B5C' '0,0,0,18'))
+[void]$homePanel.Children.Add((New-Text 'One click switches off tracking and ads, clears out unwanted apps and frees up space. Settings can be undone; cleared files go to the Recycle Bin, and removed Store apps can be reinstalled.' 14.5 'Normal' '#4B5B5C' '0,0,0,18'))
 
 function New-Card([string]$Title) {
     $b = New-Object System.Windows.Controls.Border
@@ -1521,7 +1521,7 @@ foreach ($g in @((Get-QpCatalog privacy).Items | ForEach-Object { $_.Group } | S
 
 # 3. Telemetry - the brand and hardware software that came with this PC
 $vendorPanel = New-TabPage 'Telemetry' 'vendors' ('')
-$vendorIntroText = New-Text 'Background extras from the companies that made your PC, and what they report. Drivers are never touched, and the apps still work.' 13.5 'Normal' '#4B5B5C' '0,0,0,12'
+$vendorIntroText = New-Text 'Background extras from the companies that made your PC, and what they report. Quietpane targets known helpers rather than drivers, and each item says what it affects.' 13.5 'Normal' '#4B5B5C' '0,0,0,12'
 Set-MoreInfo $vendorIntroText 'The laptop maker, the graphics chip, the processor: most PCs arrive with helpers from each, and many quietly report home. Only what is actually on this PC is listed.'
 [void]$vendorPanel.Children.Add($vendorIntroText)
 [void]$vendorPanel.Children.Add((New-GlanceBox 'vendors'))
@@ -1605,7 +1605,7 @@ foreach ($e in $script:SpaceWinsHead, $script:SpaceWinsNote, $script:SpaceCrumb,
 [void]$cleanupPanel.Children.Add($script:SpaceSection.Expander)
 
 # 6. Undo
-$undoPanel = New-TabPage 'Undo' 'undo' ('Every change is saved as a restore point. Pick one to put it back.')
+$undoPanel = New-TabPage 'Undo' 'undo' ('Changes that can be undone are saved as restore points. Pick one to put it back.')
 Set-MoreInfo $undoPanel.Children[0] 'Settings go back exactly as they were. Cleaned-up files are waiting in your Recycle Bin, and removed apps come back from the Microsoft Store.'
 [void]$undoPanel.Children.Add((New-GlanceBox 'undo'))
 $script:UndoList = New-Object System.Windows.Controls.ListBox
@@ -1744,7 +1744,7 @@ $promise.Border.Margin = Get-Thick '0,18,0,12'
 foreach ($p in @(
         @('Collects', 'nothing - no accounts, tracking or ads', 'No accounts, analytics, telemetry, crash reports, ads, cookies or tracking of any kind.'),
         @('Connects to', 'nothing - links open only when you click them', 'The app makes no network requests at all.'),
-        @('Changes', 'nothing without asking, and keeps a restore point', 'Every change is shown first and confirmed, and settings go into a restore point you can undo.'),
+        @('Changes', 'nothing without asking; reversible changes get a restore point', 'Every change is shown first and confirmed. Reversible settings changes go into a restore point you can undo; irreversible actions are labelled before confirmation.'),
         @('Tidying up', 'uses your Recycle Bin', 'Scheduled tasks are switched off, not deleted. Three things can''t be undone - removing an app (the Microsoft Store has it), uninstalling a brand extra, and deleting a threat for good - and the app says so before you confirm.'),
         @('The code', 'plain text you can read - no installer', 'Plain-text PowerShell you can read line by line, plus a few small pieces of C# - for the graphics card''s and the drive''s own readings, adding up folder sizes, and making shortcuts - compiled on your PC as it runs. It only copies itself to Program Files if you add shortcuts or start it when you sign in.'),
         @('Licence', 'free and open source (MIT)', 'MIT License. Not affiliated with Microsoft, NVIDIA, Intel, AMD, Google or any PC maker.'))) {
