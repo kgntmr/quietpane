@@ -59,7 +59,7 @@ Since 2.1, Quietpane opens with the rights of the account that started it and as
 - Windows builds, domain policies and account types differ in their default owners, inherited permissions and UAC settings. What has been checked, and on what, is in each release's review.
 - Some checks need another account, another PC or another Windows version. They are listed as outstanding until they have been done, never assumed.
 
-For the release-specific engineering review and verification evidence, see the [Quietpane 2.1 Security Engineering Audit](docs/security/audits/2026-09-quietpane-2.1-security-audit.md).
+For the release-specific engineering review and verification evidence, see the [Quietpane 2.1 Internal Security Engineering Review](docs/security/audits/2026-09-quietpane-2.1-security-audit.md).
 
 ## Security reviews
 
@@ -67,7 +67,7 @@ Internal engineering reviews of security-sensitive releases, carried out by the 
 
 | Release | Review | Date |
 |---|---|---|
-| 2.1 | [Quietpane 2.1 Security Engineering Audit](docs/security/audits/2026-09-quietpane-2.1-security-audit.md) | September 2026 |
+| 2.1 | [Quietpane 2.1 Internal Security Engineering Review](docs/security/audits/2026-09-quietpane-2.1-security-audit.md) | September 2026 |
 
 ## Getting a genuine copy
 - The only official source is **[github.com/kgntmr/quietpane](https://github.com/kgntmr/quietpane)**, published by KomodoWorks ([komodoworks.com](https://www.komodoworks.com)).
