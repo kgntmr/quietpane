@@ -9,7 +9,7 @@
 
     Principles
       * Scan is read-only.
-      * Every change is recorded in a restore point and can be undone: your own settings in
+      * Every reversible settings change is recorded in a restore point: your own settings in
         %LOCALAPPDATA%\Quietpane\restore, changes made with administrator rights in the protected
         %ProgramData%\Quietpane\machine\points.
       * Quietpane runs without administrator rights. It asks Windows for them only when a change needs
@@ -19,7 +19,7 @@
       * Quarantined files are moved, never altered, and can be restored byte-for-byte.
       * Other programs' scheduled tasks are disabled, never deleted. (Quietpane's own sign-in task,
         which you switch on in Settings, goes completely when you switch it off.)
-      * Security (Defender, SmartScreen, firewall) and Windows Update are never touched.
+      * Defender, SmartScreen, the firewall and Windows Update are never disabled or weakened. Defender is queried, and is asked to scan or remove a detection only when the user explicitly chooses that.
       * No network requests, no telemetry, no data collection. Everything stays on this PC.
 #>
 
