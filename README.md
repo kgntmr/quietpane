@@ -43,7 +43,7 @@ Quietpane isn't [digitally signed](#code-signing-policy) yet, so Windows asks a 
 | "Do you want to run this file?" | **Run** |
 | "Do you want to allow this app to make changes?" (only when you press something with the shield) | **Yes** |
 
-**You should be suspicious of that**, and of anything else that asks for administrator rights. A signing certificate has been [applied for](#code-signing-policy); until it comes through, the honest answer is that a signature only tells you who published something, not what it does. Quietpane offers a different kind of check as well: there is no `.exe` and no precompiled binary - even its few C# blocks ship as source and are compiled on your PC as it runs - so you can read the whole app before running it, and [check in about a minute](#verify-it-yourself) that it makes no network connections at all.
+**You should be suspicious of that**, and of anything else that asks for administrator rights. Quietpane is not signed; its September 2026 SignPath Foundation application was not approved because the project does not yet have the public-trust and visibility signals the Foundation program requires. The honest answer is that a signature only tells you who published something, not what it does. Quietpane offers a different kind of check as well: there is no `.exe` and no precompiled binary - even its few C# blocks ship as source and are compiled on your PC as it runs - so you can read the whole app before running it, and [check in about a minute](#verify-it-yourself) that it makes no network connections at all.
 
 **Want to look before you leap?** Double-click **Safety scan only**. It changes nothing on your PC and needs no administrator rights - it only looks, tells you what it found, and names the few things only an administrator can see.
 
@@ -185,7 +185,7 @@ That's on purpose. Saying yes to Windows only gives Quietpane the rights; you st
 Versions before 2.1 kept their undo records in a folder other accounts on the PC could change, so Quietpane can't be sure a record is genuine and won't replay one. They stay listed so you can see what was changed, and you can change any of those settings back in Windows yourself.
 
 **Windows says "Unknown publisher". Should I be worried?**
-You should be careful with any unsigned app that can ask for administrator rights, including this one. A certificate has been [applied for](#code-signing-policy). Until it arrives, the thing worth knowing is that Quietpane ships no `.exe` and no precompiled binary - its few C# blocks are source, compiled on your PC as it runs - so you can read the entire app, and confirm in a minute that it never connects to anything. Anyone offering you a Quietpane `.exe` or a "cracked" version is offering you something else; see the [Security Policy](SECURITY.md#getting-a-genuine-copy).
+You should be careful with any unsigned app that can ask for administrator rights, including this one. Quietpane currently has no signing certificate; its September 2026 SignPath Foundation application was not approved at this stage because the project does not yet have the external public-trust and visibility signals the program requires. The thing worth knowing in the meantime is that Quietpane ships no `.exe` and no precompiled binary - its few C# blocks are source, compiled on your PC as it runs - so you can read the entire app, and confirm in a minute that it never connects to anything. Anyone offering you a Quietpane `.exe` or a "cracked" version is offering you something else; see the [Security Policy](SECURITY.md#getting-a-genuine-copy).
 
 **Smart App Control blocked it, or Quietpane says it "can't start on this PC yet".**
 Windows 11 on that PC only runs signed apps, and Quietpane isn't signed yet. There's no safe way round that, so please wait for the signed release rather than turning Smart App Control off - on many PCs it can't be turned back on without resetting Windows. [More in the Security Policy](SECURITY.md#if-your-antivirus-or-windows-blocked-it).
@@ -236,13 +236,13 @@ Quietpane is independent and not affiliated with or endorsed by Microsoft, NVIDI
 
 ## Code Signing Policy
 
-Free code signing provided by [SignPath.io](https://about.signpath.io), certificate by [SignPath Foundation](https://signpath.org).
+Quietpane applied to the [SignPath Foundation](https://signpath.org) program in September 2026. On 3 October 2026, the application was not approved at this stage because the project does not yet show enough external signals of public trust and visibility. SignPath invited the project to reapply after broader community adoption and independent recognition.
 
-> **Status:** applied for in September 2026, waiting for approval. Until then releases are **not signed** and Windows shows "Unknown publisher". This section will say when signed releases start.
+> **Status:** releases are **not signed** and Windows shows "Unknown publisher". Quietpane currently has no active code-signing certificate.
 
-**What gets signed:** only files published on this repository's [Releases](https://github.com/kgntmr/quietpane/releases) page. Every signing request is approved by hand.
+**If signing starts later:** only files published on this repository's [Releases](https://github.com/kgntmr/quietpane/releases) page will be treated as official signed releases. The signing provider and release-provenance path will be documented here before signed releases are published.
 
-**How releases are built today, stated plainly:** GitHub Actions is configured to build and test Quietpane from this repository's source on pushes to `main`, pull requests targeting `main`, and manual runs, and to keep the resulting ZIP as a build artifact. **Release publication is currently performed manually** - the file attached to a release is built on a maintainer's PC and uploaded by hand, so the published download is not yet the artifact Actions produced. Until that changes, treat the SHA256 on the release page and the readable source as the things to check, not the build pipeline. This section will say so when the release pipeline consumes the Actions-built artifact.
+**How releases are built today, stated plainly:** GitHub Actions is configured to build and test Quietpane from this repository's source on pushes to `main`, pull requests targeting `main`, and manual runs, and to keep the resulting ZIP as a build artifact. As of 3 October 2026, Actions jobs are failing before any workflow steps start, so CI is not currently producing a usable artifact. **Release publication is currently performed manually** - the file attached to a release is built on a maintainer's PC and uploaded by hand, so the published download is not the artifact Actions produced. Until that changes, treat the SHA256 on the release page and the readable source as the things to check, not the build pipeline. This section will say so when the release pipeline consumes the Actions-built artifact.
 
 | Role | Members |
 |---|---|
