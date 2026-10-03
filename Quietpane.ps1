@@ -390,11 +390,15 @@ if ($Theme) { $script:ActiveTheme = $Theme; $script:AppearanceChoice = $Theme } 
 [xml]$xaml = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Quietpane - by KomodoWorks" Width="1280" Height="780" MinWidth="930" MinHeight="480"
+        Title="Quietpane - by KomodoWorks" Width="1280" Height="780" MinWidth="791" MinHeight="480"
         WindowStartupLocation="CenterScreen" Background="{DynamicResource Qp_FAF6EC}" FontFamily="Sora, Segoe UI" Foreground="{DynamicResource Qp_0F1B1C}">
   <Window.Resources>
-    <!-- How wide the sidebar of tabs is. The tab strip and the column behind it both use this one value. -->
-    <GridLength x:Key="SidebarWidth">200</GridLength>
+    <!-- The tabs down the left are a rail of icons until the pointer or the keyboard is in it; then it
+         opens to show the names too, over the page rather than pushing it aside.
+         Closed: the gap left of a tab (8), the chosen-tab bar (3), the tab's left padding (11), the
+         icon's column (18), the tab's right padding (12), the gap right of it (8) and the hairline (1). -->
+    <GridLength x:Key="NavRailWidth">61</GridLength>
+    <GridLength x:Key="NavOpenWidth">200</GridLength>
     <SolidColorBrush x:Key="Anchor" Color="#0F1B1C"/>
     <SolidColorBrush x:Key="Accent" Color="#FFB627"/>
     <SolidColorBrush x:Key="Teal" Color="#117A68"/>
@@ -573,7 +577,7 @@ if ($Theme) { $script:ActiveTheme = $Theme; $script:AppearanceChoice = $Theme } 
     <!-- The tabs down the left, the page beside them, and the page's buttons along its bottom-right -->
     <Grid>
       <Grid.ColumnDefinitions>
-        <ColumnDefinition Width="{StaticResource SidebarWidth}"/>
+        <ColumnDefinition Width="{StaticResource NavRailWidth}"/>
         <ColumnDefinition Width="*"/>
       </Grid.ColumnDefinitions>
       <Grid.RowDefinitions>
@@ -588,15 +592,20 @@ if ($Theme) { $script:ActiveTheme = $Theme; $script:AppearanceChoice = $Theme } 
           <ControlTemplate TargetType="TabControl">
             <Grid KeyboardNavigation.TabNavigation="Local" SnapsToDevicePixels="True">
               <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="{StaticResource SidebarWidth}"/>
+                <ColumnDefinition Width="{StaticResource NavRailWidth}"/>
                 <ColumnDefinition Width="*"/>
               </Grid.ColumnDefinitions>
-              <!-- A short window scrolls the tabs rather than cutting the last ones off. -->
-              <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Focusable="False">
-                <TabPanel x:Name="HeaderPanel" IsItemsHost="True" Margin="8,12,9,12" KeyboardNavigation.TabIndex="1"/>
-              </ScrollViewer>
+              <!-- The page always starts beside the closed rail, so opening the rail never moves it. -->
               <Border Grid.Column="1" Background="{TemplateBinding Background}" KeyboardNavigation.TabNavigation="Local" KeyboardNavigation.TabIndex="2">
                 <ContentPresenter x:Name="PART_SelectedContentHost" ContentSource="SelectedContent"/>
+              </Border>
+              <!-- The rail lies over the page; its width is set by Set-NavRail. A short window scrolls the tabs. -->
+              <Border x:Name="NavRail" Grid.ColumnSpan="2" HorizontalAlignment="Left" Panel.ZIndex="1" ClipToBounds="True"
+                      Background="{DynamicResource Qp_FAF6EC}" BorderBrush="{DynamicResource Qp_E6DFCC}" BorderThickness="0,0,1,0"
+                      KeyboardNavigation.TabNavigation="Local" KeyboardNavigation.TabIndex="1">
+                <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Focusable="False">
+                  <TabPanel x:Name="HeaderPanel" IsItemsHost="True" Margin="8,12,8,12"/>
+                </ScrollViewer>
               </Border>
             </Grid>
           </ControlTemplate>
@@ -728,11 +737,38 @@ $script:TabIcons = @{ home = 0xE80F; health = 0xE95E; scan = 0xEA18; privacy = 0
     apps = 0xE71D; cleanup = 0xEDA2; undo = 0xE7A7; about = 0xE713 }
 $script:IconFont = New-Object System.Windows.Media.FontFamily('Segoe Fluent Icons, Segoe MDL2 Assets')
 $script:TabIconBlocks = New-Object System.Collections.ArrayList
+$script:TabWords = New-Object System.Collections.ArrayList
 $script:TabPanels = @{}
 # The tabs stand in one column down the left, so they never wrap and the icons can always stay.
 function Update-TabIcons([double]$Width) {
     $show = 'Visible'
     foreach ($i in $script:TabIconBlocks) { if ($i.Visibility -ne $show) { $i.Visibility = $show } }
+}
+
+# The rail's one state: open while the pointer is over it, or while someone is moving through the tabs
+# with the keyboard; closed otherwise. A click leaves the keyboard on the tab, which on its own does not
+# hold the rail open - only keys do.
+$script:NavOpen = $false
+$script:NavByKeyboard = $false
+function Get-NavRail {
+    if (-not $script:NavRailBorder) { [void]$ui.Tabs.ApplyTemplate(); $script:NavRailBorder = $ui.Tabs.Template.FindName('NavRail', $ui.Tabs) }
+    return $script:NavRailBorder
+}
+function Set-NavRail([bool]$Open) {
+    <# Opens or closes the rail: its width, the names beside the icons, and (closed) each name as a tooltip. #>
+    $rail = Get-NavRail
+    if (-not $rail) { return }
+    $script:NavOpen = $Open
+    $rail.Width = $window.FindResource($(if ($Open) { 'NavOpenWidth' } else { 'NavRailWidth' })).Value
+    $show = if ($Open) { 'Visible' } else { 'Collapsed' }
+    foreach ($w in $script:TabWords) { if ($w.Visibility -ne $show) { $w.Visibility = $show } }
+    foreach ($t in $ui.Tabs.Items) { $t.ToolTip = if ($Open) { $null } else { [System.Windows.Automation.AutomationProperties]::GetName($t) } }
+}
+function Update-NavRail {
+    $rail = Get-NavRail
+    if (-not $rail) { return }
+    $open = $rail.IsMouseOver -or ($rail.IsKeyboardFocusWithin -and $script:NavByKeyboard)
+    if ($open -ne $script:NavOpen) { Set-NavRail $open }
 }
 
 function New-TabPage {
@@ -757,6 +793,7 @@ function New-TabPage {
     $word.Text = $Header
     $word.VerticalAlignment = 'Center'
     [void]$head.Children.Add($word)
+    [void]$script:TabWords.Add($word)
     $tab.Header = $head
     [System.Windows.Automation.AutomationProperties]::SetName($tab, $Header)
     $tab.Tag = $Key
@@ -5050,6 +5087,18 @@ $window.Add_Closing({
 })
 
 $ui.Tabs.SelectedIndex = 0
+$navRail = Get-NavRail
+if ($navRail) {
+    $navRail.Add_MouseEnter({ Update-NavRail })
+    $navRail.Add_MouseLeave({ Update-NavRail })
+    $navRail.Add_PreviewKeyDown({ $script:NavByKeyboard = $true; Update-NavRail })
+    $navRail.Add_PreviewMouseDown({ $script:NavByKeyboard = $false })
+    $navRail.Add_IsKeyboardFocusWithinChanged({
+        $script:NavByKeyboard = [System.Windows.Input.InputManager]::Current.MostRecentInputDevice -is [System.Windows.Input.KeyboardDevice]
+        Update-NavRail
+    })
+}
+Set-NavRail $false
 if ($script:Elevated -and -not $SelfTest) {
     Show-ElevatedNote
     Select-Tab $script:Asked.Tab
@@ -5761,30 +5810,49 @@ function Test-HealthLayout {
 
 function Test-ShellLayout {
     <#
-        The window's frame at its usual and narrowest widths, on a tab with Apply: the tabs in one column
-        down the sidebar, none on top of another; every page left of nothing but the sidebar; and the
-        buttons in the page's own column, every one of them inside the window.
+        The window's frame at its usual and narrowest widths, on a tab with Apply. Closed, the rail is its
+        set width, icons only, with the chosen tab's bar showing. Open, it reaches its set width with the
+        names showing, inside the window - and the page under it has not moved or changed width. Either
+        way the tabs stay one column, and every button sits in the page's column, inside the window.
     #>
     $was = $ui.Tabs.SelectedIndex
     $wasWidth = $window.Width
     Select-Tab 'privacy'
-    $sidebar = $window.FindResource('SidebarWidth').Value
+    $closedWidth = $window.FindResource('NavRailWidth').Value
+    $openWidth = $window.FindResource('NavOpenWidth').Value
+    $rail = Get-NavRail
     $result = foreach ($w in 1280, $window.MinWidth) {
+        Set-NavRail $false
+        $root = Set-TestWidth $w
+        $page = $ui.Tabs.SelectedItem.Content
+        $pageAt = $page.TranslatePoint([System.Windows.Point]::new(0, 0), $root).X
+        $pageWide = $page.ActualWidth
+        $sel = $ui.Tabs.SelectedItem
+        $bar = $sel.Template.FindName('Bd', $sel)
+        $closed = ([math]::Abs($rail.ActualWidth - $closedWidth) -lt 0.5) -and
+            (@($script:TabWords | Where-Object { $_.Visibility -eq 'Visible' }).Count -eq 0) -and
+            (@($script:TabIconBlocks | Where-Object { $_.Visibility -ne 'Visible' -or $_.TranslatePoint([System.Windows.Point]::new($_.ActualWidth, 0), $root).X -gt $closedWidth }).Count -eq 0) -and
+            ($bar.BorderThickness.Left -gt 0) -and ($bar.TranslatePoint([System.Windows.Point]::new(0, 0), $root).X -lt $closedWidth) -and
+            ([math]::Abs($pageAt - $closedWidth) -lt 0.5)
+        $bar2 = $ui.AdvancedButtons.TranslatePoint([System.Windows.Point]::new(0, 0), $root).X
+        $buttons = ($bar2 -ge $closedWidth) -and (@(foreach ($b in $ui.BtnRecommended, $ui.BtnNone, $ui.BtnPreview, $ui.BtnApply) {
+            $tl = $b.TranslatePoint([System.Windows.Point]::new(0, 0), $root)
+            ($tl.X -ge $closedWidth) -and ($tl.X + $b.ActualWidth -le $w + 0.5) -and ($b.ActualWidth -gt 0)
+        }) -notcontains $false)
+        Set-NavRail $true
         $root = Set-TestWidth $w
         $spots = @($ui.Tabs.Items | ForEach-Object { $_.TranslatePoint([System.Windows.Point]::new(0, 0), $root) })
         $column = (@($spots | ForEach-Object { [math]::Round($_.X) } | Sort-Object -Unique).Count -eq 1) -and
             (@($spots | ForEach-Object { [math]::Round($_.Y) } | Sort-Object -Unique).Count -eq $ui.Tabs.Items.Count)
-        $inSidebar = @($ui.Tabs.Items | Where-Object { $_.TranslatePoint([System.Windows.Point]::new($_.ActualWidth, 0), $root).X -gt $sidebar }).Count -eq 0
-        $page = $ui.Tabs.SelectedItem.Content
-        $pageLeft = $page.TranslatePoint([System.Windows.Point]::new(0, 0), $root).X
-        $barLeft = $ui.AdvancedButtons.TranslatePoint([System.Windows.Point]::new(0, 0), $root).X
-        $inWindow = @(foreach ($b in $ui.BtnRecommended, $ui.BtnNone, $ui.BtnPreview, $ui.BtnApply) {
-            $tl = $b.TranslatePoint([System.Windows.Point]::new(0, 0), $root)
-            ($tl.X -ge $sidebar) -and ($tl.X + $b.ActualWidth -le $w + 0.5) -and ($b.ActualWidth -gt 0)
-        }) -notcontains $false
-        '{0}: tabs in one column {1}, tabs in the sidebar {2}, page beside it {3}, buttons in the page column and the window {4}' -f $w,
-            $column, $inSidebar, ([math]::Abs($pageLeft - $sidebar) -lt 1), (($barLeft -ge $sidebar) -and $inWindow)
+        $open = ([math]::Abs($rail.ActualWidth - $openWidth) -lt 0.5) -and
+            (@($script:TabWords | Where-Object { $_.Visibility -ne 'Visible' }).Count -eq 0) -and
+            ($rail.TranslatePoint([System.Windows.Point]::new($rail.ActualWidth, 0), $root).X -le $w)
+        $still = ([math]::Abs($page.TranslatePoint([System.Windows.Point]::new(0, 0), $root).X - $pageAt) -lt 0.5) -and ([math]::Abs($page.ActualWidth - $pageWide) -lt 0.5)
+        Set-NavRail $false
+        '{0}: closed rail {1}, open rail {2}, page still {3}, tabs in one column {4}, buttons in the page column and the window {5}' -f $w,
+            $closed, $open, $still, $column, $buttons
     }
+    Set-NavRail $false
     $window.Width = $wasWidth
     Update-TabIcons $wasWidth
     $ui.Tabs.SelectedIndex = $was

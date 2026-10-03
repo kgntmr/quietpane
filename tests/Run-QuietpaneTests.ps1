@@ -1929,11 +1929,12 @@ Test-Case 'the live tiles rank what matters, merge the busy list and never draw 
 }
 Test-Case 'Health keeps two columns when there is room, and puts the list underneath when there is not' {
     # At the usual width, a middle one and the narrowest the window allows: nothing cut off.
-    $cardsOut -match 'health layout: 1280: side by side, fits True; 1100: list underneath, fits True; 930: list underneath, fits True'
+    $cardsOut -match 'health layout: 1280: side by side, fits True; 1100: side by side, fits True; 791: list underneath, fits True'
 }
-Test-Case 'the tabs stand in one column down the sidebar, and the page and its buttons beside it' {
-    # At the usual width and the narrowest: no tab wraps or overlaps, and Apply stays inside the window.
-    $cardsOut -match 'shell layout: 1280: tabs in one column True, tabs in the sidebar True, page beside it True, buttons in the page column and the window True; 930: tabs in one column True, tabs in the sidebar True, page beside it True, buttons in the page column and the window True'
+Test-Case 'the tabs are a rail of icons that opens over the page, and the page and its buttons stay put' {
+    # At the usual width and the narrowest: closed and open widths, names hidden and shown, the chosen
+    # tab's bar in view, the open rail inside the window, the page unmoved, Apply inside the window.
+    $cardsOut -match 'shell layout: 1280: closed rail True, open rail True, page still True, tabs in one column True, buttons in the page column and the window True; 791: closed rail True, open rail True, page still True, tabs in one column True, buttons in the page column and the window True'
 }
 Test-Case 'the Health list shows what the PC shares, and leaves out or says "not shared" for what it does not' {
     # Made-up PCs drawn into the real window: everything shared, nothing shared, offline, and Fahrenheit.
