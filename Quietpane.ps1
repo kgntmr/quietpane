@@ -390,7 +390,7 @@ if ($Theme) { $script:ActiveTheme = $Theme; $script:AppearanceChoice = $Theme } 
 [xml]$xaml = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Quietpane - by KomodoWorks" Width="1100" Height="780" MinWidth="760" MinHeight="480"
+        Title="Quietpane - by KomodoWorks" Width="1280" Height="780" MinWidth="760" MinHeight="480"
         WindowStartupLocation="CenterScreen" Background="{DynamicResource Qp_FAF6EC}" FontFamily="Sora, Segoe UI" Foreground="{DynamicResource Qp_0F1B1C}">
   <Window.Resources>
     <SolidColorBrush x:Key="Anchor" Color="#0F1B1C"/>
@@ -493,8 +493,8 @@ if ($Theme) { $script:ActiveTheme = $Theme; $script:AppearanceChoice = $Theme } 
       <Setter Property="Template">
         <Setter.Value>
           <ControlTemplate TargetType="TabItem">
-            <Border x:Name="Bd" Background="Transparent" BorderBrush="Transparent" BorderThickness="0,0,0,3" Padding="14,9,14,7" Margin="0,0,2,0">
-              <ContentPresenter ContentSource="Header" HorizontalAlignment="Center"/>
+            <Border x:Name="Bd" Background="Transparent" BorderBrush="Transparent" BorderThickness="3,0,0,0" Padding="11,9,14,9" Margin="0,0,0,2" MinWidth="176">
+              <ContentPresenter ContentSource="Header" HorizontalAlignment="Left"/>
             </Border>
             <ControlTemplate.Triggers>
               <Trigger Property="IsSelected" Value="True">
@@ -587,7 +587,7 @@ if ($Theme) { $script:ActiveTheme = $Theme; $script:AppearanceChoice = $Theme } 
         <RowDefinition Height="6"/>
         <RowDefinition x:Name="LogRow" Height="0"/>
       </Grid.RowDefinitions>
-      <TabControl x:Name="Tabs" Margin="14,12,14,4" Padding="0" Background="{DynamicResource Qp_FFFDF8}" BorderBrush="{DynamicResource Qp_E6DFCC}" BorderThickness="1"/>
+      <TabControl x:Name="Tabs" TabStripPlacement="Left" Margin="14,12,14,4" Padding="0" Background="{DynamicResource Qp_FFFDF8}" BorderBrush="{DynamicResource Qp_E6DFCC}" BorderThickness="1"/>
       <GridSplitter x:Name="LogSplitter" Grid.Row="1" HorizontalAlignment="Stretch" Background="Transparent" Visibility="Collapsed"/>
       <TextBox x:Name="LogBox" Grid.Row="2" Margin="14,0,14,12" IsReadOnly="True" FontFamily="Consolas" FontSize="12"
                AutomationProperties.Name="Details: what Quietpane has done"
@@ -705,10 +705,9 @@ $script:TabIcons = @{ home = 0xE80F; health = 0xE95E; scan = 0xEA18; privacy = 0
 $script:IconFont = New-Object System.Windows.Media.FontFamily('Segoe Fluent Icons, Segoe MDL2 Assets')
 $script:TabIconBlocks = New-Object System.Collections.ArrayList
 $script:TabPanels = @{}
-# On a narrow window the icons step aside, so the nine tabs stay on one row instead of wrapping onto two
-# (which WPF does by shuffling the rows - the tab you are on jumps to the bottom).
+# The tabs stand in one column down the left, so they never wrap and the icons can always stay.
 function Update-TabIcons([double]$Width) {
-    $show = if ($Width -ge 960) { 'Visible' } else { 'Collapsed' }
+    $show = 'Visible'
     foreach ($i in $script:TabIconBlocks) { if ($i.Visibility -ne $show) { $i.Visibility = $show } }
 }
 
@@ -744,7 +743,17 @@ function New-TabPage {
     $sp.Margin = Get-Thick '20,16,20,16'
     if ($Intro) { [void]$sp.Children.Add((New-Text $Intro 13 'Normal' '#4B5B5C' '0,0,0,10')) }
     $sv.Content = $sp
-    $tab.Content = $sv
+    # The page's name over it, outside the scrolling part, as the tab's own word. Home and Health open
+    # with their own answer instead. It sits above the page so the page's first line stays its first.
+    if ($Key -in 'home', 'health') { $tab.Content = $sv } else {
+        $page = New-Object System.Windows.Controls.DockPanel
+        $title = New-Text $Header 20 'SemiBold' '#0F1B1C' '20,16,20,0' 'Fraunces, Georgia'
+        [System.Windows.Controls.DockPanel]::SetDock($title, 'Top')
+        [void]$page.Children.Add($title)
+        $sp.Margin = Get-Thick '20,6,20,16'
+        [void]$page.Children.Add($sv)
+        $tab.Content = $page
+    }
     [void]$ui.Tabs.Items.Add($tab)
     $script:TabPanels[$Key] = $sp
     return $sp
@@ -5656,7 +5665,7 @@ function Test-HealthLayout {
     $was = $ui.Tabs.SelectedIndex
     $ui.Tabs.SelectedIndex = 1
     $wasWidth = $window.Width
-    $result = foreach ($w in 1100, 760) {
+    $result = foreach ($w in 1280, 760) {
         $window.Width = $w
         Update-TabIcons $w
         $root = $window.Content
@@ -5667,8 +5676,8 @@ function Test-HealthLayout {
         $fits = ($healthLeft.ActualWidth + $healthLeft.Margin.Right -le $sv.ViewportWidth) -and ($healthRight.ActualWidth -le $sv.ViewportWidth)
         $side = ($at.X -gt 0 -and [math]::Abs($at.Y) -lt 1)
         $under = ($at.Y -ge $healthLeft.ActualHeight - 1)
-        $tabRow = @($ui.Tabs.Items | ForEach-Object { [math]::Round($_.TranslatePoint([System.Windows.Point]::new(0, 0), $ui.Tabs).Y) } | Sort-Object -Unique).Count -eq 1
-        '{0}: {1}, fits {2}, tabs on one row {3}' -f $w, $(if ($side) { 'side by side' } elseif ($under) { 'list underneath' } else { 'overlapping' }), $fits, $tabRow
+        $tabRow = @($ui.Tabs.Items | ForEach-Object { [math]::Round($_.TranslatePoint([System.Windows.Point]::new(0, 0), $ui.Tabs).X) } | Sort-Object -Unique).Count -eq 1
+        '{0}: {1}, fits {2}, tabs in one column {3}' -f $w, $(if ($side) { 'side by side' } elseif ($under) { 'list underneath' } else { 'overlapping' }), $fits, $tabRow
     }
     $window.Width = $wasWidth
     Update-TabIcons $wasWidth
