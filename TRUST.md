@@ -116,7 +116,7 @@ Real-PC checks are still outstanding for:
 
 Quietpane is **not digitally signed yet**.
 
-Windows can therefore show **Unknown publisher**. The SignPath application is pending.
+Windows can therefore show **Unknown publisher**. Quietpane's September 2026 SignPath Foundation application was not approved at this stage because the project does not yet have enough external public-trust and visibility signals for the Foundation program. There is currently no active signing certificate.
 
 Do not turn off SmartScreen, Smart App Control or antivirus protection just to run Quietpane.
 

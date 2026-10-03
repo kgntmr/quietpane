@@ -121,4 +121,4 @@ Quietpane is **not signed yet**, it can ask for administrator rights, and it cha
 
 4. Keep a note of the vendor, the detection name and the reply. Code is never changed to hide from a scanner - if a detection points at something Quietpane genuinely does badly, that gets fixed openly.
 
-**Signing is the real fix.** A signature from the [SignPath Foundation](README.md#code-signing-policy) certificate is the first thing SmartScreen and Smart App Control look for; SmartScreen also builds trust in a signed app as more people run it. Two things stand in the way: the SignPath application (pending), and GitHub Actions, which SignPath signs from and which is currently disabled at the account level.
+**Signing would improve publisher identity and Windows trust signals.** Quietpane currently has no signing certificate. Its September 2026 [SignPath Foundation](README.md#code-signing-policy) application was not approved at this stage because the project does not yet show enough external public-trust and visibility signals. As of 3 October 2026, GitHub Actions jobs are also failing before any workflow steps start, so there is no functioning CI-backed signing path today.
