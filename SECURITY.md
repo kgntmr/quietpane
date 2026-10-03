@@ -102,10 +102,10 @@ Quietpane is **not signed yet**, it can ask for administrator rights, and it cha
 | What you see | What it means | What to do |
 |---|---|---|
 | **"Windows protected your PC"** (blue box) | SmartScreen hasn't seen enough people run an unsigned app yet. It isn't a detection. | **More info** > **Run anyway**, once you've checked the download (below). |
-| **"Smart App Control blocked..."**, or Quietpane says *"can't start on this PC yet"* | Windows 11 on this PC only runs signed apps. There is no way round it for an unsigned app, and there shouldn't be. | Wait for the signed release. **Please don't turn Smart App Control off for Quietpane**: on many PCs it can't be turned back on without resetting Windows. |
+| **"Smart App Control blocked..."**, or Quietpane says *"can't start on this PC yet"* | Windows 11 on this PC only runs signed apps. There is no way round it for an unsigned app, and there shouldn't be. | Quietpane cannot run there while it is unsigned. **Please don't turn Smart App Control off for Quietpane**: on many PCs it can't be turned back on without resetting Windows. If signed releases start later, the Releases page will say so. |
 | **Your antivirus quarantined or deleted it** | A heuristic - a rule about what files *do*, not a known threat. See [Scanning it yourself](#scanning-it-yourself). | Check the download, then report it to your antivirus as a false positive (below). |
 
-**Never add an exception or turn your protection off because of Quietpane.** If you can't run it with your protection on, wait for the signed release, which is what fixes most of this.
+**Never add an exception or turn your protection off because of Quietpane.** If you can't run it with your protection on, don't weaken that protection for Quietpane. A future signed release would change some of these Windows trust checks, but there is no active signing certificate today.
 
 **Check the download first.** Compare its SHA256 with the release page ([how](#check-that-your-download-is-genuine)); if you like, read the code ([Verify it yourself](README.md#verify-it-yourself)).
 
@@ -121,4 +121,4 @@ Quietpane is **not signed yet**, it can ask for administrator rights, and it cha
 
 4. Keep a note of the vendor, the detection name and the reply. Code is never changed to hide from a scanner - if a detection points at something Quietpane genuinely does badly, that gets fixed openly.
 
-**Signing would improve publisher identity and Windows trust signals.** Quietpane currently has no signing certificate. Its September 2026 [SignPath Foundation](README.md#code-signing-policy) application was not approved at this stage because the project does not yet show enough external public-trust and visibility signals. As of 3 October 2026, GitHub Actions jobs are also failing before any workflow steps start, so there is no functioning CI-backed signing path today.
+**Signing would improve publisher identity and Windows trust signals.** Quietpane currently has no signing certificate. Its September 2026 [SignPath Foundation](README.md#code-signing-policy) application was not approved at this stage because the project does not yet show enough external public-trust and visibility signals. A CI-backed release workflow is now present for future tags, but as of 3 October 2026 Actions jobs are failing before any workflow steps start, so that path has not yet produced a verified public release or a functioning signing path.

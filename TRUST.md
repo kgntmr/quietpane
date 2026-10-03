@@ -124,9 +124,9 @@ Do not turn off SmartScreen, Smart App Control or antivirus protection just to r
 
 The public v2.1.0 ZIP was built on the maintainer's PC and uploaded manually.
 
-GitHub Actions can build a ZIP too, but the published v2.1.0 download is **not** that CI artifact.
+GitHub Actions can build a deterministic ZIP, but the published v2.1.0 download is **not** that CI artifact. A release workflow now exists for future version tags: after the same checks pass, it attaches the Actions-built ZIP, checksum and provenance record to a draft release for human review. As of 3 October 2026, Actions jobs are failing before any workflow steps start, so that future-release path has not yet produced a public release.
 
-The ZIP build is also not byte-for-byte reproducible yet because ZIP timestamps can differ between builds.
+The published v2.1.0 ZIP is not byte-for-byte reproducible from a fresh checkout because that older build path kept source timestamps in the archive. The new build script fixes entry order and metadata and self-checks timestamp independence for future releases.
 
 Those are things we want to improve, not things we pretend are already solved.
 
