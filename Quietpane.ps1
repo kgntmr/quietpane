@@ -390,9 +390,11 @@ if ($Theme) { $script:ActiveTheme = $Theme; $script:AppearanceChoice = $Theme } 
 [xml]$xaml = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Quietpane - by KomodoWorks" Width="1280" Height="780" MinWidth="760" MinHeight="480"
+        Title="Quietpane - by KomodoWorks" Width="1280" Height="780" MinWidth="930" MinHeight="480"
         WindowStartupLocation="CenterScreen" Background="{DynamicResource Qp_FAF6EC}" FontFamily="Sora, Segoe UI" Foreground="{DynamicResource Qp_0F1B1C}">
   <Window.Resources>
+    <!-- How wide the sidebar of tabs is. The tab strip and the column behind it both use this one value. -->
+    <GridLength x:Key="SidebarWidth">200</GridLength>
     <SolidColorBrush x:Key="Anchor" Color="#0F1B1C"/>
     <SolidColorBrush x:Key="Accent" Color="#FFB627"/>
     <SolidColorBrush x:Key="Teal" Color="#117A68"/>
@@ -493,7 +495,7 @@ if ($Theme) { $script:ActiveTheme = $Theme; $script:AppearanceChoice = $Theme } 
       <Setter Property="Template">
         <Setter.Value>
           <ControlTemplate TargetType="TabItem">
-            <Border x:Name="Bd" Background="Transparent" BorderBrush="Transparent" BorderThickness="3,0,0,0" Padding="11,9,14,9" Margin="0,0,0,2" MinWidth="176">
+            <Border x:Name="Bd" Background="Transparent" BorderBrush="Transparent" BorderThickness="3,0,0,0" Padding="11,10,12,10" Margin="0,0,0,2">
               <ContentPresenter ContentSource="Header" HorizontalAlignment="Left"/>
             </Border>
             <ControlTemplate.Triggers>
@@ -560,36 +562,58 @@ if ($Theme) { $script:ActiveTheme = $Theme; $script:AppearanceChoice = $Theme } 
       </TextBlock>
     </Border>
 
-    <!-- Action bar -->
+    <!-- Status line: what Quietpane is doing, across the whole window -->
     <Border DockPanel.Dock="Bottom" Background="{DynamicResource Qp_FFFDF8}" BorderBrush="{DynamicResource Qp_E6DFCC}" BorderThickness="0,1,0,0" Padding="16,10">
-      <Grid>
-        <Grid.ColumnDefinitions>
-          <ColumnDefinition Width="*"/>
-          <ColumnDefinition Width="Auto"/>
-        </Grid.ColumnDefinitions>
-        <TextBlock x:Name="StatusLine" VerticalAlignment="Center" Foreground="{DynamicResource Qp_4B5B5C}" TextTrimming="CharacterEllipsis"
-                   AutomationProperties.LiveSetting="Polite">
-          <Run x:Name="Status" Text="Starting..."/><Run Text="    "/><Hyperlink x:Name="LinkDetails" Foreground="{DynamicResource Qp_117A68}">Show details</Hyperlink>
-        </TextBlock>
-        <StackPanel x:Name="AdvancedButtons" Grid.Column="1" Orientation="Horizontal">
-          <Button x:Name="BtnRecommended" Content="Select recommended" Margin="0,0,8,0"/>
-          <Button x:Name="BtnNone" Content="Select none" Margin="0,0,8,0"/>
-          <Button x:Name="BtnPreview" Content="Preview (no changes)" Margin="0,0,8,0"/>
-          <Button x:Name="BtnApply" Content="Apply selected" Style="{StaticResource Primary}" Padding="20,7"/>
-        </StackPanel>
-      </Grid>
+      <TextBlock x:Name="StatusLine" VerticalAlignment="Center" Foreground="{DynamicResource Qp_4B5B5C}" TextTrimming="CharacterEllipsis"
+                 AutomationProperties.LiveSetting="Polite">
+        <Run x:Name="Status" Text="Starting..."/><Run Text="    "/><Hyperlink x:Name="LinkDetails" Foreground="{DynamicResource Qp_117A68}">Show details</Hyperlink>
+      </TextBlock>
     </Border>
 
-    <!-- Content -->
+    <!-- The tabs down the left, the page beside them, and the page's buttons along its bottom-right -->
     <Grid>
+      <Grid.ColumnDefinitions>
+        <ColumnDefinition Width="{StaticResource SidebarWidth}"/>
+        <ColumnDefinition Width="*"/>
+      </Grid.ColumnDefinitions>
       <Grid.RowDefinitions>
         <RowDefinition Height="*"/>
+        <RowDefinition Height="Auto"/>
         <RowDefinition Height="6"/>
         <RowDefinition x:Name="LogRow" Height="0"/>
       </Grid.RowDefinitions>
-      <TabControl x:Name="Tabs" TabStripPlacement="Left" Margin="14,12,14,4" Padding="0" Background="{DynamicResource Qp_FFFDF8}" BorderBrush="{DynamicResource Qp_E6DFCC}" BorderThickness="1"/>
-      <GridSplitter x:Name="LogSplitter" Grid.Row="1" HorizontalAlignment="Stretch" Background="Transparent" Visibility="Collapsed"/>
-      <TextBox x:Name="LogBox" Grid.Row="2" Margin="14,0,14,12" IsReadOnly="True" FontFamily="Consolas" FontSize="12"
+      <Border Grid.RowSpan="2" Background="{DynamicResource Qp_FAF6EC}" BorderBrush="{DynamicResource Qp_E6DFCC}" BorderThickness="0,0,1,0"/>
+      <TabControl x:Name="Tabs" Grid.ColumnSpan="2" TabStripPlacement="Left" Padding="0" Background="{DynamicResource Qp_FFFDF8}" BorderThickness="0">
+        <TabControl.Template>
+          <ControlTemplate TargetType="TabControl">
+            <Grid KeyboardNavigation.TabNavigation="Local" SnapsToDevicePixels="True">
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="{StaticResource SidebarWidth}"/>
+                <ColumnDefinition Width="*"/>
+              </Grid.ColumnDefinitions>
+              <!-- A short window scrolls the tabs rather than cutting the last ones off. -->
+              <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Focusable="False">
+                <TabPanel x:Name="HeaderPanel" IsItemsHost="True" Margin="8,12,9,12" KeyboardNavigation.TabIndex="1"/>
+              </ScrollViewer>
+              <Border Grid.Column="1" Background="{TemplateBinding Background}" KeyboardNavigation.TabNavigation="Local" KeyboardNavigation.TabIndex="2">
+                <ContentPresenter x:Name="PART_SelectedContentHost" ContentSource="SelectedContent"/>
+              </Border>
+            </Grid>
+          </ControlTemplate>
+        </TabControl.Template>
+      </TabControl>
+      <!-- Hidden along with its buttons on the tabs that have none. The buttons wrap rather than run off a narrow window. -->
+      <Border Grid.Row="1" Grid.Column="1" Background="{DynamicResource Qp_FFFDF8}" BorderBrush="{DynamicResource Qp_E6DFCC}" BorderThickness="0,1,0,0" Padding="20,7"
+              Visibility="{Binding Visibility, ElementName=AdvancedButtons}">
+        <WrapPanel x:Name="AdvancedButtons" HorizontalAlignment="Right">
+          <Button x:Name="BtnRecommended" Content="Select recommended" Margin="0,3,8,3"/>
+          <Button x:Name="BtnNone" Content="Select none" Margin="0,3,8,3"/>
+          <Button x:Name="BtnPreview" Content="Preview (no changes)" Margin="0,3,8,3"/>
+          <Button x:Name="BtnApply" Content="Apply selected" Style="{StaticResource Primary}" Padding="20,7" Margin="0,3,0,3"/>
+        </WrapPanel>
+      </Border>
+      <GridSplitter x:Name="LogSplitter" Grid.Row="2" Grid.ColumnSpan="2" HorizontalAlignment="Stretch" Background="Transparent" Visibility="Collapsed"/>
+      <TextBox x:Name="LogBox" Grid.Row="3" Grid.ColumnSpan="2" Margin="14,0,14,12" IsReadOnly="True" FontFamily="Consolas" FontSize="12"
                AutomationProperties.Name="Details: what Quietpane has done"
                VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" TextWrapping="NoWrap"
                Background="#0F1B1C" Foreground="#FAF6EC" BorderThickness="0" Padding="10,8"/>
@@ -609,8 +633,8 @@ $window.Add_SourceInitialized({ Set-TitleBarTheme })
 # the buttons along the bottom out of sight.
 try {
     $work = [System.Windows.SystemParameters]::WorkArea
-    if ($work.Width -gt 200 -and $window.Width -gt ($work.Width - 40)) { $window.Width = [math]::Max(760, $work.Width - 40) }
-    if ($work.Height -gt 200 -and $window.Height -gt ($work.Height - 40)) { $window.Height = [math]::Max(480, $work.Height - 40) }
+    if ($work.Width -gt 200 -and $window.Width -gt ($work.Width - 40)) { $window.Width = [math]::Max($window.MinWidth, $work.Width - 40) }
+    if ($work.Height -gt 200 -and $window.Height -gt ($work.Height - 40)) { $window.Height = [math]::Max($window.MinHeight, $work.Height - 40) }
 } catch { }
 
 $window.Add_SizeChanged({ Update-TabIcons $window.ActualWidth })
@@ -723,7 +747,9 @@ function New-TabPage {
         $icon.FontFamily = $script:IconFont
         $icon.FontSize = 15
         $icon.VerticalAlignment = 'Center'
-        $icon.Margin = Get-Thick '0,1,7,0'
+        # A fixed column, so every name down the sidebar starts at the same place.
+        $icon.Width = 18
+        $icon.Margin = Get-Thick '0,1,10,0'
         [void]$head.Children.Add($icon)
         [void]$script:TabIconBlocks.Add($icon)
     }
@@ -743,14 +769,15 @@ function New-TabPage {
     $sp.Margin = Get-Thick '20,16,20,16'
     if ($Intro) { [void]$sp.Children.Add((New-Text $Intro 13 'Normal' '#4B5B5C' '0,0,0,10')) }
     $sv.Content = $sp
-    # The page's name over it, outside the scrolling part, as the tab's own word. Home and Health open
-    # with their own answer instead. It sits above the page so the page's first line stays its first.
+    # The page's name over it, outside the scrolling part, in the heading Settings always had; Home and
+    # Health open with their own answer instead, on the same left edge. The title sits above the page,
+    # not in it, so each page's first line is still its own.
     if ($Key -in 'home', 'health') { $tab.Content = $sv } else {
         $page = New-Object System.Windows.Controls.DockPanel
-        $title = New-Text $Header 20 'SemiBold' '#0F1B1C' '20,16,20,0' 'Fraunces, Georgia'
+        $title = New-Text $Header 24 'SemiBold' '#0F1B1C' '20,16,20,0' 'Fraunces, Georgia'
         [System.Windows.Controls.DockPanel]::SetDock($title, 'Top')
         [void]$page.Children.Add($title)
-        $sp.Margin = Get-Thick '20,6,20,16'
+        $sp.Margin = Get-Thick '20,4,20,16'
         [void]$page.Children.Add($sv)
         $tab.Content = $page
     }
@@ -880,6 +907,19 @@ function New-Gauge([string]$Title, [double]$Size = 136) {
     return $tile
 }
 
+function New-MetricCard($Child, [double]$Width = 0) {
+    <# The bordered card a reading stands in, on Home and on Health alike. #>
+    $b = New-Object System.Windows.Controls.Border
+    if ($Width -gt 0) { $b.Width = $Width }
+    $b.Padding = Get-Thick '14,12'
+    $b.Margin = Get-Thick '0,0,12,12'
+    $b.Background = Get-Brush '#FFFDF8'
+    $b.BorderBrush = Get-Brush '#E6DFCC'
+    $b.BorderThickness = Get-Thick '1'
+    $b.Child = $Child
+    return $b
+}
+
 function New-BigNumber([string]$Title, [double]$Width = 214, [switch]$Card) {
     <#
         One big number and one bar, for something that fills up. With -Card it stands on its own in a
@@ -916,15 +956,7 @@ function New-BigNumber([string]$Title, [double]$Width = 214, [switch]$Card) {
     [void]$sp.Children.Add($track)
     $outer = $sp
     if ($Card) {
-        $b = New-Object System.Windows.Controls.Border
-        $b.Width = $Width + 28
-        $b.Padding = Get-Thick '14,12'
-        $b.Margin = Get-Thick '0,0,12,12'
-        $b.Background = Get-Brush '#FFFDF8'
-        $b.BorderBrush = Get-Brush '#E6DFCC'
-        $b.BorderThickness = Get-Thick '1'
-        $b.Child = $sp
-        $outer = $b
+        $outer = New-MetricCard $sp ($Width + 28)
     } else {
         $sp.Width = $Width
         $sp.Margin = Get-Thick '0,0,16,16'
@@ -1281,7 +1313,7 @@ foreach ($b in $btnRestart, $btnUndoAll, $btnShowDetails) { $b.Margin = Get-Thic
 [void]$resultStack.Children.Add($resultButtons)
 $script:ResultPanel.Child = $resultStack
 [void]$homePanel.Children.Add($script:ResultPanel)
-$homeRather = New-Text 'Prefer to choose each item yourself? Use the tabs above - Preview changes nothing.' 12.5 'Normal' '#4B5B5C' '0,20,0,0'
+$homeRather = New-Text 'Prefer to choose each item yourself? Use the tabs on the left - Preview changes nothing.' 12.5 'Normal' '#4B5B5C' '0,20,0,0'
 [void]$homePanel.Children.Add($homeRather)
 
 # The order people read Home in: how things stand, the one button (and what it just did), then space.
@@ -1312,20 +1344,31 @@ $script:VerdictText.VerticalAlignment = 'Center'
 [void]$healthPanel.Children.Add($verdictRow)
 
 $healthColumns = New-Object System.Windows.Controls.WrapPanel
+# The readings column is two cards wide: a 214-wide reading, the card's padding and border, a 12 gap.
 $healthLeft = New-Object System.Windows.Controls.StackPanel
-$healthLeft.Width = 460
-$healthLeft.Margin = Get-Thick '0,0,28,0'
-# How hard the two chips are working: rings. What fills up: one big number and a bar each.
-$gaugeRow = New-Object System.Windows.Controls.WrapPanel
+$healthLeft.Width = 500
+$healthLeft.Margin = Get-Thick '0,0,24,0'
+# How hard the two chips are working: rings. What fills up: one big number and a bar each. Each in its
+# own card, two by two; the cards in a row share their height.
 $script:TileCpu = New-Gauge 'PROCESSOR'
 $script:TileGpu = New-Gauge 'GRAPHICS'
-$numberRow = New-Object System.Windows.Controls.WrapPanel
 $script:TileMemory = New-BigNumber 'MEMORY'
 $script:TileDisk = New-BigNumber 'THE DRIVE'
-foreach ($t in $script:TileCpu, $script:TileGpu) { [void]$gaugeRow.Children.Add($t.Border) }
-foreach ($t in $script:TileMemory, $script:TileDisk) { [void]$numberRow.Children.Add($t.Border) }
-[void]$healthLeft.Children.Add($gaugeRow)
-[void]$healthLeft.Children.Add($numberRow)
+$readingCards = New-Object System.Windows.Controls.Grid
+foreach ($i in 0, 1) {
+    $cd = New-Object System.Windows.Controls.ColumnDefinition; $cd.Width = $script:GridLength.ConvertFromString('Auto'); [void]$readingCards.ColumnDefinitions.Add($cd)
+    $rd = New-Object System.Windows.Controls.RowDefinition; $rd.Height = $script:GridLength.ConvertFromString('Auto'); [void]$readingCards.RowDefinitions.Add($rd)
+}
+$i = 0
+foreach ($t in $script:TileCpu, $script:TileGpu, $script:TileMemory, $script:TileDisk) {
+    $t.Border.Margin = Get-Thick '0'
+    $card = New-MetricCard $t.Border ($t.Border.Width + 30)
+    if ($i % 2) { $card.Margin = Get-Thick '0,0,0,12' }
+    [System.Windows.Controls.Grid]::SetRow($card, [math]::Floor($i / 2)); [System.Windows.Controls.Grid]::SetColumn($card, $i % 2)
+    [void]$readingCards.Children.Add($card)
+    $i++
+}
+[void]$healthLeft.Children.Add($readingCards)
 # The memory number carries the "freed just now" note after Quiet my PC now.
 $script:MeterMemory = $script:TileMemory
 # One list of the programs working the PC hardest, for all four readings at once.
@@ -1336,8 +1379,14 @@ $script:BusyHead = New-Text 'BUSIEST RIGHT NOW' 11.5 'SemiBold' '#4B5B5C' '0,0,0
 $script:BusyRows = New-Object System.Windows.Controls.StackPanel
 [void]$script:BusyStrip.Children.Add($script:BusyRows)
 Set-MoreInfo $script:BusyStrip 'The programs working your PC hardest this second, counted the way Task Manager counts them. A program near the top of this list while your PC feels slow is the one to look at first.'
-[void]$healthLeft.Children.Add($script:BusyStrip)
-$script:LiveNote = New-Text 'Live, every 2 seconds. Nothing is recorded.' 11.5 'Normal' '#66706F' '0,10,0,14'
+# In a card of its own, which comes and goes with the list.
+$busyCard = New-MetricCard $script:BusyStrip
+$busyCard.Margin = Get-Thick '0'
+$busyShown = New-Object System.Windows.Data.Binding('Visibility')
+$busyShown.Source = $script:BusyStrip
+[void]$busyCard.SetBinding([System.Windows.UIElement]::VisibilityProperty, $busyShown)
+[void]$healthLeft.Children.Add($busyCard)
+$script:LiveNote = New-Text 'Live, every 2 seconds. Nothing is recorded.' 11.5 'Normal' '#66706F' '0,8,0,12'
 [void]$healthLeft.Children.Add($script:LiveNote)
 
 # What a whole session cost, for anyone who wants to know how their PC held up while they worked.
@@ -1381,6 +1430,18 @@ $script:SessionBox.Margin = Get-Thick '0,0,0,12'
 # to say - no battery on a desktop, say - is not shown at all.
 $healthRight = New-Object System.Windows.Controls.StackPanel
 $healthRight.Width = 460
+# The list takes all the room the readings leave beside them; with less than $script:DetailsMinWidth
+# beside them it goes underneath, the full width of the page.
+$script:DetailsMinWidth = 380
+function Update-HealthColumns {
+    $sv = $healthPanel.Parent
+    if (-not $sv -or $sv.ViewportWidth -le 0) { return }
+    $room = $sv.ViewportWidth - $healthPanel.Margin.Left - $healthPanel.Margin.Right
+    $beside = $room - $healthLeft.Width - $healthLeft.Margin.Right
+    $w = [math]::Floor($(if ($beside -ge $script:DetailsMinWidth) { $beside } else { $room }))
+    if ($w -gt 0 -and [math]::Abs($healthRight.Width - $w) -ge 1) { $healthRight.Width = $w }
+}
+$healthPanel.Parent.Add_ScrollChanged({ param($sender, $e) if ($e.ViewportWidthChange -ne 0) { Update-HealthColumns } })
 $script:Details = [ordered]@{
     Processor = New-DetailsBox 'Processor'
     Graphics  = New-DetailsBox 'Graphics'
@@ -1474,7 +1535,12 @@ $script:QuarantineBox.Content = $script:QuarantinePanel
 function New-Section([string]$Header) {
     $ex = New-Object System.Windows.Controls.Expander
     $ex.Header = New-Text $Header 14.5 'SemiBold' '#117A68' '0' 'Fraunces, Georgia'
+    # A full-width group in the card's colours, so a page reads as a few wide groups, one under another.
     $ex.Margin = Get-Thick '0,8,0,0'
+    $ex.Padding = Get-Thick '10,6'
+    $ex.Background = Get-Brush '#FFFDF8'
+    $ex.BorderBrush = Get-Brush '#E6DFCC'
+    $ex.BorderThickness = Get-Thick '1'
     $ex.IsExpanded = $false
     $sp = New-Object System.Windows.Controls.StackPanel
     $sp.Margin = Get-Thick '8,2,0,10'
@@ -1642,7 +1708,6 @@ $script:BtnMachineUndo.Add_Click({ [void](Request-Elevation 'undo' 'undo') })
 # A switch is used only where flipping it changes things there and then; it shows "on" only once that
 # has worked. The version and the small print sit at the bottom.
 $aboutPanel = New-TabPage 'Settings' 'about' ''
-[void]$aboutPanel.Children.Add((New-Text 'Settings' 24 'SemiBold' '#0F1B1C' '0,0,0,6' 'Fraunces, Georgia'))
 
 function New-ChoiceRow([string]$Group, [string]$Label, [object[]]$Choices, [string]$Current, [scriptblock]$OnPick) {
     <# A row of round buttons for one choice. Applies the moment one is picked. Returns the buttons by value. #>
@@ -5657,27 +5722,68 @@ function Test-Glance {
         [bool](($g.vendors -match 'Brand software found: none that Quietpane knows') -and ($g.vendors -match 'Still switched on: nothing'))
 }
 
+function Set-TestWidth([double]$Width) {
+    <# Lays the window out at this width, the Health columns included, as a real resize would. #>
+    $window.Width = $Width
+    Update-TabIcons $Width
+    $root = $window.Content
+    $size = [System.Windows.Size]::new($Width, 900)
+    foreach ($pass in 1, 2) {
+        $root.Measure($size); $root.Arrange([System.Windows.Rect]::new($size)); $root.UpdateLayout()
+        Update-HealthColumns
+    }
+    return $root
+}
+
 function Test-HealthLayout {
     <#
-        The two columns at the window's usual width and at its narrowest: side by side when there is
-        room, the list underneath when there is not - and nothing cut off at the right either way.
+        The two columns at the window's usual width, a middle one and its narrowest: side by side when
+        there is room, the list underneath when there is not - and nothing cut off at the right either way.
     #>
     $was = $ui.Tabs.SelectedIndex
     $ui.Tabs.SelectedIndex = 1
     $wasWidth = $window.Width
-    $result = foreach ($w in 1280, 760) {
-        $window.Width = $w
-        Update-TabIcons $w
-        $root = $window.Content
-        $size = [System.Windows.Size]::new([double]$w, 900)
-        $root.Measure($size); $root.Arrange([System.Windows.Rect]::new($size)); $root.UpdateLayout()
+    $result = foreach ($w in 1280, 1100, $window.MinWidth) {
+        [void](Set-TestWidth $w)
         $at = $healthRight.TranslatePoint([System.Windows.Point]::new(0, 0), $healthLeft)
         $sv = $healthPanel.Parent
-        $fits = ($healthLeft.ActualWidth + $healthLeft.Margin.Right -le $sv.ViewportWidth) -and ($healthRight.ActualWidth -le $sv.ViewportWidth)
+        $room = $sv.ViewportWidth - $healthPanel.Margin.Left - $healthPanel.Margin.Right
+        $fits = ($healthLeft.ActualWidth + $healthLeft.Margin.Right -le $room + 1) -and ($healthRight.ActualWidth -le $room + 1)
         $side = ($at.X -gt 0 -and [math]::Abs($at.Y) -lt 1)
         $under = ($at.Y -ge $healthLeft.ActualHeight - 1)
-        $tabRow = @($ui.Tabs.Items | ForEach-Object { [math]::Round($_.TranslatePoint([System.Windows.Point]::new(0, 0), $ui.Tabs).X) } | Sort-Object -Unique).Count -eq 1
-        '{0}: {1}, fits {2}, tabs in one column {3}' -f $w, $(if ($side) { 'side by side' } elseif ($under) { 'list underneath' } else { 'overlapping' }), $fits, $tabRow
+        '{0}: {1}, fits {2}' -f $w, $(if ($side) { 'side by side' } elseif ($under) { 'list underneath' } else { 'overlapping' }), $fits
+    }
+    $window.Width = $wasWidth
+    Update-TabIcons $wasWidth
+    $ui.Tabs.SelectedIndex = $was
+    $result -join '; '
+}
+
+function Test-ShellLayout {
+    <#
+        The window's frame at its usual and narrowest widths, on a tab with Apply: the tabs in one column
+        down the sidebar, none on top of another; every page left of nothing but the sidebar; and the
+        buttons in the page's own column, every one of them inside the window.
+    #>
+    $was = $ui.Tabs.SelectedIndex
+    $wasWidth = $window.Width
+    Select-Tab 'privacy'
+    $sidebar = $window.FindResource('SidebarWidth').Value
+    $result = foreach ($w in 1280, $window.MinWidth) {
+        $root = Set-TestWidth $w
+        $spots = @($ui.Tabs.Items | ForEach-Object { $_.TranslatePoint([System.Windows.Point]::new(0, 0), $root) })
+        $column = (@($spots | ForEach-Object { [math]::Round($_.X) } | Sort-Object -Unique).Count -eq 1) -and
+            (@($spots | ForEach-Object { [math]::Round($_.Y) } | Sort-Object -Unique).Count -eq $ui.Tabs.Items.Count)
+        $inSidebar = @($ui.Tabs.Items | Where-Object { $_.TranslatePoint([System.Windows.Point]::new($_.ActualWidth, 0), $root).X -gt $sidebar }).Count -eq 0
+        $page = $ui.Tabs.SelectedItem.Content
+        $pageLeft = $page.TranslatePoint([System.Windows.Point]::new(0, 0), $root).X
+        $barLeft = $ui.AdvancedButtons.TranslatePoint([System.Windows.Point]::new(0, 0), $root).X
+        $inWindow = @(foreach ($b in $ui.BtnRecommended, $ui.BtnNone, $ui.BtnPreview, $ui.BtnApply) {
+            $tl = $b.TranslatePoint([System.Windows.Point]::new(0, 0), $root)
+            ($tl.X -ge $sidebar) -and ($tl.X + $b.ActualWidth -le $w + 0.5) -and ($b.ActualWidth -gt 0)
+        }) -notcontains $false
+        '{0}: tabs in one column {1}, tabs in the sidebar {2}, page beside it {3}, buttons in the page column and the window {4}' -f $w,
+            $column, $inSidebar, ([math]::Abs($pageLeft - $sidebar) -lt 1), (($barLeft -ge $sidebar) -and $inWindow)
     }
     $window.Width = $wasWidth
     Update-TabIcons $wasWidth
@@ -5829,6 +5935,7 @@ if ($SelfTest) {
     'easy wins: ' + (Test-SpaceWins)
     'live tiles: ' + (Test-LiveTiles)
     'health layout: ' + (Test-HealthLayout)
+    'shell layout: ' + (Test-ShellLayout)
     'health facts: ' + (Test-HealthFacts)
     'switches: ' + (Test-Switches)
     'shields: ' + (Test-Shields)
