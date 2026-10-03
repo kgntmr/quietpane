@@ -24,7 +24,7 @@ body:
     attributes:
       label: Which version of Quietpane?
       description: It's at the bottom of the window, next to "No data leaves this PC".
-      placeholder: "1.20.1"
+      placeholder: "2.1.0"
     validations:
       required: true
 

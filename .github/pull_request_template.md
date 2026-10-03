@@ -16,7 +16,7 @@
 - [ ] Walked through section 3 of `docs/manual-checks.md`, if the window changed
 - [ ] No scan report, log or anything naming a real PC is in this branch
 
-Line endings and ASCII aren't on this list - CI checks those, so you don't have to.
+Line endings and ASCII are checked by the Tests workflow when GitHub Actions is available. If Actions did not run, verify them locally before merge; do not treat a zero-step workflow failure as a passing check.
 
 ## Anything you're unsure about
 
