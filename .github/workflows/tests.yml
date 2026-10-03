@@ -19,6 +19,12 @@ on:
     branches:
       - main
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      ref:
+        description: Exact branch, tag or commit to check and build
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -31,6 +37,8 @@ jobs:
     steps:
       - name: Get the source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.ref || github.sha }}
 
       # Git is told not to touch line endings in these files (.gitattributes marks them -text), so
       # what is in the repository is exactly what lands on someone's PC. CONTRIBUTING.md asks
@@ -85,10 +93,9 @@ jobs:
         shell: powershell
         run: powershell -NoProfile -ExecutionPolicy Bypass -File tools\build-release.ps1
 
-      # The ZIP is not reproducible yet - tools\build-release.ps1 stamps each entry with the source
-      # file's timestamp, and a fresh checkout has fresh timestamps - so this artifact's hash will not
-      # match a local build of the same commit. The files inside it will. Listing the per-file hashes
-      # here is what makes that comparison possible without downloading anything.
+      # tools\build-release.ps1 fixes entry order and metadata, then rebuilds after deliberately
+      # changing staged file timestamps. A hash mismatch fails the build. Listing the per-file hashes
+      # here also makes the contents independently inspectable.
       - name: Hash what went into it
         shell: powershell
         run: |
@@ -109,5 +116,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: Quietpane-zip
-          path: dist/Quietpane.zip
+          path: |
+            dist/Quietpane.zip
+            dist/Quietpane.zip.sha256
           if-no-files-found: error

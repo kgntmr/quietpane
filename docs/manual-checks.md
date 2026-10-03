@@ -241,7 +241,7 @@ These need eyes, not assertions:
 - **Smart App Control, for real.** On a Windows 11 PC with Smart App Control *on* (a fresh
   install, or a test VM - never turn it off and on again on a real PC), double-click *Start
   Quietpane*: the console must explain that the PC only runs signed apps, and must not tell anyone
-  to switch Smart App Control off. Repeat once releases are signed: it should then simply start.
+  to switch Smart App Control off. If signed releases start later, repeat with one of those releases: it should then simply start.
 - **An update, end to end.** Put a newer `Quietpane.zip`, downloaded through a browser, in
   Downloads. Open the older Quietpane: Home offers it. *Install it* shows the version and SHA256,
   unpacks to `Downloads\Quietpane <version>`, closes, and the new one opens the way a double-click

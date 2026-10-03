@@ -1,0 +1,139 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing version tag to build into a draft release (for example v2.1.1)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  validate-tag:
+    name: Validate release tag
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      commit: ${{ steps.validate.outputs.commit }}
+      version: ${{ steps.validate.outputs.version }}
+    env:
+      RELEASE_TAG: ${{ inputs.tag }}
+
+    steps:
+      - name: Get the tagged source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.tag }}
+          fetch-depth: 0
+
+      - name: Validate tag, main ancestry and version
+        id: validate
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Release tag must look like v2.1.1; got $RELEASE_TAG" >&2
+            exit 1
+          fi
+
+          tag_commit="$(git rev-parse "${RELEASE_TAG}^{commit}")"
+          head_commit="$(git rev-parse HEAD)"
+          if [[ "$tag_commit" != "$head_commit" ]]; then
+            echo "Checked-out commit $head_commit does not match tag $RELEASE_TAG ($tag_commit)" >&2
+            exit 1
+          fi
+
+          git fetch origin main --quiet
+          if ! git merge-base --is-ancestor HEAD origin/main; then
+            echo "Release tag must point to a commit contained in main" >&2
+            exit 1
+          fi
+
+          version="$(grep -m1 '^\$script:AppVersion[[:space:]]*=' src/Quietpane.psm1 | sed -E "s/.*'([0-9]+\.[0-9]+\.[0-9]+)'.*/\1/")"
+          if [[ -z "$version" || "v$version" != "$RELEASE_TAG" ]]; then
+            echo "Tag $RELEASE_TAG does not match AppVersion ${version:-<missing>}" >&2
+            exit 1
+          fi
+
+          echo "commit=$head_commit" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  checks:
+    name: Check tagged source
+    needs: validate-tag
+    uses: ./.github/workflows/tests.yml
+    with:
+      ref: ${{ inputs.tag }}
+
+  publish-draft:
+    name: Prepare draft release
+    needs:
+      - validate-tag
+      - checks
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ inputs.tag }}
+      RELEASE_VERSION: ${{ needs.validate-tag.outputs.version }}
+      RELEASE_COMMIT: ${{ needs.validate-tag.outputs.commit }}
+
+    steps:
+      - name: Download the checked build
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: Quietpane-zip
+          path: dist
+
+      - name: Verify checksum and write provenance
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $zip = Resolve-Path 'dist\Quietpane.zip'
+          $checksum = Resolve-Path 'dist\Quietpane.zip.sha256'
+          $actual = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash
+          $expected = ((Get-Content -LiteralPath $checksum -Raw).Trim() -split '\s+')[0]
+          if ($actual -ne $expected) {
+              throw "Downloaded artifact hash $actual does not match checksum $expected"
+          }
+
+          $workflowUrl = "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
+          $lines = @(
+              'Quietpane release provenance'
+              "Tag: $env:RELEASE_TAG"
+              "Commit: $env:RELEASE_COMMIT"
+              "Workflow: $workflowUrl"
+              'Artifact: Quietpane.zip'
+              "SHA256: $actual"
+              'Build: tools/build-release.ps1'
+              'Archive: deterministic stored ZIP; fixed entry metadata; ordinal path order; timestamp self-check passed'
+          )
+          [System.IO.File]::WriteAllLines((Join-Path (Resolve-Path 'dist') 'PROVENANCE.txt'), $lines, [System.Text.Encoding]::ASCII)
+
+          "### Quietpane $env:RELEASE_TAG" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+          "- Commit: ``$env:RELEASE_COMMIT``" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+          "- SHA256: ``$actual``" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+          "- Output: draft GitHub Release (not published automatically)" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+
+      - name: Create or update the draft release
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $view = gh release view $env:RELEASE_TAG --json isDraft 2>$null
+          if ($LASTEXITCODE -eq 0) {
+              $release = $view | ConvertFrom-Json
+              if (-not $release.isDraft) {
+                  throw "Release $env:RELEASE_TAG is already public; this workflow only writes draft releases"
+              }
+          } else {
+              gh release create $env:RELEASE_TAG --verify-tag --draft --title "Quietpane $env:RELEASE_VERSION" --notes "Draft created by the verified release workflow. Add the human release notes, review the attached checksum and provenance, then publish."
+              if ($LASTEXITCODE -ne 0) { throw 'Could not create draft release' }
+          }
+
+          gh release upload $env:RELEASE_TAG 'dist\Quietpane.zip' 'dist\Quietpane.zip.sha256' 'dist\PROVENANCE.txt' --clobber
+          if ($LASTEXITCODE -ne 0) { throw 'Could not upload release assets' }
