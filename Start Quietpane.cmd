@@ -8,7 +8,9 @@ rem Then Quietpane cannot work, so say so here instead of failing out of sight.
 set "QPMODE="
 for /f "usebackq delims=" %%m in (`powershell.exe -NoProfile -Command "$ExecutionContext.SessionState.LanguageMode"`) do set "QPMODE=%%m"
 if /i not "%QPMODE%"=="FullLanguage" goto restricted
-start "" powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Hidden -File "%~dp0Quietpane.ps1"
+rem If the app fails before its window appears, show why instead of vanishing (it runs hidden).
+set "QPSCRIPT=%~dp0Quietpane.ps1"
+start "" powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Hidden -Command "try { & $env:QPSCRIPT } catch { $m = $_.Exception.Message; try { [void](New-Object -ComObject WScript.Shell).Popup('Quietpane could not start.' + [char]10 + [char]10 + 'What went wrong: ' + $m + [char]10 + [char]10 + 'A screenshot of this message helps us fix it: github.com/kgntmr/quietpane/issues', 0, 'Quietpane', 16) } catch { }; exit 1 }"
 exit /b
 
 :notextracted

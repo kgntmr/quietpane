@@ -2226,6 +2226,15 @@ Test-Case 'every launcher explains a PC that only runs signed apps, instead of f
             $c -match "don't switch Smart App Control off" -and $c -match ':restricted'
     }).Count -eq 4
 }
+Test-Case 'Start Quietpane says why when the app fails before its window appears, instead of vanishing' {
+    # The app runs hidden, so an error while it starts would otherwise leave nothing on screen.
+    $files = @('Start Quietpane.cmd', 'tools\release\Start Quietpane.cmd')
+    @($files | Where-Object {
+        $c = Get-Content (Join-Path $root $_) -Raw
+        $c -match '-WindowStyle Hidden -Command "try \{ & \$env:QPSCRIPT \} catch \{' -and $c -match 'Popup\(''Quietpane could not start\.' -and
+            $c -match 'set "QPSCRIPT=' -and $c -notmatch '-WindowStyle Hidden -File'
+    }).Count -eq 2
+}
 
 Section 'Keyboards and screen readers'
 $selfTestOut = & powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File (Join-Path $root 'Quietpane.ps1') -SelfTest 2>&1 | Out-String
