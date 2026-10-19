@@ -5444,14 +5444,22 @@ function Get-QpOwnShortcuts {
         taskbar. Only shortcuts carrying Quietpane's app id count, so one you made yourself is left alone.
     #>
     param($Paths = (Get-QpShortcutPaths))
-    Initialize-QpShortcut
     $candidates = @(@{ Path = $Paths.StartMenu; Kind = 'StartMenu' }, @{ Path = $Paths.Desktop; Kind = 'Desktop' })
     if ($Paths.Pinned -and (Test-Path -LiteralPath $Paths.Pinned)) {
         foreach ($f in @(Get-ChildItem -LiteralPath $Paths.Pinned -Filter '*.lnk' -File -Force -ErrorAction SilentlyContinue)) { $candidates += @{ Path = $f.FullName; Kind = 'Pinned' } }
     }
+    # A shortcut keeps its app id as UTF-16 text, so one that doesn't hold those bytes can't be ours. Only
+    # when one might be is the shortcut reader compiled: on a PC without Quietpane shortcuts, no compiler runs.
+    $latin1 = [Text.Encoding]::GetEncoding(28591)
+    $needle = $latin1.GetString([Text.Encoding]::Unicode.GetBytes($script:AppUserModelId))
+    $candidates = @($candidates | Where-Object {
+        if (-not $_.Path -or -not (Test-Path -LiteralPath $_.Path -PathType Leaf)) { return $false }
+        try { $latin1.GetString([IO.File]::ReadAllBytes($_.Path)).IndexOf($needle, [StringComparison]::OrdinalIgnoreCase) -ge 0 } catch { $true }
+    })
+    if (-not $candidates.Count) { return @() }
+    Initialize-QpShortcut
     $out = New-Object System.Collections.ArrayList
     foreach ($c in $candidates) {
-        if (-not $c.Path -or -not (Test-Path -LiteralPath $c.Path -PathType Leaf)) { continue }
         try {
             if ([QuietpaneShortcut]::ReadAppId($c.Path) -ne $script:AppUserModelId) { continue }
             [void]$out.Add([pscustomobject]@{ Path = $c.Path; Kind = $c.Kind; Script = (Get-QpLinkScript ([QuietpaneShortcut]::ReadArguments($c.Path))) })
@@ -5471,6 +5479,7 @@ function Test-QpShortcuts {
 }
 
 function Set-QpShortcut([string]$Link, $Paths) {
+    Initialize-QpShortcut
     $target = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
     # (not $args: PowerShell keeps that name for a function's own arguments)
     $argLine = '-NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Hidden -File "{0}"' -f $Paths.Script

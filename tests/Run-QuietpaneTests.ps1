@@ -1780,6 +1780,14 @@ Test-Case 'with no shortcuts and no sign-in start, opening Quietpane changes not
     $r = Sync-QpInstall -InstallRoot $none -Name 'Quietpane test - no such task' -Paths $p
     -not $r.InUse -and -not (Test-Path $none)
 }
+Test-Case 'on a PC with no Quietpane shortcuts, looking for them compiles nothing' {
+    # Only a shortcut whose bytes hold Quietpane's app id is read with the C# reader; checked in a fresh process.
+    $dir = Join-Path $copyArea 'not-ours'
+    New-Item -ItemType Directory -Force -Path $dir | Out-Null
+    $w = (New-Object -ComObject WScript.Shell).CreateShortcut((Join-Path $dir 'Mine.lnk')); $w.TargetPath = Join-Path $env:WINDIR 'notepad.exe'; $w.Save()
+    $out = & powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "Import-Module '$(Join-Path $root 'src\Quietpane.psm1')'; `$p = [pscustomobject]@{ StartMenu = '$dir\Mine.lnk'; Desktop = '$dir\none.lnk'; Pinned = '$dir' }; '{0}|{1}' -f @(Get-QpOwnShortcuts -Paths `$p).Count, [bool]('QuietpaneShortcut' -as [type])" 2>&1 | Out-String
+    $out.Trim() -eq '0|False'
+}
 Test-Case 'starting at sign-in waits for sign-in to finish, runs on battery, and is never stopped for running too long' {
     $t = New-QpSignInTask -Script 'C:\Program Files\Quietpane\Quietpane.ps1'
     $a = @($t.Actions)[0]; $tr = @($t.Triggers)[0]
