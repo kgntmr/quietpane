@@ -1339,10 +1339,11 @@ Test-Case 'the whole state comes back in one pass, and the shared lookups are le
     $keysOk -and $null -eq (& (Get-Module Quietpane) { $script:StateCache })
 }
 Test-Case 'reading the PC in four groups side by side gives exactly the same answer as one pass' {
-    # In a fresh process, so both reads see this PC as it is (this run's own stores are swapped in here).
+    # In a fresh process, so both reads see this PC as it is (with a machine store of its own).
     $out = & powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -Command {
         param($Mod)
         Import-Module $Mod
+        Use-QpSelfTestStores   # never the real machine store, even with administrator rights
         $a = Get-QpState; $b = Get-QpStateParallel
         # Sizes and memory move between two reads on a busy PC; everything else must match exactly.
         function Shape($s, $k) {
@@ -2504,7 +2505,7 @@ Test-Case 'clean-up refuses a %TEMP% or %WINDIR% pointed somewhere else, even wi
     # Both are environment variables an ordinary account can change, and an elevated window of the same
     # account reads them too: they must never decide where a clean-up with admin rights runs.
     $mod = Join-Path $root 'src\Quietpane.psm1'
-    $ask = { param($Var, $Value, $Id) & powershell.exe -NoProfile -ExecutionPolicy Bypass -Command ("`$env:{0} = '{1}'; Import-Module '{2}'; & (Get-Module Quietpane) {{ `$i = (Get-QpCatalog cleanup).Items | Where-Object Id -eq '{3}'; @(Get-QpCleanupOperations `$i | ForEach-Object {{ (Get-QpOperationPolicy `$_).Refused }}) -join ',' }}" -f $Var, $Value, $mod, $Id) 2>&1 | Out-String }
+    $ask = { param($Var, $Value, $Id) & powershell.exe -NoProfile -ExecutionPolicy Bypass -Command ("`$env:{0} = '{1}'; Import-Module '{2}'; Use-QpSelfTestStores; & (Get-Module Quietpane) {{ `$i = (Get-QpCatalog cleanup).Items | Where-Object Id -eq '{3}'; @(Get-QpCleanupOperations `$i | ForEach-Object {{ (Get-QpOperationPolicy `$_).Refused }}) -join ',' }}" -f $Var, $Value, $mod, $Id) 2>&1 | Out-String }
     $refused = @(
         (& $ask 'TEMP' 'C:\ProgramData' 'temp.user'),
         (& $ask 'TEMP' $env:USERPROFILE 'temp.user'),
@@ -2524,7 +2525,7 @@ Test-Case 'a %TEMP% written with 8.3 short names (C:\Users\JOHNSM~1\...) is stil
         if ($short -notmatch '~') { $true }   # this drive keeps no short names, so there is nothing to show
         else {
             $mod = Join-Path $root 'src\Quietpane.psm1'
-            $out = & powershell.exe -NoProfile -ExecutionPolicy Bypass -Command ("`$env:TEMP = '{0}'; Import-Module '{1}'; & (Get-Module Quietpane) {{ `$i = (Get-QpCatalog cleanup).Items | Where-Object Id -eq 'temp.user'; `$op = @(Get-QpCleanupOperations `$i)[0]; '{{0}}|{{1}}' -f `$op.Target, (Get-QpOperationPolicy `$op).Refused }}" -f $short, $mod) 2>&1 | Out-String
+            $out = & powershell.exe -NoProfile -ExecutionPolicy Bypass -Command ("`$env:TEMP = '{0}'; Import-Module '{1}'; Use-QpSelfTestStores; & (Get-Module Quietpane) {{ `$i = (Get-QpCatalog cleanup).Items | Where-Object Id -eq 'temp.user'; `$op = @(Get-QpCleanupOperations `$i)[0]; '{{0}}|{{1}}' -f `$op.Target, (Get-QpOperationPolicy `$op).Refused }}" -f $short, $mod) 2>&1 | Out-String
             $out.Trim() -ieq "$long|False"
         }
     } finally { [IO.Directory]::Delete($long, $true) }
