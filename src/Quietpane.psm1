@@ -23,8 +23,8 @@
       * No network requests, no telemetry, no data collection. Everything stays on this PC.
 #>
 
-$script:AppVersion  = '2.1.1'
-$script:AppReleased = '2026-10-14'   # the day this version was published; bumped with the version
+$script:AppVersion  = '2.2.0'
+$script:AppReleased = '2026-10-19'   # the day this version was published; bumped with the version
 $script:Brand       = @{ Name = 'KomodoWorks'; Url = 'https://www.komodoworks.com'; Email = 'info@komodoworks.com'; Repo = 'https://github.com/kgntmr/quietpane' }
 $script:AssetsRoot  = Join-Path (Split-Path $PSScriptRoot -Parent) 'assets'
 $script:LogSink     = $null
