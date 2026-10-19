@@ -5854,14 +5854,25 @@ function Show-Welcome {
 
 $script:FirstShown = $false
 $script:LastReadAt = $null
-function Start-FirstRead {
+function Start-FirstRead([switch]$Gated) {
     # In the background, the first read of the PC. Before it: shortcuts and the sign-in start always open
     # Quietpane's own copy, so keep that copy current and point back any shortcut that still opens a
     # folder that may have moved (it does nothing if you have neither). After it, the About tab's button
     # and tick boxes are filled in, once that is settled.
-    Start-Work -StatusText 'Reading the current state of this PC...' -Work {
-        try { [void](Sync-QpInstall) } catch { Write-QpLog "Could not check the shortcuts: $($_.Exception.Message)" 'WARN' }
-        Get-QpState
+    # -Gated, on the very first start: the PC is read (only read) while the welcome is on screen, and the
+    # job then waits at a gate. Only once the welcome is accepted are the shortcuts looked after and the
+    # result shown; if it is declined, the job is dropped and nothing has changed.
+    if ($Gated) { $script:Sync.Go = New-Object System.Threading.ManualResetEvent $false }
+    Start-Work -StatusText 'Reading the current state of this PC...' -Params @{ Gated = [bool]$Gated } -Work {
+        param([bool]$Gated)
+        if (-not $Gated) { try { [void](Sync-QpInstall) } catch { Write-QpLog "Could not check the shortcuts: $($_.Exception.Message)" 'WARN' } }
+        $state = Get-QpState
+        if ($Gated) {
+            [void]$Sync.Go.WaitOne()
+            if ($Sync.Cancel) { return $null }
+            try { [void](Sync-QpInstall) } catch { Write-QpLog "Could not check the shortcuts: $($_.Exception.Message)" 'WARN' }
+        }
+        $state
     } -OnDone {
         param($s)
         Update-FromState $s; Update-PlaceControls; $script:LastReadAt = Get-Date
@@ -5873,8 +5884,20 @@ function Start-FirstRead {
 function Start-FirstShow {
     if ($script:FirstShown) { return }
     $script:FirstShown = $true
-    if (-not (Show-Welcome)) { $window.Close(); return }
     $ui.LogBox.AppendText(('Quietpane {0} - Developed by KomodoWorks.com. Started {1}. Administrator: {2}. This app makes no network connections.' -f $info.Version, (Get-QpStamp 'yyyy-MM-dd HH:mm'), (Test-IsAdmin)) + [Environment]::NewLine)
+    # The very first start: read while the welcome is being read, so Home is ready when it is accepted.
+    $early = (-not $script:Elevated) -and (-not (Test-Path -LiteralPath $acceptFile)) -and (-not $script:Job)
+    if ($early) { if (-not $timer.IsEnabled) { $timer.Start() }; Start-FirstRead -Gated }
+    if (-not (Show-Welcome)) {
+        if ($early -and $script:Job) {
+            # Declined: let go of the read without waiting for it (it has changed nothing), so closing is instant.
+            $script:Sync.Cancel = $true; [void]$script:Sync.Go.Set()
+            $j = $script:Job; $script:Job = $null
+            try { [void]$j.PS.BeginStop($null, $null) } catch { }
+        }
+        $window.Close(); return
+    }
+    if ($early) { [void]$script:Sync.Go.Set() }
     if (-not $timer.IsEnabled) { $timer.Start() }
     # A check made at sign-in a few minutes ago is still fresh, and one may still be under way;
     # otherwise read the PC now.
