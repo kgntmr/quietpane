@@ -194,15 +194,14 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
 # can push the buttons off the bottom of a laptop screen. The third line is used once the window
 # exists: it asks Windows for a dark title bar when the window is dark, so a white strip is not left
 # across the top of it.
+# WPF itself already carries both calls into Windows, so nothing is compiled before the window - no
+# C# compiler, no temporary DLL. (The sharp picture needs no call at all: WPF asks for it when it makes
+# the window.) The two names below are the only parts of WPF the window reaches into.
+$script:WpfNative = $null
 if (-not $SelfTest) {
     try {
-        Add-Type -Namespace Quietpane -Name Shell -MemberDefinition @'
-[DllImport("shell32.dll", CharSet = CharSet.Unicode)] public static extern int SetCurrentProcessExplicitAppUserModelID(string appId);
-[DllImport("user32.dll")] public static extern int SetProcessDPIAware();
-[DllImport("dwmapi.dll")] public static extern int DwmSetWindowAttribute(IntPtr hwnd, int attribute, ref int value, int size);
-'@
-        [void][Quietpane.Shell]::SetCurrentProcessExplicitAppUserModelID($info.AppId)
-        [void][Quietpane.Shell]::SetProcessDPIAware()
+        $script:WpfNative = [System.Windows.Window].Assembly.GetType('Standard.NativeMethods')
+        [void]$script:WpfNative.GetMethod('SetCurrentProcessExplicitAppUserModelID').Invoke($null, @([string]$info.AppId))
     } catch { }
 }
 
@@ -321,14 +320,15 @@ function Resolve-Theme {
 
 function Set-TitleBarTheme {
     <# A dark title bar on a dark window. Windows 10 before 20H1 knew the setting as 19, later ones as 20. #>
-    if (-not ('Quietpane.Shell' -as [type]) -or -not $window) { return }
+    if (-not $script:WpfNative -or -not $window) { return }
     try {
         $hwnd = (New-Object System.Windows.Interop.WindowInteropHelper $window).Handle
         if ($hwnd -eq [IntPtr]::Zero) { return }
         $on = [int]($script:ActiveTheme -eq 'Dark')
-        if ([Quietpane.Shell]::DwmSetWindowAttribute($hwnd, 20, [ref]$on, 4) -ne 0) {
-            [void][Quietpane.Shell]::DwmSetWindowAttribute($hwnd, 19, [ref]$on, 4)
-        }
+        # WPF's copy of the call does not report failure, so the number is chosen by Windows build (20H1 = 18985).
+        $attr = if ([Environment]::OSVersion.Version.Build -ge 18985) { 20 } else { 19 }
+        $m = $script:WpfNative.GetMethod('_DwmSetWindowAttribute', [Reflection.BindingFlags]'NonPublic, Static')
+        [void]$m.Invoke($null, @($hwnd, [Enum]::ToObject($m.GetParameters()[1].ParameterType, $attr), $on, 4))
     } catch { }
 }
 

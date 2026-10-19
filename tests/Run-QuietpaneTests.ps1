@@ -1854,12 +1854,25 @@ Test-Case 'the icon is the KomodoWorks emblem, on a see-through background' {
     # corner clear, dark square in the KomodoWorks anchor colour, teal square peeking out bottom-right
     (Get-Px 0 0).EndsWith(',0') -and (Get-Px 40 40) -eq '15,27,28,255' -and (Get-Px 240 240) -eq '23,155,131,255'
 }
-Test-Case 'the window''s calls into Windows only name the app, ask for a sharp picture and colour its title bar' {
+Test-Case 'the window compiles nothing, and its calls into Windows only name the app and colour its title bar' {
     # A fixed list on purpose: anything new the window asks Windows to do has to be added here by hand.
-    # The third is DwmSetWindowAttribute, used only to give a dark window a dark title bar.
+    # Both calls are WPF's own, so no C# compiler runs before the window appears.
     $src = Get-Content (Join-Path $root 'Quietpane.ps1') -Raw
-    $calls = @([regex]::Matches($src, 'DllImport\("(\w+)\.dll"[^\]]*\)\]\s*public static extern int (\w+)') | ForEach-Object { '{0}!{1}' -f $_.Groups[1].Value, $_.Groups[2].Value })
-    ($calls -join ';') -eq 'shell32!SetCurrentProcessExplicitAppUserModelID;user32!SetProcessDPIAware;dwmapi!DwmSetWindowAttribute'
+    $members = @([regex]::Matches($src, "WpfNative\.GetMethod\('(\w+)'") | ForEach-Object { $_.Groups[1].Value })
+    $src -notmatch 'DllImport' -and $src -notmatch 'Add-Type[^\r\n]*-(MemberDefinition|TypeDefinition)' -and
+        ($members -join ';') -eq 'SetCurrentProcessExplicitAppUserModelID;_DwmSetWindowAttribute' -and
+        @([regex]::Matches($src, "GetType\('Standard\.NativeMethods'\)")).Count -eq 1 -and $src -match '-ge 18985\) \{ 20 \} else \{ 19 \}'
+}
+Test-Case 'without a call of its own, the window is still drawn at the screen''s real resolution' {
+    # WPF asks Windows for it when it makes the window's handle; checked in a fresh process.
+    $out = & powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -Command {
+        Add-Type -AssemblyName PresentationFramework
+        $m = [System.Windows.DependencyObject].Assembly.GetType('MS.Win32.UnsafeNativeMethods').GetMethod('IsProcessDPIAware', [Reflection.BindingFlags]'NonPublic, Public, Static')
+        $w = [Windows.Markup.XamlReader]::Parse('<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"/>')
+        [void](New-Object System.Windows.Interop.WindowInteropHelper $w).EnsureHandle()
+        [string]$m.Invoke($null, @())
+    } 2>&1 | Out-String
+    $out.Trim() -eq 'True'
 }
 
 Section 'What signing in costs'
