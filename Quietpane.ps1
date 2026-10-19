@@ -658,7 +658,9 @@ try {
 Set-QpLogSink { param($line) try { $ui.LogBox.AppendText($line + [Environment]::NewLine) } catch { } }
 
 $thickConv = New-Object System.Windows.ThicknessConverter
-function Get-Thick([string]$Value) { $thickConv.ConvertFromString($Value) }
+# Invariant: margins are written '0,4,0,6', which a PC set to a decimal comma (German, French, Turkish...)
+# would otherwise read as numbers and refuse, so the window could not be built at all.
+function Get-Thick([string]$Value) { $thickConv.ConvertFromInvariantString($Value) }
 
 function Get-Bitmap([string]$Path) {
     if (-not (Test-Path $Path)) { return $null }
@@ -961,7 +963,7 @@ function Add-DetailRow {
     $row.Padding = Get-Thick '0,7,0,7'
     if ($Box.Rows.Children.Count) { $row.BorderBrush = Get-Brush '#E6DFCC'; $row.BorderThickness = Get-Thick '0,1,0,0' }
     $grid = New-Object System.Windows.Controls.Grid
-    foreach ($w in 'Auto', '*') { $cd = New-Object System.Windows.Controls.ColumnDefinition; $cd.Width = $script:GridLength.ConvertFromString($w); [void]$grid.ColumnDefinitions.Add($cd) }
+    foreach ($w in 'Auto', '*') { $cd = New-Object System.Windows.Controls.ColumnDefinition; $cd.Width = $script:GridLength.ConvertFromInvariantString($w); [void]$grid.ColumnDefinitions.Add($cd) }
     $name = New-Text $Label 12.5 'Normal' '#4B5B5C' '0,0,16,0'
     $name.TextWrapping = 'NoWrap'
     $name.VerticalAlignment = 'Center'
@@ -1040,7 +1042,7 @@ function New-SettingRow([string]$Label, [string]$Note, $Control) {
     $row.BorderBrush = Get-Brush '#E6DFCC'
     $row.BorderThickness = Get-Thick '0,0,0,1'
     $grid = New-Object System.Windows.Controls.Grid
-    foreach ($w in '*', 'Auto') { $cd = New-Object System.Windows.Controls.ColumnDefinition; $cd.Width = $script:GridLength.ConvertFromString($w); [void]$grid.ColumnDefinitions.Add($cd) }
+    foreach ($w in '*', 'Auto') { $cd = New-Object System.Windows.Controls.ColumnDefinition; $cd.Width = $script:GridLength.ConvertFromInvariantString($w); [void]$grid.ColumnDefinitions.Add($cd) }
     $left = New-Object System.Windows.Controls.StackPanel
     $left.VerticalAlignment = 'Center'
     $left.Margin = Get-Thick '0,0,20,0'
@@ -2969,7 +2971,7 @@ function New-SpaceRow {
     param($Node, [int64]$Of, [string]$Name, [string]$Sub, [int64]$Size)
     $g = New-Object System.Windows.Controls.Grid
     $g.Margin = Get-Thick '0,7,0,0'
-    foreach ($w in '*', '176', '92', '190') { $c = New-Object System.Windows.Controls.ColumnDefinition; $c.Width = $script:GridLength.ConvertFromString($w); [void]$g.ColumnDefinitions.Add($c) }
+    foreach ($w in '*', '176', '92', '190') { $c = New-Object System.Windows.Controls.ColumnDefinition; $c.Width = $script:GridLength.ConvertFromInvariantString($w); [void]$g.ColumnDefinitions.Add($c) }
     $left = New-Object System.Windows.Controls.StackPanel
     $left.VerticalAlignment = 'Center'
     $title = New-Object System.Windows.Controls.TextBlock
@@ -3103,7 +3105,7 @@ function Show-SpaceWins {
         $sp = New-Object System.Windows.Controls.StackPanel
 
         $top = New-Object System.Windows.Controls.Grid
-        foreach ($width in '*', '110') { $c = New-Object System.Windows.Controls.ColumnDefinition; $c.Width = $script:GridLength.ConvertFromString($width); [void]$top.ColumnDefinitions.Add($c) }
+        foreach ($width in '*', '110') { $c = New-Object System.Windows.Controls.ColumnDefinition; $c.Width = $script:GridLength.ConvertFromInvariantString($width); [void]$top.ColumnDefinitions.Add($c) }
         $name = New-Text $w.Title 13.5 'SemiBold' '#0F1B1C' '0'
         [void]$top.Children.Add($name)
         $size = New-Text (Format-QpBytes $w.Bytes) 14 'SemiBold' '#117A68' '0'
@@ -3826,7 +3828,7 @@ function Draw-SessionTimeline($Panel, $Watch) {
     $from = Get-QpStamp 'HH:mm' ([datetime]$Watch.Started)
     $to = if ($Watch.Ended) { Get-QpStamp 'HH:mm' ([datetime]$Watch.Ended) } else { 'now' }
     $axis = New-Object System.Windows.Controls.Grid
-    foreach ($width in '*', 'Auto') { $c = New-Object System.Windows.Controls.ColumnDefinition; $c.Width = $script:GridLength.ConvertFromString($width); [void]$axis.ColumnDefinitions.Add($c) }
+    foreach ($width in '*', 'Auto') { $c = New-Object System.Windows.Controls.ColumnDefinition; $c.Width = $script:GridLength.ConvertFromInvariantString($width); [void]$axis.ColumnDefinitions.Add($c) }
     $left = New-Text $from 11 'Normal' '#66706F' '0,3,0,0'
     $right = New-Text $to 11 'Normal' '#66706F' '0,3,0,0'
     [System.Windows.Controls.Grid]::SetColumn($right, 1)

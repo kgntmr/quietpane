@@ -2235,6 +2235,29 @@ Test-Case 'Start Quietpane says why when the app fails before its window appears
             $c -match 'set "QPSCRIPT=' -and $c -notmatch '-WindowStyle Hidden -File'
     }).Count -eq 2
 }
+Test-Case 'the window is built on a PC that writes numbers with a decimal comma (German, Turkish)' {
+    # '0,4,0,6' margins were once read in the PC's own number format, and the window could not be built at all.
+    $src = Get-Content (Join-Path $root 'Quietpane.ps1') -Raw
+    $built = @('de-DE', 'tr-TR' | Where-Object {
+        $out = & powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -Command ("[Threading.Thread]::CurrentThread.CurrentCulture = '{0}'; & '{1}' -SelfTest" -f $_, (Join-Path $root 'Quietpane.ps1')) 2>&1 | Out-String
+        $out -match 'window built OK'
+    })
+    $built.Count -eq 2 -and $src -notmatch '\.ConvertFromString\(\$Value\)' -and $src -notmatch 'GridLength\.ConvertFromString\('
+}
+Test-Case 'the lists still load from a folder whose name has square brackets in it' {
+    $dir = Join-Path $env:TEMP ('Quietpane [{0}]' -f [guid]::NewGuid().ToString('N').Substring(0, 6))
+    [void][IO.Directory]::CreateDirectory($dir)
+    try {
+        [IO.File]::Copy((Join-Path $root 'src\catalog\privacy.psd1'), (Join-Path $dir 'privacy.psd1'))
+        $n = & (Get-Module Quietpane) {
+            param($d)
+            $wasRoot = $script:CatalogRoot; $wasCache = $script:CatalogCache
+            try { $script:CatalogRoot = $d; $script:CatalogCache = @{}; @((Get-QpCatalog privacy).Items).Count }
+            finally { $script:CatalogRoot = $wasRoot; $script:CatalogCache = $wasCache }
+        } $dir
+    } finally { [IO.Directory]::Delete($dir, $true) }
+    $n -gt 10
+}
 
 Section 'Keyboards and screen readers'
 $selfTestOut = & powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File (Join-Path $root 'Quietpane.ps1') -SelfTest 2>&1 | Out-String

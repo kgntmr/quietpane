@@ -137,7 +137,7 @@ function Get-QpCatalog {
     $stamp = (Get-Item -LiteralPath $path).LastWriteTimeUtc.Ticks
     $hit = $script:CatalogCache[$Name]
     if ($hit -and $hit.Stamp -eq $stamp) { return $hit.Data }
-    $data = Import-PowerShellDataFile -Path $path
+    $data = Import-PowerShellDataFile -LiteralPath $path   # literal: a folder named 'Quietpane [2]' must still work
     $script:CatalogCache[$Name] = @{ Stamp = $stamp; Data = $data }
     return $data
 }
