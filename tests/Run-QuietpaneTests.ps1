@@ -36,6 +36,9 @@ $script:IsAdminRun = ([Security.Principal.WindowsPrincipal][Security.Principal.W
 # and %ProgramData%\Quietpane are never written. The engine is pointed there from inside the module, the
 # way the registry area above is; nothing in the app itself changes, and with administrator rights the
 # machine store here is checked and locked by the same Protect-QpMachineStore as the real one.
+# %TEMP% can be written with 8.3 short names (CI's is C:\Users\RUNNER~1\...). The stores refuse a path that
+# is not spelled the way Windows spells it, so the run uses the long spelling, and so does every child.
+$env:TEMP = [IO.Path]::GetFullPath($env:TEMP).TrimEnd('\'); $env:TMP = $env:TEMP
 $script:RealUserRoot = & (Get-Module Quietpane) { $script:UserDataRoot }
 $script:RealMachineRoot = & (Get-Module Quietpane) { $script:MachineRoot }
 $script:RunRoot = Join-Path $env:TEMP ('qp-run-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
@@ -229,6 +232,32 @@ Test-Case 'when Defender is unavailable the scan says so instead of pretending' 
     if ($s.Available) { 'skip' } else { $s.Note -match 'Defender' }
 }
 Test-Case 'reading detections never throws' { $null -ne @(Get-QpDefenderFindings) }
+Test-Case 'a download detection names the file, and one with no file still shows up' {
+    $m = Get-Module Quietpane
+    & $m {
+        function script:Get-MpThreat { [pscustomobject]@{ ThreatID = 7; ThreatName = 'Trojan:Win32/Test'; SeverityID = 5; DidThreatExecute = $false; IsActive = $true } }
+        function script:Get-MpThreatDetection {
+            [pscustomobject]@{ ThreatID = 7; InitialDetectionTime = (Get-Date); ThreatStatusID = 1; Resources = @('webfile:_C:\Users\x\Downloads\bad.exe|https://example.test/bad.exe|pid:12,ProcessStart:1') }
+            [pscustomobject]@{ ThreatID = 8; InitialDetectionTime = (Get-Date).AddMinutes(-1); ThreatStatusID = 1; Resources = @() }
+        }
+    }
+    try { $f = @(Get-QpDefenderFindings) } finally { & $m { Remove-Item function:Get-MpThreat, function:Get-MpThreatDetection } }
+    $web = @($f | Where-Object { $_.ThreatId -eq '7' })[0]; $none = @($f | Where-Object { $_.ThreatId -eq '8' })[0]
+    $f.Count -eq 2 -and $web.Path -eq 'C:\Users\x\Downloads\bad.exe' -and $web.Object -eq 'bad.exe' -and $none.Object -eq 'Unnamed detection 8'
+}
+Test-Case 'Defender standing down for another switched-on antivirus is not reported as a High problem' {
+    $src = & (Get-Module Quietpane) { (Get-Command Get-QpOtherAntivirus).Definition }
+    $s = Get-QpDefenderState
+    $src -match '0xF000' -and $null -ne $s.PSObject.Properties['ThirdPartyActive'] -and
+    (Get-Module Quietpane).Definition -match "RealTimeProtectionEnabled -and -not \`$otherOn\.Count"
+}
+Test-Case 'registry values that merely start with PS are still read' {
+    $k = 'HKCU:\Software\QuietpaneTestPS'
+    New-Item $k -Force | Out-Null; New-ItemProperty $k -Name 'PSExecHelper' -Value 'x' -Force | Out-Null
+    try { $p = Get-ItemProperty $k; $kept = @($p.PSObject.Properties | Where-Object { $_.Name -notin (& (Get-Module Quietpane) { $script:QpRegNoteNames }) } | ForEach-Object Name) }
+    finally { Remove-Item $k -Recurse -Force }
+    $kept -contains 'PSExecHelper' -and $kept -notcontains 'PSPath' -and $kept -notcontains 'PSProvider'
+}
 Test-Case 'a Quietpane heuristic can never be sent to Defender for removal' {
     $h = New-QpFinding -Source 'Quietpane check' -ThreatName '' -Title 'heuristic thing' -Confidence Heuristic
     (Invoke-QpRemediate -Finding $h -Action Defender).Ok -eq $false
@@ -821,6 +850,21 @@ Test-Case 'Firefox add-ons are read too, and Quietpane says it cannot switch tho
     $ff.Count -eq 2 -and $old.Reach.Everywhere -and $old.PolicyRoot -eq '' -and $old.Browser -eq 'Firefox' -and
     @($ff | Where-Object { $_.Name -eq 'Firefox Built-in' })[0].BuiltIn
 }
+Test-Case 'a Firefox add-on built into the browser says so, and one another program placed says that' {
+    $dir = Join-Path $addonRoot 'FirefoxProfiles2\test.default'
+    [void][IO.Directory]::CreateDirectory($dir)
+    $addons = @{ addons = @(
+        @{ id = 'shipped@mozilla.org'; type = 'extension'; version = '1.0'; active = $true; location = 'app-builtin'; defaultLocale = @{ name = 'Shipped' } },
+        @{ id = 'mine@example.com'; type = 'extension'; version = '1.0'; active = $true; location = 'app-profile'; defaultLocale = @{ name = 'Mine' } },
+        @{ id = 'pushed@example.com'; type = 'extension'; version = '1.0'; active = $true; location = 'app-system-share'; defaultLocale = @{ name = 'Pushed' } }
+    ) }
+    [IO.File]::WriteAllText((Join-Path $dir 'extensions.json'), ($addons | ConvertTo-Json -Depth 10))
+    $ff = @(Get-QpFirefoxAddons -Root (Join-Path $addonRoot 'FirefoxProfiles2'))
+    $by = @{}; foreach ($a in $ff) { $by[$a.Name] = $a }
+    $by['Shipped'].BuiltIn -and $by['Shipped'].Source -eq 'Part of the browser itself' -and
+    -not $by['Mine'].BuiltIn -and $by['Mine'].Source -eq 'You added it yourself' -and
+    -not $by['Pushed'].BuiltIn -and $by['Pushed'].Source -eq 'Another program on this PC put it there'
+}
 Test-Case 'reading the real browsers on this PC never throws' {
     $real = @(Get-QpBrowserExtensions)
     # Every one has to carry the same shape, whatever browser it came from.
@@ -1293,6 +1337,26 @@ Test-Case 'the whole state comes back in one pass, and the shared lookups are le
     $s = Get-QpState
     $keysOk = @('Privacy', 'Vendors', 'Apps', 'Startup', 'Devices', 'Addons', 'Cleanup', 'Restore', 'Problems' | Where-Object { -not $s.ContainsKey($_) }).Count -eq 0
     $keysOk -and $null -eq (& (Get-Module Quietpane) { $script:StateCache })
+}
+Test-Case 'reading the PC in four groups side by side gives exactly the same answer as one pass' {
+    # In a fresh process, so both reads see this PC as it is (with a machine store of its own).
+    $out = & powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -Command {
+        param($Mod)
+        Import-Module $Mod
+        Use-QpSelfTestStores   # never the real machine store, even with administrator rights
+        $a = Get-QpState; $b = Get-QpStateParallel
+        # Sizes and memory move between two reads on a busy PC; everything else must match exactly.
+        function Shape($s, $k) {
+            $v = $s[$k]
+            if ($k -eq 'Cleanup') { $v = @($v | ForEach-Object { '{0}|{1}|{2}' -f $_.Id, ($_.Paths -join ';'), $_.Availability }) }
+            if ($k -eq 'SignIn') { $v = @($v.Costs | ForEach-Object { $_.Name }) }
+            $v | ConvertTo-Json -Depth 6 -Compress
+        }
+        $keys = @($a.Keys | Sort-Object)
+        $same = @($keys | Where-Object { (Shape $a $_) -ceq (Shape $b $_) })
+        '{0}|{1}|{2}' -f ($keys -join ','), ($same.Count -eq $keys.Count), (($a.Problems -join ';') -ceq ($b.Problems -join ';'))
+    } -args (Join-Path $root 'src\Quietpane.psm1') 2>&1 | Out-String
+    $out.Trim() -eq 'Addons,Apps,Cleanup,Devices,Limited,Policy,Privacy,Problems,Restore,SignIn,Startup,Vendors|True|True'
 }
 Test-Case 'asking Task Scheduler directly lists exactly the tasks Get-ScheduledTask lists' {
     # Names and whether each is switched off; "running" or "ready" can change between the two reads.
@@ -1780,6 +1844,14 @@ Test-Case 'with no shortcuts and no sign-in start, opening Quietpane changes not
     $r = Sync-QpInstall -InstallRoot $none -Name 'Quietpane test - no such task' -Paths $p
     -not $r.InUse -and -not (Test-Path $none)
 }
+Test-Case 'on a PC with no Quietpane shortcuts, looking for them compiles nothing' {
+    # Only a shortcut whose bytes hold Quietpane's app id is read with the C# reader; checked in a fresh process.
+    $dir = Join-Path $copyArea 'not-ours'
+    New-Item -ItemType Directory -Force -Path $dir | Out-Null
+    $w = (New-Object -ComObject WScript.Shell).CreateShortcut((Join-Path $dir 'Mine.lnk')); $w.TargetPath = Join-Path $env:WINDIR 'notepad.exe'; $w.Save()
+    $out = & powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "Import-Module '$(Join-Path $root 'src\Quietpane.psm1')'; `$p = [pscustomobject]@{ StartMenu = '$dir\Mine.lnk'; Desktop = '$dir\none.lnk'; Pinned = '$dir' }; '{0}|{1}' -f @(Get-QpOwnShortcuts -Paths `$p).Count, [bool]('QuietpaneShortcut' -as [type])" 2>&1 | Out-String
+    $out.Trim() -eq '0|False'
+}
 Test-Case 'starting at sign-in waits for sign-in to finish, runs on battery, and is never stopped for running too long' {
     $t = New-QpSignInTask -Script 'C:\Program Files\Quietpane\Quietpane.ps1'
     $a = @($t.Actions)[0]; $tr = @($t.Triggers)[0]
@@ -1854,12 +1926,42 @@ Test-Case 'the icon is the KomodoWorks emblem, on a see-through background' {
     # corner clear, dark square in the KomodoWorks anchor colour, teal square peeking out bottom-right
     (Get-Px 0 0).EndsWith(',0') -and (Get-Px 40 40) -eq '15,27,28,255' -and (Get-Px 240 240) -eq '23,155,131,255'
 }
-Test-Case 'the window''s calls into Windows only name the app, ask for a sharp picture and colour its title bar' {
+Test-Case 'the window compiles nothing, and its calls into Windows only name the app and colour its title bar' {
     # A fixed list on purpose: anything new the window asks Windows to do has to be added here by hand.
-    # The third is DwmSetWindowAttribute, used only to give a dark window a dark title bar.
+    # Both calls are WPF's own, so no C# compiler runs before the window appears.
     $src = Get-Content (Join-Path $root 'Quietpane.ps1') -Raw
-    $calls = @([regex]::Matches($src, 'DllImport\("(\w+)\.dll"[^\]]*\)\]\s*public static extern int (\w+)') | ForEach-Object { '{0}!{1}' -f $_.Groups[1].Value, $_.Groups[2].Value })
-    ($calls -join ';') -eq 'shell32!SetCurrentProcessExplicitAppUserModelID;user32!SetProcessDPIAware;dwmapi!DwmSetWindowAttribute'
+    $members = @([regex]::Matches($src, "WpfNative\.GetMethod\('(\w+)'") | ForEach-Object { $_.Groups[1].Value })
+    $src -notmatch 'DllImport' -and $src -notmatch 'Add-Type[^\r\n]*-(MemberDefinition|TypeDefinition)' -and
+        ($members -join ';') -eq 'SetCurrentProcessExplicitAppUserModelID;_DwmSetWindowAttribute' -and
+        @([regex]::Matches($src, "GetType\('Standard\.NativeMethods'\)")).Count -eq 1 -and $src -match '-ge 18985\) \{ 20 \} else \{ 19 \}'
+}
+Test-Case 'without a call of its own, the window is still drawn at the screen''s real resolution' {
+    # WPF asks Windows for it when it makes the window's handle; checked in a fresh process.
+    $out = & powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -Command {
+        Add-Type -AssemblyName PresentationFramework
+        $m = [System.Windows.DependencyObject].Assembly.GetType('MS.Win32.UnsafeNativeMethods').GetMethod('IsProcessDPIAware', [Reflection.BindingFlags]'NonPublic, Public, Static')
+        $w = [Windows.Markup.XamlReader]::Parse('<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"/>')
+        [void](New-Object System.Windows.Interop.WindowInteropHelper $w).EnsureHandle()
+        [string]$m.Invoke($null, @())
+    } 2>&1 | Out-String
+    $out.Trim() -eq 'True'
+}
+Test-Case 'a finding''s result is shown from where it can still be found, and a failing result never stops the window''s clock' {
+    # The result handler runs on the clock after Invoke-FindingAction has returned, so its own $f is gone;
+    # an error there used to escape the clock's tick and stop every job and reading after it.
+    $src = Get-Content (Join-Path $root 'Quietpane.ps1') -Raw
+    $finding = [regex]::Match($src, '(?s)function Invoke-FindingAction.*?\r?\n\}\r?\n').Value
+    $onDone = $finding.Substring($finding.IndexOf('-OnDone'))
+    $tick = [regex]::Match($src, '(?s)\$timer\.Add_Tick\(\{.*?\r?\n\}\)').Value
+    $finding -match '\$script:FindingPending = \$f\r?\n\s*Start-Work' -and $onDone -match '\$f = \$script:FindingPending' -and
+        $tick -match 'try \{ & \$job\.OnDone \$script:Sync\.Result \}' -and $tick -match 'try \{ Sync-ThemeWithWindows \} catch' -and
+        $src -match '\$timer\.Stop\(\); \$timer\.Start\(\)'
+}
+Test-Case 'asking for admin rights while something is running waits instead of closing the window under it' {
+    $src = Get-Content (Join-Path $root 'Quietpane.ps1') -Raw
+    $req = [regex]::Match($src, '(?s)function Request-Elevation.*?\r?\n\}\r?\n').Value
+    $busy = $req.IndexOf('if (Test-Busy) { return $true }')
+    $busy -gt 0 -and $busy -lt $req.IndexOf('Get-QpShortcutPaths') -and $busy -gt $req.IndexOf('if ($script:Handoff)')
 }
 
 Section 'What signing in costs'
@@ -2235,6 +2337,29 @@ Test-Case 'Start Quietpane says why when the app fails before its window appears
             $c -match 'set "QPSCRIPT=' -and $c -notmatch '-WindowStyle Hidden -File'
     }).Count -eq 2
 }
+Test-Case 'the window is built on a PC that writes numbers with a decimal comma (German, Turkish)' {
+    # '0,4,0,6' margins were once read in the PC's own number format, and the window could not be built at all.
+    $src = Get-Content (Join-Path $root 'Quietpane.ps1') -Raw
+    $built = @('de-DE', 'tr-TR' | Where-Object {
+        $out = & powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -Command ("[Threading.Thread]::CurrentThread.CurrentCulture = '{0}'; & '{1}' -SelfTest" -f $_, (Join-Path $root 'Quietpane.ps1')) 2>&1 | Out-String
+        $out -match 'window built OK'
+    })
+    $built.Count -eq 2 -and $src -notmatch '\.ConvertFromString\(\$Value\)' -and $src -notmatch 'GridLength\.ConvertFromString\('
+}
+Test-Case 'the lists still load from a folder whose name has square brackets in it' {
+    $dir = Join-Path $env:TEMP ('Quietpane [{0}]' -f [guid]::NewGuid().ToString('N').Substring(0, 6))
+    [void][IO.Directory]::CreateDirectory($dir)
+    try {
+        [IO.File]::Copy((Join-Path $root 'src\catalog\privacy.psd1'), (Join-Path $dir 'privacy.psd1'))
+        $n = & (Get-Module Quietpane) {
+            param($d)
+            $wasRoot = $script:CatalogRoot; $wasCache = $script:CatalogCache
+            try { $script:CatalogRoot = $d; $script:CatalogCache = @{}; @((Get-QpCatalog privacy).Items).Count }
+            finally { $script:CatalogRoot = $wasRoot; $script:CatalogCache = $wasCache }
+        } $dir
+    } finally { [IO.Directory]::Delete($dir, $true) }
+    $n -gt 10
+}
 
 Section 'Keyboards and screen readers'
 $selfTestOut = & powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File (Join-Path $root 'Quietpane.ps1') -SelfTest 2>&1 | Out-String
@@ -2375,6 +2500,35 @@ Test-Case 'startup items, clean-up places and Undo points are classified by wher
     $machinePoint = Get-Pol (New-QpOperation -Kind Undo -Target 'x' -Store 'Machine')
     $userRun.Scope -eq 'User' -and $userRun.Privilege -eq 'User' -and $allRun.Scope -eq 'Machine' -and $allRun.Privilege -eq 'Admin' -and
     $temp.Privilege -eq 'User' -and $winTemp.Privilege -eq 'Admin' -and $userPoint.Privilege -eq 'User' -and $machinePoint.Privilege -eq 'Admin'
+}
+Test-Case 'clean-up refuses a %TEMP% or %WINDIR% pointed somewhere else, even with administrator rights (security)' {
+    # Both are environment variables an ordinary account can change, and an elevated window of the same
+    # account reads them too: they must never decide where a clean-up with admin rights runs.
+    $mod = Join-Path $root 'src\Quietpane.psm1'
+    $ask = { param($Var, $Value, $Id) & powershell.exe -NoProfile -ExecutionPolicy Bypass -Command ("`$env:{0} = '{1}'; Import-Module '{2}'; Use-QpSelfTestStores; & (Get-Module Quietpane) {{ `$i = (Get-QpCatalog cleanup).Items | Where-Object Id -eq '{3}'; @(Get-QpCleanupOperations `$i | ForEach-Object {{ (Get-QpOperationPolicy `$_).Refused }}) -join ',' }}" -f $Var, $Value, $mod, $Id) 2>&1 | Out-String }
+    $refused = @(
+        (& $ask 'TEMP' 'C:\ProgramData' 'temp.user'),
+        (& $ask 'TEMP' $env:USERPROFILE 'temp.user'),
+        (& $ask 'TEMP' ([Environment]::GetFolderPath('MyDocuments')) 'temp.user'),
+        (& $ask 'TEMP' $env:LOCALAPPDATA 'temp.user'),
+        (& $ask 'WINDIR' ([Environment]::GetFolderPath('MyDocuments')) 'temp.windows')
+    ) | Where-Object { $_.Trim() -eq 'True' }
+    $normal = & $ask 'QP_UNUSED' 'x' 'temp.user'
+    $refused.Count -eq 5 -and $normal.Trim() -eq 'False'
+}
+Test-Case 'a %TEMP% written with 8.3 short names (C:\Users\JOHNSM~1\...) is still cleared' {
+    # Built from the long spelling: on some PCs (and CI) %TEMP% itself is already written short.
+    $long = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'Temp\Quietpane long folder name for short names'
+    [void][IO.Directory]::CreateDirectory($long)
+    try {
+        $short = (New-Object -ComObject Scripting.FileSystemObject).GetFolder($long).ShortPath
+        if ($short -notmatch '~') { $true }   # this drive keeps no short names, so there is nothing to show
+        else {
+            $mod = Join-Path $root 'src\Quietpane.psm1'
+            $out = & powershell.exe -NoProfile -ExecutionPolicy Bypass -Command ("`$env:TEMP = '{0}'; Import-Module '{1}'; Use-QpSelfTestStores; & (Get-Module Quietpane) {{ `$i = (Get-QpCatalog cleanup).Items | Where-Object Id -eq 'temp.user'; `$op = @(Get-QpCleanupOperations `$i)[0]; '{{0}}|{{1}}' -f `$op.Target, (Get-QpOperationPolicy `$op).Refused }}" -f $short, $mod) 2>&1 | Out-String
+            $out.Trim() -ieq "$long|False"
+        }
+    } finally { [IO.Directory]::Delete($long, $true) }
 }
 Test-Case 'the privilege probe opens an existing key to ask, and changes nothing' {
     $k = 'HKCU:\Software\QuietpaneTest\Probe'
@@ -3035,6 +3189,13 @@ Test-Case 'nothing outside the engine''s own store functions refers to the machi
     $windowHits = @($window | Select-String -Pattern 'ProgramData|CommonApplicationData|MachineRoot|(?<!User)DataRoot\b' | Where-Object { $_.Line -notmatch '^\s*#' })
     $engineStrays = @($engine | Select-String -Pattern "env:ProgramData\b" | Where-Object { $_.Line -notmatch '^\s*#' -and $_.Line -notmatch 'correlationRoots|Test-Under \$env:ProgramData|\$old = foreach|AppData\\LocalLow''\), \$env:ProgramData' })
     $windowHits.Count -eq 0 -and $engineStrays.Count -eq 0
+}
+Test-Case 'a self-test window, and every thread of a parallel read, keep to the stores they were given' {
+    $mod = Join-Path $root 'src\Quietpane.psm1'
+    $out = & powershell.exe -NoProfile -ExecutionPolicy Bypass -Command ("Import-Module '{0}'; `$real = & (Get-Module Quietpane) {{ `$script:MachineRoot }}; Use-QpSelfTestStores; & (Get-Module Quietpane) {{ param(`$r) '{{0}}|{{1}}' -f (`$script:MachineRoot -ne `$r), `$script:MachineRoot.StartsWith([IO.Path]::GetFullPath([IO.Path]::GetTempPath()), 'OrdinalIgnoreCase') }} `$real" -f $mod) 2>&1 | Out-String
+    $win = Get-Content (Join-Path $root 'Quietpane.ps1') -Raw
+    $par = (Get-Command Get-QpStateParallel).Definition
+    $out.Trim() -eq 'True|True' -and $win -match "if \(\`$SelfTest\) \{ Use-QpSelfTestStores \}" -and $par -match 'AddArgument\(\$stores\)' -and $par -match '\$script:MachineVerified = \$null'
 }
 Test-Case 'without admin rights, reading this PC, the sign-in check, undo and quarantine never touch it' {
     $m = Join-Path $scratch 'watched-store'; [void][IO.Directory]::CreateDirectory($m)

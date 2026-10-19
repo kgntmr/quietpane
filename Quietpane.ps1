@@ -59,6 +59,8 @@ function Test-IsAdmin {
 # change that needs them asks, when it is pressed (Request-Elevation), and nothing else ever does.
 
 Import-Module $modulePath -Force
+# A window built only to be tested keeps its own store, even with administrator rights.
+if ($SelfTest) { Use-QpSelfTestStores }
 $info = Get-QpInfo
 
 # Who this window works for. An ordinary window works for the account running it. A window opened with
@@ -194,15 +196,14 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
 # can push the buttons off the bottom of a laptop screen. The third line is used once the window
 # exists: it asks Windows for a dark title bar when the window is dark, so a white strip is not left
 # across the top of it.
+# WPF itself already carries both calls into Windows, so nothing is compiled before the window - no
+# C# compiler, no temporary DLL. (The sharp picture needs no call at all: WPF asks for it when it makes
+# the window.) The two names below are the only parts of WPF the window reaches into.
+$script:WpfNative = $null
 if (-not $SelfTest) {
     try {
-        Add-Type -Namespace Quietpane -Name Shell -MemberDefinition @'
-[DllImport("shell32.dll", CharSet = CharSet.Unicode)] public static extern int SetCurrentProcessExplicitAppUserModelID(string appId);
-[DllImport("user32.dll")] public static extern int SetProcessDPIAware();
-[DllImport("dwmapi.dll")] public static extern int DwmSetWindowAttribute(IntPtr hwnd, int attribute, ref int value, int size);
-'@
-        [void][Quietpane.Shell]::SetCurrentProcessExplicitAppUserModelID($info.AppId)
-        [void][Quietpane.Shell]::SetProcessDPIAware()
+        $script:WpfNative = [System.Windows.Window].Assembly.GetType('Standard.NativeMethods')
+        [void]$script:WpfNative.GetMethod('SetCurrentProcessExplicitAppUserModelID').Invoke($null, @([string]$info.AppId))
     } catch { }
 }
 
@@ -321,14 +322,15 @@ function Resolve-Theme {
 
 function Set-TitleBarTheme {
     <# A dark title bar on a dark window. Windows 10 before 20H1 knew the setting as 19, later ones as 20. #>
-    if (-not ('Quietpane.Shell' -as [type]) -or -not $window) { return }
+    if (-not $script:WpfNative -or -not $window) { return }
     try {
         $hwnd = (New-Object System.Windows.Interop.WindowInteropHelper $window).Handle
         if ($hwnd -eq [IntPtr]::Zero) { return }
         $on = [int]($script:ActiveTheme -eq 'Dark')
-        if ([Quietpane.Shell]::DwmSetWindowAttribute($hwnd, 20, [ref]$on, 4) -ne 0) {
-            [void][Quietpane.Shell]::DwmSetWindowAttribute($hwnd, 19, [ref]$on, 4)
-        }
+        # WPF's copy of the call does not report failure, so the number is chosen by Windows build (20H1 = 18985).
+        $attr = if ([Environment]::OSVersion.Version.Build -ge 18985) { 20 } else { 19 }
+        $m = $script:WpfNative.GetMethod('_DwmSetWindowAttribute', [Reflection.BindingFlags]'NonPublic, Static')
+        [void]$m.Invoke($null, @($hwnd, [Enum]::ToObject($m.GetParameters()[1].ParameterType, $attr), $on, 4))
     } catch { }
 }
 
@@ -629,6 +631,9 @@ $window.Dispatcher.add_UnhandledException({
         [void][System.Windows.MessageBox]::Show(
             "Something went wrong inside Quietpane:`n`n$($e.Exception.Message)`n`nThe app is still running and nothing on your PC was changed by this. There is more under `"Show details`" at the bottom.",
             'Quietpane')
+        # An error that escaped the window's clock stops it, and with it every job, reading and log line
+        # after this one. Stop and start it again (start alone does not bring it back).
+        if ($timer -and $timer.IsEnabled) { $timer.Stop(); $timer.Start() }
     } catch { }
 })
 
@@ -658,7 +663,9 @@ try {
 Set-QpLogSink { param($line) try { $ui.LogBox.AppendText($line + [Environment]::NewLine) } catch { } }
 
 $thickConv = New-Object System.Windows.ThicknessConverter
-function Get-Thick([string]$Value) { $thickConv.ConvertFromString($Value) }
+# Invariant: margins are written '0,4,0,6', which a PC set to a decimal comma (German, French, Turkish...)
+# would otherwise read as numbers and refuse, so the window could not be built at all.
+function Get-Thick([string]$Value) { $thickConv.ConvertFromInvariantString($Value) }
 
 function Get-Bitmap([string]$Path) {
     if (-not (Test-Path $Path)) { return $null }
@@ -961,7 +968,7 @@ function Add-DetailRow {
     $row.Padding = Get-Thick '0,7,0,7'
     if ($Box.Rows.Children.Count) { $row.BorderBrush = Get-Brush '#E6DFCC'; $row.BorderThickness = Get-Thick '0,1,0,0' }
     $grid = New-Object System.Windows.Controls.Grid
-    foreach ($w in 'Auto', '*') { $cd = New-Object System.Windows.Controls.ColumnDefinition; $cd.Width = $script:GridLength.ConvertFromString($w); [void]$grid.ColumnDefinitions.Add($cd) }
+    foreach ($w in 'Auto', '*') { $cd = New-Object System.Windows.Controls.ColumnDefinition; $cd.Width = $script:GridLength.ConvertFromInvariantString($w); [void]$grid.ColumnDefinitions.Add($cd) }
     $name = New-Text $Label 12.5 'Normal' '#4B5B5C' '0,0,16,0'
     $name.TextWrapping = 'NoWrap'
     $name.VerticalAlignment = 'Center'
@@ -1040,7 +1047,7 @@ function New-SettingRow([string]$Label, [string]$Note, $Control) {
     $row.BorderBrush = Get-Brush '#E6DFCC'
     $row.BorderThickness = Get-Thick '0,0,0,1'
     $grid = New-Object System.Windows.Controls.Grid
-    foreach ($w in '*', 'Auto') { $cd = New-Object System.Windows.Controls.ColumnDefinition; $cd.Width = $script:GridLength.ConvertFromString($w); [void]$grid.ColumnDefinitions.Add($cd) }
+    foreach ($w in '*', 'Auto') { $cd = New-Object System.Windows.Controls.ColumnDefinition; $cd.Width = $script:GridLength.ConvertFromInvariantString($w); [void]$grid.ColumnDefinitions.Add($cd) }
     $left = New-Object System.Windows.Controls.StackPanel
     $left.VerticalAlignment = 'Center'
     $left.Margin = Get-Thick '0,0,20,0'
@@ -1282,11 +1289,34 @@ $homePanel.Children.Clear()
 $meters.Margin = Get-Thick '0,20,0,0'
 foreach ($x in @($homeTop) + @($script:UpdatePanel, $cards, $script:BackPanel, $homeButtons, $homeHint, $script:ResultPanel, $meters, $script:TotalsText, $homeDisclaimer, $homeRather)) { [void]$homePanel.Children.Add($x) }
 
+# Every tab's header is made now, so the strip is complete the moment the window appears.
+$healthPanel = New-TabPage 'Health' 'health' ''
+$scanPanel = New-TabPage 'Safety scan' 'scan' ('Asks Microsoft Defender what it has found, and looks for the tricks adware uses. Looking changes nothing.')
+$privacyPanel = New-TabPage 'Privacy' 'privacy' ('What your PC shares, and the tracking and ads you can switch off. Security and Windows Update are never touched.')
+$vendorPanel = New-TabPage 'Telemetry' 'vendors' ('')
+$appsPanel = New-TabPage 'Apps' 'apps' ('What starts when you sign in, and apps you never asked for. Tick, then Preview or Apply.')
+$cleanupPanel = New-TabPage 'Free up space' 'cleanup' ('Leftovers nobody needs, like temporary files and old installers. They go to your Recycle Bin. Close your browsers first.')
+$undoPanel = New-TabPage 'Undo' 'undo' ('Changes that can be undone are saved as restore points. Pick one to put it back.')
+$aboutPanel = New-TabPage 'Settings' 'about' ''
+
+# On an ordinary start the window appears as soon as Home is ready, and the other tabs are filled in behind
+# it - about a second sooner. (Not for the self-test, a start at sign-in or a window opened with admin rights,
+# which carry on as before.)
+$script:EarlyShown = $false
+if (-not $SelfTest -and -not $Minimized -and -not $script:Elevated -and -not $Snapshot) {
+    try {
+        $window.Show()
+        $window.Cursor = [System.Windows.Input.Cursors]::AppStarting
+        # Let it paint once before the rest is built.
+        $window.Dispatcher.Invoke([Action] { }, [System.Windows.Threading.DispatcherPriority]::ContextIdle)
+        $script:EarlyShown = $true
+    } catch { }
+}
+
 # 1. Health - how hard the PC is working, how warm it is, and how it is holding up, laid out the way
 # MSI Center lays out its hardware: the answer in one line, the four readings that change by the second
 # on the left, and one plain list of everything else on the right. Nothing here is read unless this tab
 # is open. On a narrow window the list drops underneath rather than being squeezed.
-$healthPanel = New-TabPage 'Health' 'health' ''
 # The answer first. Why, one step away: it appears when you point at it, and screen readers read it out.
 $verdictRow = New-Object System.Windows.Controls.StackPanel
 $verdictRow.Orientation = 'Horizontal'
@@ -1387,7 +1417,6 @@ foreach ($box in $script:Details.Values) { [void]$healthRight.Children.Add($box.
 [void]$healthPanel.Children.Add($healthColumns)
 
 # 1. Safety scan - Microsoft Defender's detections plus Quietpane's own checks
-$scanPanel = New-TabPage 'Safety scan' 'scan' ('Asks Microsoft Defender what it has found, and looks for the tricks adware uses. Looking changes nothing.')
 Set-MoreInfo $scanPanel.Children[0] 'Odd startup entries, hidden tasks, browser add-ons and tampered programs. Threat names come from Defender; anything Quietpane spots itself is marked as its own check - a warning sign, not proof.'
 $scanButtons = New-Object System.Windows.Controls.StackPanel
 $scanButtons.Orientation = 'Horizontal'
@@ -1472,7 +1501,6 @@ function New-Section([string]$Header) {
     $ex.Content = $sp
     return [pscustomobject]@{ Expander = $ex; Content = $sp }
 }
-$privacyPanel = New-TabPage 'Privacy' 'privacy' ('What your PC shares, and the tracking and ads you can switch off. Security and Windows Update are never touched.')
 [void]$privacyPanel.Children.Add((New-GlanceBox 'privacy'))
 
 # Add-ons see more of your browsing than anything else on this PC, so they come first.
@@ -1520,7 +1548,6 @@ foreach ($g in @((Get-QpCatalog privacy).Items | ForEach-Object { $_.Group } | S
 }
 
 # 3. Telemetry - the brand and hardware software that came with this PC
-$vendorPanel = New-TabPage 'Telemetry' 'vendors' ('')
 $vendorIntroText = New-Text 'Background extras from the companies that made your PC, and what they report. Quietpane targets known helpers rather than drivers, and each item says what it affects.' 13.5 'Normal' '#4B5B5C' '0,0,0,12'
 Set-MoreInfo $vendorIntroText 'The laptop maker, the graphics chip, the processor: most PCs arrive with helpers from each, and many quietly report home. Only what is actually on this PC is listed.'
 [void]$vendorPanel.Children.Add($vendorIntroText)
@@ -1531,7 +1558,6 @@ $script:VendorList = New-Object System.Windows.Controls.StackPanel
 [void]$vendorPanel.Children.Add($script:VendorList)
 
 # 4. Apps - what starts when you sign in, and apps you could remove
-$appsPanel = New-TabPage 'Apps' 'apps' ('What starts when you sign in, and apps you never asked for. Tick, then Preview or Apply.')
 [void]$appsPanel.Children.Add((New-GlanceBox 'apps'))
 
 $script:StartupSection = New-Section 'Starts when you sign in'
@@ -1559,7 +1585,6 @@ $script:AppsList = New-Object System.Windows.Controls.StackPanel
 [void]$appsPanel.Children.Add($script:RemoveSection.Expander)
 
 # 5. Clean-up
-$cleanupPanel = New-TabPage 'Free up space' 'cleanup' ('Leftovers nobody needs, like temporary files and old installers. They go to your Recycle Bin. Close your browsers first.')
 [void]$cleanupPanel.Children.Add((New-GlanceBox 'cleanup'))
 $script:CleanupList = New-Object System.Windows.Controls.StackPanel
 [void]$script:CleanupList.Children.Add((New-Text 'Measuring sizes...' 13 'Normal' '#4B5B5C'))
@@ -1605,7 +1630,6 @@ foreach ($e in $script:SpaceWinsHead, $script:SpaceWinsNote, $script:SpaceCrumb,
 [void]$cleanupPanel.Children.Add($script:SpaceSection.Expander)
 
 # 6. Undo
-$undoPanel = New-TabPage 'Undo' 'undo' ('Changes that can be undone are saved as restore points. Pick one to put it back.')
 Set-MoreInfo $undoPanel.Children[0] 'Settings go back exactly as they were. Cleaned-up files are waiting in your Recycle Bin, and removed apps come back from the Microsoft Store.'
 [void]$undoPanel.Children.Add((New-GlanceBox 'undo'))
 $script:UndoList = New-Object System.Windows.Controls.ListBox
@@ -1632,7 +1656,6 @@ $script:BtnMachineUndo.Add_Click({ [void](Request-Elevation 'undo' 'undo') })
 # settings page: what each setting is on the left, its switch or choice on the right, a hairline between.
 # A switch is used only where flipping it changes things there and then; it shows "on" only once that
 # has worked. The version and the small print sit at the bottom.
-$aboutPanel = New-TabPage 'Settings' 'about' ''
 [void]$aboutPanel.Children.Add((New-Text 'Settings' 24 'SemiBold' '#0F1B1C' '0,0,0,6' 'Fraunces, Georgia'))
 
 function New-ChoiceRow([string]$Group, [string]$Label, [object[]]$Choices, [string]$Current, [scriptblock]$OnPick) {
@@ -2118,6 +2141,8 @@ function Request-Elevation {
     if ($script:Elevated) { return $false }
     if ($SelfTest -and -not $script:HandoffTest) { $script:LastElevationRequest = [pscustomobject]@{ Pending = $PendingId; Tab = $TabKey; Ticks = @($Ticks) }; return $true }
     if ($script:Handoff) { $ui.Status.Text = 'Already asking Windows for admin rights...'; return $true }
+    # This window closes once the new one is open, which would end whatever is still running here.
+    if (Test-Busy) { return $true }
     if (-not $TabKey) { $TabKey = [string]$ui.Tabs.SelectedItem.Tag }
     # The copy in Program Files, when it is this very version (only an administrator can change it);
     # otherwise this one.
@@ -2457,13 +2482,13 @@ $timer.Interval = [TimeSpan]::FromMilliseconds(150)
 # internet list. Otherwise it slows right down, so a Quietpane that is just sitting there costs nothing.
 function Set-TimerQuick { if ($timer.Interval.TotalMilliseconds -ne 150) { $timer.Interval = [TimeSpan]::FromMilliseconds(150) } }
 $timer.Add_Tick({
-    Sync-ThemeWithWindows
+    try { Sync-ThemeWithWindows } catch { }
     $line = $null
     $got = $false
     while ($script:Sync.Queue.TryDequeue([ref]$line)) { $ui.LogBox.AppendText($line + [Environment]::NewLine); $got = $true }
     if ($got) { $ui.LogBox.ScrollToEnd() }
-    if ($script:Job -and $script:ScanRunning) { Update-ScanProgress }
-    if ($script:Job -and $script:SpaceRunning) { Update-SpaceProgress }
+    if ($script:Job -and $script:ScanRunning) { try { Update-ScanProgress } catch { } }
+    if ($script:Job -and $script:SpaceRunning) { try { Update-SpaceProgress } catch { } }
     # Readings are taken while the Health tab is showing - and, if you asked it to watch the session,
     # while you are somewhere else as well, but then only every ten seconds.
     $onHealth = ([string]$ui.Tabs.SelectedItem.Tag -eq 'health') -and ($window.WindowState -ne 'Minimized')
@@ -2508,7 +2533,19 @@ $timer.Add_Tick({
         while ($script:Sync.Queue.TryDequeue([ref]$line)) { $ui.LogBox.AppendText($line + [Environment]::NewLine) }
         $ui.LogBox.ScrollToEnd()
         Set-Busy $false 'All done - nothing running.'
-        if ($job.OnDone) { & $job.OnDone $script:Sync.Result }
+        # A mistake in showing a result must not stop this clock: it also runs every job after this one.
+        if ($job.OnDone) {
+            try { & $job.OnDone $script:Sync.Result }
+            catch {
+                $ui.LogBox.AppendText(('[{0}] ERROR   {1}' -f (Get-Date -Format 'HH:mm:ss'), $_.Exception.Message) + [Environment]::NewLine)
+                Set-Busy $false 'Something went wrong - Quietpane is still running.'
+                if (-not $SelfTest) {
+                    [void][System.Windows.MessageBox]::Show(
+                        "Something went wrong inside Quietpane:`n`n$($_.Exception.Message)`n`nThe app is still running and nothing on your PC was changed by this. There is more under `"Show details`" at the bottom.",
+                        'Quietpane')
+                }
+            }
+        }
     }
     $wanted = if ($script:Job -or $script:Live.Active -or $script:Live.NetActive) { 150 } elseif ($window.WindowState -eq 'Minimized') { 2000 } else { 750 }
     if ($timer.Interval.TotalMilliseconds -ne $wanted) { $timer.Interval = [TimeSpan]::FromMilliseconds($wanted) }
@@ -2969,7 +3006,7 @@ function New-SpaceRow {
     param($Node, [int64]$Of, [string]$Name, [string]$Sub, [int64]$Size)
     $g = New-Object System.Windows.Controls.Grid
     $g.Margin = Get-Thick '0,7,0,0'
-    foreach ($w in '*', '176', '92', '190') { $c = New-Object System.Windows.Controls.ColumnDefinition; $c.Width = $script:GridLength.ConvertFromString($w); [void]$g.ColumnDefinitions.Add($c) }
+    foreach ($w in '*', '176', '92', '190') { $c = New-Object System.Windows.Controls.ColumnDefinition; $c.Width = $script:GridLength.ConvertFromInvariantString($w); [void]$g.ColumnDefinitions.Add($c) }
     $left = New-Object System.Windows.Controls.StackPanel
     $left.VerticalAlignment = 'Center'
     $title = New-Object System.Windows.Controls.TextBlock
@@ -3103,7 +3140,7 @@ function Show-SpaceWins {
         $sp = New-Object System.Windows.Controls.StackPanel
 
         $top = New-Object System.Windows.Controls.Grid
-        foreach ($width in '*', '110') { $c = New-Object System.Windows.Controls.ColumnDefinition; $c.Width = $script:GridLength.ConvertFromString($width); [void]$top.ColumnDefinitions.Add($c) }
+        foreach ($width in '*', '110') { $c = New-Object System.Windows.Controls.ColumnDefinition; $c.Width = $script:GridLength.ConvertFromInvariantString($width); [void]$top.ColumnDefinitions.Add($c) }
         $name = New-Text $w.Title 13.5 'SemiBold' '#0F1B1C' '0'
         [void]$top.Children.Add($name)
         $size = New-Text (Format-QpBytes $w.Bytes) 14 'SemiBold' '#117A68' '0'
@@ -3826,7 +3863,7 @@ function Draw-SessionTimeline($Panel, $Watch) {
     $from = Get-QpStamp 'HH:mm' ([datetime]$Watch.Started)
     $to = if ($Watch.Ended) { Get-QpStamp 'HH:mm' ([datetime]$Watch.Ended) } else { 'now' }
     $axis = New-Object System.Windows.Controls.Grid
-    foreach ($width in '*', 'Auto') { $c = New-Object System.Windows.Controls.ColumnDefinition; $c.Width = $script:GridLength.ConvertFromString($width); [void]$axis.ColumnDefinitions.Add($c) }
+    foreach ($width in '*', 'Auto') { $c = New-Object System.Windows.Controls.ColumnDefinition; $c.Width = $script:GridLength.ConvertFromInvariantString($width); [void]$axis.ColumnDefinitions.Add($c) }
     $left = New-Text $from 11 'Normal' '#66706F' '0,3,0,0'
     $right = New-Text $to 11 'Normal' '#66706F' '0,3,0,0'
     [System.Windows.Controls.Grid]::SetColumn($right, 1)
@@ -4099,7 +4136,7 @@ function Set-LogVisible([bool]$Visible) {
 }
 
 # One pass over the PC, sharing its slow lookups (see Get-QpState). Health is read by its own tab.
-$script:ReadState = { Get-QpState }
+$script:ReadState = { Get-QpStateParallel }
 
 function Update-State {
     Start-Work -StatusText 'Reading the current state of this PC...' -Work $script:ReadState -OnDone { param($s) Update-FromState $s }
@@ -4623,10 +4660,15 @@ function Invoke-FindingAction([string]$Id, [string]$Action) {
     }
     $ui.LogBox.AppendText([Environment]::NewLine)
     Set-LogVisible $true
+    # The result arrives on the window's clock, long after this function has returned: keep the finding where
+    # it can still be found then (as Move-SpaceItem does), not in a variable that will be gone.
+    $script:FindingPending = $f
     Start-Work -StatusText 'Dealing with it...' -Params @{ Finding = $f; Action = $Action; Force = $force } -Work { param($Finding, $Action, $Force) Invoke-QpRemediate -Finding $Finding -Action $Action -Force:$Force } -OnDone {
         param($r)
         $r = @($r)[-1]
-        if ($r) {
+        $f = $script:FindingPending
+        $script:FindingPending = $null
+        if ($r -and $f) {
             $f.Status = $r.Status
             [void][System.Windows.MessageBox]::Show($r.Note, 'Quietpane')
             Show-Findings
@@ -5852,14 +5894,25 @@ function Show-Welcome {
 
 $script:FirstShown = $false
 $script:LastReadAt = $null
-function Start-FirstRead {
+function Start-FirstRead([switch]$Gated) {
     # In the background, the first read of the PC. Before it: shortcuts and the sign-in start always open
     # Quietpane's own copy, so keep that copy current and point back any shortcut that still opens a
     # folder that may have moved (it does nothing if you have neither). After it, the About tab's button
     # and tick boxes are filled in, once that is settled.
-    Start-Work -StatusText 'Reading the current state of this PC...' -Work {
-        try { [void](Sync-QpInstall) } catch { Write-QpLog "Could not check the shortcuts: $($_.Exception.Message)" 'WARN' }
-        Get-QpState
+    # -Gated, on the very first start: the PC is read (only read) while the welcome is on screen, and the
+    # job then waits at a gate. Only once the welcome is accepted are the shortcuts looked after and the
+    # result shown; if it is declined, the job is dropped and nothing has changed.
+    if ($Gated) { $script:Sync.Go = New-Object System.Threading.ManualResetEvent $false }
+    Start-Work -StatusText 'Reading the current state of this PC...' -Params @{ Gated = [bool]$Gated } -Work {
+        param([bool]$Gated)
+        if (-not $Gated) { try { [void](Sync-QpInstall) } catch { Write-QpLog "Could not check the shortcuts: $($_.Exception.Message)" 'WARN' } }
+        $state = Get-QpStateParallel
+        if ($Gated) {
+            [void]$Sync.Go.WaitOne()
+            if ($Sync.Cancel) { return $null }
+            try { [void](Sync-QpInstall) } catch { Write-QpLog "Could not check the shortcuts: $($_.Exception.Message)" 'WARN' }
+        }
+        $state
     } -OnDone {
         param($s)
         Update-FromState $s; Update-PlaceControls; $script:LastReadAt = Get-Date
@@ -5871,8 +5924,20 @@ function Start-FirstRead {
 function Start-FirstShow {
     if ($script:FirstShown) { return }
     $script:FirstShown = $true
-    if (-not (Show-Welcome)) { $window.Close(); return }
     $ui.LogBox.AppendText(('Quietpane {0} - Developed by KomodoWorks.com. Started {1}. Administrator: {2}. This app makes no network connections.' -f $info.Version, (Get-QpStamp 'yyyy-MM-dd HH:mm'), (Test-IsAdmin)) + [Environment]::NewLine)
+    # The very first start: read while the welcome is being read, so Home is ready when it is accepted.
+    $early = (-not $script:Elevated) -and (-not (Test-Path -LiteralPath $acceptFile)) -and (-not $script:Job)
+    if ($early) { if (-not $timer.IsEnabled) { $timer.Start() }; Start-FirstRead -Gated }
+    if (-not (Show-Welcome)) {
+        if ($early -and $script:Job) {
+            # Declined: let go of the read without waiting for it (it has changed nothing), so closing is instant.
+            $script:Sync.Cancel = $true; [void]$script:Sync.Go.Set()
+            $j = $script:Job; $script:Job = $null
+            try { [void]$j.PS.BeginStop($null, $null) } catch { }
+        }
+        $window.Close(); return
+    }
+    if ($early) { [void]$script:Sync.Go.Set() }
     if (-not $timer.IsEnabled) { $timer.Start() }
     # A check made at sign-in a few minutes ago is still fresh, and one may still be under way;
     # otherwise read the PC now.
@@ -5896,6 +5961,16 @@ if ($Minimized -and $Watch) { $window.Add_Loaded({ Start-SignInCheck }) }
 $window.Add_StateChanged({ if ($window.WindowState -ne 'Minimized') { Start-FirstShow }; Set-TimerQuick })
 # Opened minimised at sign-in, even the clock waits until Quietpane is first opened.
 if (-not $Minimized) { $timer.Start() }
-[void]$window.ShowDialog()
+if ($script:EarlyShown) {
+    # Already on screen: what ShowDialog would have done from here - the first show, then wait until it closes.
+    $window.Cursor = $null
+    Update-TabIcons $window.ActualWidth
+    Start-FirstShow
+    $script:WindowFrame = New-Object System.Windows.Threading.DispatcherFrame
+    $window.Add_Closed({ $script:WindowFrame.Continue = $false })
+    if ($window.IsVisible) { [System.Windows.Threading.Dispatcher]::PushFrame($script:WindowFrame) }
+} else {
+    [void]$window.ShowDialog()
+}
 Stop-LiveSampler   # in case the window went away without Closing firing
 if ($script:RemoveCopyOnClose) { try { [void](Start-QpCopyRemoval) } catch { } }

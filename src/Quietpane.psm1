@@ -23,8 +23,8 @@
       * No network requests, no telemetry, no data collection. Everything stays on this PC.
 #>
 
-$script:AppVersion  = '2.1.1'
-$script:AppReleased = '2026-10-14'   # the day this version was published; bumped with the version
+$script:AppVersion  = '2.2.0'
+$script:AppReleased = '2026-10-19'   # the day this version was published; bumped with the version
 $script:Brand       = @{ Name = 'KomodoWorks'; Url = 'https://www.komodoworks.com'; Email = 'info@komodoworks.com'; Repo = 'https://github.com/kgntmr/quietpane' }
 $script:AssetsRoot  = Join-Path (Split-Path $PSScriptRoot -Parent) 'assets'
 $script:LogSink     = $null
@@ -137,7 +137,7 @@ function Get-QpCatalog {
     $stamp = (Get-Item -LiteralPath $path).LastWriteTimeUtc.Ticks
     $hit = $script:CatalogCache[$Name]
     if ($hit -and $hit.Stamp -eq $stamp) { return $hit.Data }
-    $data = Import-PowerShellDataFile -Path $path
+    $data = Import-PowerShellDataFile -LiteralPath $path   # literal: a folder named 'Quietpane [2]' must still work
     $script:CatalogCache[$Name] = @{ Stamp = $stamp; Data = $data }
     return $data
 }
@@ -246,11 +246,24 @@ function Format-QpRate {
 
 function Get-QpSize {
     param([string[]]$Paths)
-    $sum = 0
+    # Every file is counted (hidden ones and cloud placeholders too), but a linked folder is not followed,
+    # exactly as Get-ChildItem -Recurse counted them - about ten times faster. This also decides whether
+    # the Recycle Bin can take a folder, so it must never count low.
+    $sum = [int64]0
     foreach ($p in $Paths) {
-        if (-not (Test-Path -LiteralPath $p)) { continue }
-        $m = Get-ChildItem -LiteralPath $p -Recurse -File -Force -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum
-        if ($m.Sum) { $sum += $m.Sum }
+        if (-not $p) { continue }
+        if ([IO.File]::Exists($p)) { try { $sum += (New-Object IO.FileInfo $p).Length } catch { }; continue }
+        if (-not [IO.Directory]::Exists($p)) { continue }
+        $stack = New-Object 'System.Collections.Generic.Stack[IO.DirectoryInfo]'
+        $stack.Push((New-Object IO.DirectoryInfo $p))
+        while ($stack.Count) {
+            $d = $stack.Pop()
+            try { $entries = $d.GetFileSystemInfos() } catch { continue }
+            foreach ($e in $entries) {
+                if ($e -is [IO.FileInfo]) { $sum += $e.Length }
+                elseif (-not ($e.Attributes -band [IO.FileAttributes]::ReparsePoint)) { $stack.Push($e) }
+            }
+        }
     }
     return $sum
 }
@@ -448,6 +461,50 @@ function Get-QpCanonicalPath {
     try { $full = [IO.Path]::GetFullPath($Path) } catch { return $null }
     if ($full.TrimEnd('\') -ine $Path.TrimEnd('\')) { return $null }
     return $full.TrimEnd('\')
+}
+
+function Get-QpLongPath([string]$Path) {
+    <#
+        Windows' long spelling of an existing folder written with 8.3 short names (%TEMP% often is, as
+        C:\Users\JOHNSM~1\...). Only short names are re-spelled: '..', '.' and a trailing dot or space are
+        left as they are, so Get-QpCanonicalPath still refuses them.
+    #>
+    if ($Path -notmatch '~' -or $Path -match '(^|\\)\.{1,2}(\\|$)|[. ](\\|$)') { return $Path }
+    try { $long = (Get-Item -LiteralPath $Path -Force -ErrorAction Stop).FullName.TrimEnd('\') } catch { return $Path }
+    $a = $Path.TrimEnd('\').Split('\'); $b = $long.Split('\')
+    if ($a.Count -ne $b.Count) { return $Path }
+    for ($i = 0; $i -lt $a.Count; $i++) { if ($a[$i] -ine $b[$i] -and $a[$i] -notmatch '~') { return $Path } }
+    return $long
+}
+
+function Get-QpCleanupRoots {
+    <#
+        The only folders clean-up may work in: the catalog's own places, worked out with Windows' own idea
+        of each folder - never from environment variables, which an ordinary account can point anywhere
+        (an elevated window of the same account reads them too). %TEMP% may be anywhere inside this
+        account's local app data, but never that whole folder.
+    #>
+    $local = [Environment]::GetFolderPath('LocalApplicationData'); $userHome = [Environment]::GetFolderPath('UserProfile')
+    $localOk = $local -and $userHome -and (Test-QpPathUnder $local $userHome) -and -not (Test-QpSamePath $local $userHome)
+    $win = [Environment]::GetFolderPath('Windows')
+    $map = @{ LOCALAPPDATA = $local; TEMP = $local; TMP = $local; WINDIR = $win; SYSTEMROOT = $win; PROGRAMDATA = [Environment]::GetFolderPath('CommonApplicationData') }
+    foreach ($item in (Get-QpCatalog cleanup).Items) {
+        foreach ($pat in @($item.Paths)) {
+            if ([string]$pat -notmatch '^%(\w+)%(.*)$') { continue }
+            $var = $matches[1].ToUpperInvariant(); $rest = $matches[2]
+            if (-not $map[$var] -or ($map[$var] -eq $local -and -not $localOk)) { continue }
+            $keep = @()
+            foreach ($p in @(($map[$var] + $rest).TrimEnd('\').Split('\'))) { if ([Management.Automation.WildcardPattern]::ContainsWildcardCharacters($p)) { break }; $keep += $p }
+            [pscustomobject]@{ Root = ($keep -join '\'); Strict = ($var -in 'TEMP', 'TMP') }
+        }
+    }
+}
+
+function Test-QpCleanupPlace([string]$Path) {
+    foreach ($r in @(Get-QpCleanupRoots)) {
+        if ((Test-QpPathUnder $Path $r.Root) -and -not ($r.Strict -and (Test-QpSamePath $Path $r.Root))) { return $true }
+    }
+    return $false
 }
 
 function Test-QpPathUnder([string]$Path, [string]$Root) {
@@ -813,6 +870,9 @@ function Get-QpOperationPolicy {
         }
         'Cleanup' {
             if (-not (Get-QpCanonicalPath $Op.Target)) { return (& $refuse "that is not a place Quietpane clears ($($Op.Target))") }
+            # Only inside the folders made for leftovers: a %TEMP% pointed at Program Files, ProgramData,
+            # your profile or Documents is refused, even with administrator rights.
+            if (-not (Test-QpCleanupPlace $Op.Target)) { return (& $refuse "that is not a place Quietpane clears ($($Op.Target))") }
             $scope = Get-QpPathScope $Op.Target
             $priv = if ($scope -eq 'User') { 'User' } else { 'Admin' }
         }
@@ -1090,6 +1150,17 @@ function Get-QpMachineStorePath {
     return $base
 }
 
+function Use-QpSelfTestStores {
+    <#
+        For a window built only to be tested (-SelfTest): its machine store is a new, empty folder of its own
+        under %TEMP%, so a test run with administrator rights never opens the real one. It takes no path, so
+        it can only ever point away from it; the store there is checked and locked as usual.
+    #>
+    $base = Join-Path ([IO.Path]::GetFullPath([IO.Path]::GetTempPath())) ('qp-selftest-' + [guid]::NewGuid().ToString('N'))
+    $script:MachineRoot = Join-Path $base 'ProgramData\Quietpane'
+    $script:LegacyDataRoot = Join-Path $base 'ProgramData\CleanMyPC'
+    $script:MachineVerified = $null
+}
 function Test-QpRestoreDestination {
     <# Whether a restore point made now has somewhere safe to go. #>
     if (Test-QpAdmin) {
@@ -1184,16 +1255,20 @@ function Test-QpJsonFields {
 
 function Get-QpSystemUsage {
     <# Live disk and memory figures for the Home screen. Read-only. #>
-    $os = Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue
+    # The same figures WMI gives, straight from Windows: about 30 ms instead of 600 on the window's thread.
     $sysDrive = ($env:SystemDrive, 'C:')[[int][string]::IsNullOrEmpty($env:SystemDrive)]
-    $disk = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='$sysDrive'" -ErrorAction SilentlyContinue
-    $memTotal = if ($os) { [int64]$os.TotalVisibleMemorySize * 1KB } else { 0 }
-    $memFree = if ($os) { [int64]$os.FreePhysicalMemory * 1KB } else { 0 }
+    $diskTotal = [int64]0; $diskFree = [int64]0; $memTotal = [int64]0; $memFree = [int64]0
+    try { $d = New-Object IO.DriveInfo ($sysDrive + '\'); $diskTotal = [int64]$d.TotalSize; $diskFree = [int64]$d.TotalFreeSpace } catch { }
+    try {
+        Add-Type -AssemblyName Microsoft.VisualBasic
+        $ci = New-Object Microsoft.VisualBasic.Devices.ComputerInfo
+        $memTotal = [int64]$ci.TotalPhysicalMemory; $memFree = [int64]$ci.AvailablePhysicalMemory
+    } catch { }
     [pscustomobject]@{
         Drive     = $sysDrive
-        DiskTotal = if ($disk) { [int64]$disk.Size } else { 0 }
-        DiskFree  = if ($disk) { [int64]$disk.FreeSpace } else { 0 }
-        DiskUsed  = if ($disk) { [int64]($disk.Size - $disk.FreeSpace) } else { 0 }
+        DiskTotal = $diskTotal
+        DiskFree  = $diskFree
+        DiskUsed  = $(if ($diskTotal) { $diskTotal - $diskFree } else { [int64]0 })
         MemTotal  = $memTotal
         MemFree   = $memFree
         MemUsed   = $memTotal - $memFree
@@ -2596,7 +2671,7 @@ function Get-QpReliability {
     } catch { }
 
     $up = $null
-    try { $up = $Now - (Get-CimInstance Win32_OperatingSystem -ErrorAction Stop).LastBootUpTime } catch { }
+    try { $up = $Now - (Get-CimInstance Win32_OperatingSystem -Property LastBootUpTime -ErrorAction Stop).LastBootUpTime } catch { }
     # Windows' own scale: ten is perfect, and it drops for days with a crash on them.
     $word = if ($null -eq $score) { 'not scored' } elseif ($score -ge 9) { 'steady' } elseif ($score -ge 7) { 'mostly steady' } else { 'bumpy' }
     [pscustomobject]@{
@@ -3820,7 +3895,7 @@ function Get-QpStartupItems {
     foreach ($s in $RunSources) {
         $p = Get-ItemProperty -Path $s.Key -ErrorAction SilentlyContinue
         if (-not $p) { continue }
-        foreach ($prop in ($p.PSObject.Properties | Where-Object { $_.Name -notlike 'PS*' })) {
+        foreach ($prop in ($p.PSObject.Properties | Where-Object { $_.Name -notin $script:QpRegNoteNames })) {
             $target = Resolve-QpCommandTarget $prop.Value
             $advice = Get-QpStartupAdvice -Text "$($prop.Name) $($prop.Value)" -Catalog $cat
             [void]$out.Add([pscustomobject]@{
@@ -3858,11 +3933,35 @@ function Get-QpStartupItems {
     if ($AppRoot -and (Test-Path $AppRoot)) {
         $names = @{}
         try { foreach ($pkg in @(Get-QpAppxPackages)) { $names[$pkg.PackageFamilyName] = $pkg } } catch { }
-        foreach ($pkgKey in @(Get-ChildItem -Path $AppRoot -ErrorAction SilentlyContinue)) {
-            foreach ($task in @(Get-ChildItem -Path $pkgKey.PSPath -ErrorAction SilentlyContinue)) {
-                $state = (Get-ItemProperty -Path $task.PSPath -ErrorAction SilentlyContinue).State
-                if ($null -eq $state) { continue }
-                $pfn = $pkgKey.PSChildName
+        # Each app's switch, read straight from the registry (read-only) rather than through the provider:
+        # the same keys and values, several times faster.
+        $switches = New-Object System.Collections.ArrayList
+        $at = ConvertTo-QpRegTarget $AppRoot
+        if ($at) {
+            $hiveKey = if ($at.Hive -eq 'HKCU') { [Microsoft.Win32.Registry]::CurrentUser } else { [Microsoft.Win32.Registry]::LocalMachine }
+            $prefix = 'Microsoft.PowerShell.Core\Registry::{0}\{1}' -f $(if ($at.Hive -eq 'HKCU') { 'HKEY_CURRENT_USER' } else { 'HKEY_LOCAL_MACHINE' }), $at.Key
+            $rootKey = $null; try { $rootKey = $hiveKey.OpenSubKey($at.Key, $false) } catch { }
+            if ($rootKey) {
+                try {
+                    foreach ($pfnName in $rootKey.GetSubKeyNames()) {
+                        $pk = $null; try { $pk = $rootKey.OpenSubKey($pfnName, $false) } catch { }
+                        if (-not $pk) { continue }
+                        try {
+                            foreach ($taskName in $pk.GetSubKeyNames()) {
+                                $tk = $null; try { $tk = $pk.OpenSubKey($taskName, $false) } catch { }
+                                if (-not $tk) { continue }
+                                try { [void]$switches.Add([pscustomobject]@{ Pfn = $pfnName; Task = $taskName; State = $tk.GetValue('State'); PSPath = "$prefix\$pfnName\$taskName" }) } finally { $tk.Close() }
+                            }
+                        } finally { $pk.Close() }
+                    }
+                } finally { $rootKey.Close() }
+            }
+        }
+        foreach ($sw in $switches) {
+            if ($null -ne $sw.State) {
+                $task = [pscustomobject]@{ PSChildName = $sw.Task; PSPath = $sw.PSPath }
+                $state = $sw.State
+                $pfn = $sw.Pfn
                 $display = ''; $publisher = ''
                 $pkg = $names[$pfn]
                 if ($pkg) {
@@ -3902,7 +4001,7 @@ function Get-QpStartupItems {
 function Get-QpSignInTime {
     <# When this Windows session signed in, and when the PC last started. Never throws. #>
     $boot = $null; $logon = $null
-    try { $boot = (Get-CimInstance Win32_OperatingSystem -ErrorAction Stop).LastBootUpTime } catch { }
+    try { $boot = (Get-CimInstance Win32_OperatingSystem -Property LastBootUpTime -ErrorAction Stop).LastBootUpTime } catch { }   # one property: ~20 ms, not ~200
     try {
         # The oldest process of this sign-in session is the closest honest mark for "when you signed in".
         $session = (Get-Process -Id $PID -ErrorAction Stop).SessionId
@@ -4196,7 +4295,7 @@ function Get-QpDeviceUse {
     #>
     param([string]$UserRoot = $script:ConsentRoot, [string]$MachineRoot = $script:ConsentRootMachine, $BootTime)
     if ($null -eq $BootTime) {
-        $BootTime = try { (Get-CimInstance Win32_OperatingSystem -ErrorAction Stop).LastBootUpTime } catch { [datetime]::MinValue }
+        $BootTime = try { (Get-CimInstance Win32_OperatingSystem -Property LastBootUpTime -ErrorAction Stop).LastBootUpTime } catch { [datetime]::MinValue }
     }
     function Get-Use($props) {
         # Windows notes when each use started and stopped. Started but not stopped (since the PC was
@@ -4486,14 +4585,20 @@ function Get-QpExtensionBlocks {
     foreach ($hive in 'HKCU', 'HKLM') {
         foreach ($listName in 'ExtensionInstallBlocklist', 'ExtensionInstallBlacklist') {
             $key = '{0}:\{1}\{2}' -f $hive, $Policy, $listName
+            # Opened read-only and directly: a policy that isn't there is the usual case, and asking the
+            # registry provider for it costs an exception every time.
+            $base = if ($hive -eq 'HKCU') { [Microsoft.Win32.Registry]::CurrentUser } else { [Microsoft.Win32.Registry]::LocalMachine }
             $k = $null
-            try { $k = Get-Item -Path $key -ErrorAction Stop } catch { continue }
-            foreach ($name in @($k.GetValueNames())) {
-                $id = [string]$k.GetValue($name)
-                if (-not $id) { continue }
-                $id = $id.ToLowerInvariant()
-                if (-not $out.ContainsKey($id)) { $out[$id] = [pscustomobject]@{ Key = $key; Name = $name; Mine = ($hive -eq 'HKCU') } }
-            }
+            try { $k = $base.OpenSubKey("$Policy\$listName", $false) } catch { continue }
+            if (-not $k) { continue }
+            try {
+                foreach ($name in @($k.GetValueNames())) {
+                    $id = [string]$k.GetValue($name)
+                    if (-not $id) { continue }
+                    $id = $id.ToLowerInvariant()
+                    if (-not $out.ContainsKey($id)) { $out[$id] = [pscustomobject]@{ Key = $key; Name = $name; Mine = ($hive -eq 'HKCU') } }
+                }
+            } finally { $k.Close() }
         }
     }
     return $out
@@ -4636,7 +4741,8 @@ function Get-QpFirefoxAddons {
         foreach ($a in @($js.addons)) {
             if ([string]$a.type -ne 'extension') { continue }
             $loc = [string]$a.location
-            $builtIn = $loc -like 'app-*'
+            # Only Firefox's own locations are its own parts; 'app-profile' is where your own add-ons live.
+            $builtIn = $loc -in @('app-builtin', 'app-system-defaults', 'app-system-addons', 'app-system-profile')
             $perms = @()
             if ($a.userPermissions) { $perms += @($a.userPermissions.permissions) + @($a.userPermissions.origins) }
             $added = $null
@@ -4656,7 +4762,7 @@ function Get-QpFirefoxAddons {
                 Locked      = $false
                 Blocked     = $false
                 BlockedByMe = $false
-                Source      = $(if ($builtIn) { 'Part of the browser itself' } elseif ($loc -like 'winreg*') { 'Another program on this PC put it there' } else { 'You added it yourself' })
+                Source      = $(if ($builtIn) { 'Part of the browser itself' } elseif ($loc -in 'app-profile', 'app-temporary') { 'You added it yourself' } else { 'Another program on this PC put it there' })
                 Reach       = (Get-QpExtensionReach -Permissions $perms)
                 Added       = $added
                 Folder      = [string]$a.path
@@ -4777,7 +4883,21 @@ function Resolve-QpPaths {
     param([string[]]$Patterns)
     foreach ($pat in $Patterns) {
         $expanded = [Environment]::ExpandEnvironmentVariables($pat)
-        Get-Item -Path $expanded -Force -ErrorAction SilentlyContinue | Where-Object { $_.PSIsContainer } | ForEach-Object { $_.FullName }
+        $segments = $expanded -split '\\'
+        # The common shapes - fixed folders, and '*' standing for a whole folder name (a browser profile) -
+        # are walked directly; anything else goes through Get-Item exactly as before.
+        if ($segments[0] -match '^[A-Za-z]:$' -and $expanded -notmatch '[\[\]?]' -and -not @($segments | Where-Object { $_ -ne '*' -and $_.Contains('*') }).Count) {
+            $found = @($segments[0] + '\')
+            foreach ($seg in @($segments | Select-Object -Skip 1 | Where-Object { $_ })) {
+                $found = @(foreach ($dir in $found) {
+                    if ($seg -eq '*') { try { [IO.Directory]::GetDirectories($dir) } catch { } }
+                    else { $next = Join-Path $dir $seg; if ([IO.Directory]::Exists($next)) { $next } }
+                })
+            }
+            $found | Where-Object { $_ -notmatch '^[A-Za-z]:\\$' } | ForEach-Object { Get-QpLongPath $_ }
+            continue
+        }
+        Get-Item -Path $expanded -Force -ErrorAction SilentlyContinue | Where-Object { $_.PSIsContainer } | ForEach-Object { Get-QpLongPath $_.FullName }
     }
 }
 
@@ -4793,7 +4913,7 @@ function Get-QpCleanupOperations {
         $parts = @($expanded.TrimEnd('\').Split('\'))
         $keep = @()
         foreach ($p in $parts) { if ([Management.Automation.WildcardPattern]::ContainsWildcardCharacters($p)) { break }; $keep += $p }
-        $base = ($keep -join '\')
+        $base = Get-QpLongPath ($keep -join '\')
         if ($base -match '^[A-Za-z]:$') { $base += '\' }
         New-QpOperation -Kind Cleanup -Target $base -Item $Item.Id
     }
@@ -4812,8 +4932,10 @@ function Get-QpCleanupTargets {
             try { [void][IO.Directory]::GetFileSystemEntries($p) }
             catch { $availability = if (Test-QpAccessDenied $_.Exception) { 'NeedsAdmin' } else { 'Unavailable' }; continue }
             if ($cutoff) {
-                foreach ($c in @(Get-ChildItem -LiteralPath $p -Force -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -lt $cutoff -and -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) })) {
-                    $size += if ($c.PSIsContainer) { Get-QpSize @($c.FullName) } else { $c.Length }
+                $children = @(); try { $children = (New-Object IO.DirectoryInfo $p).GetFileSystemInfos() } catch { }
+                foreach ($c in $children) {
+                    if ($c.LastWriteTime -ge $cutoff -or ($c.Attributes -band [IO.FileAttributes]::ReparsePoint)) { continue }
+                    $size += if ($c -is [IO.DirectoryInfo]) { Get-QpSize @($c.FullName) } else { $c.Length }
                 }
             } else {
                 $size += Get-QpSize @($p)
@@ -5444,14 +5566,22 @@ function Get-QpOwnShortcuts {
         taskbar. Only shortcuts carrying Quietpane's app id count, so one you made yourself is left alone.
     #>
     param($Paths = (Get-QpShortcutPaths))
-    Initialize-QpShortcut
     $candidates = @(@{ Path = $Paths.StartMenu; Kind = 'StartMenu' }, @{ Path = $Paths.Desktop; Kind = 'Desktop' })
     if ($Paths.Pinned -and (Test-Path -LiteralPath $Paths.Pinned)) {
         foreach ($f in @(Get-ChildItem -LiteralPath $Paths.Pinned -Filter '*.lnk' -File -Force -ErrorAction SilentlyContinue)) { $candidates += @{ Path = $f.FullName; Kind = 'Pinned' } }
     }
+    # A shortcut keeps its app id as UTF-16 text, so one that doesn't hold those bytes can't be ours. Only
+    # when one might be is the shortcut reader compiled: on a PC without Quietpane shortcuts, no compiler runs.
+    $latin1 = [Text.Encoding]::GetEncoding(28591)
+    $needle = $latin1.GetString([Text.Encoding]::Unicode.GetBytes($script:AppUserModelId))
+    $candidates = @($candidates | Where-Object {
+        if (-not $_.Path -or -not (Test-Path -LiteralPath $_.Path -PathType Leaf)) { return $false }
+        try { $latin1.GetString([IO.File]::ReadAllBytes($_.Path)).IndexOf($needle, [StringComparison]::OrdinalIgnoreCase) -ge 0 } catch { $true }
+    })
+    if (-not $candidates.Count) { return @() }
+    Initialize-QpShortcut
     $out = New-Object System.Collections.ArrayList
     foreach ($c in $candidates) {
-        if (-not $c.Path -or -not (Test-Path -LiteralPath $c.Path -PathType Leaf)) { continue }
         try {
             if ([QuietpaneShortcut]::ReadAppId($c.Path) -ne $script:AppUserModelId) { continue }
             [void]$out.Add([pscustomobject]@{ Path = $c.Path; Kind = $c.Kind; Script = (Get-QpLinkScript ([QuietpaneShortcut]::ReadArguments($c.Path))) })
@@ -5471,6 +5601,7 @@ function Test-QpShortcuts {
 }
 
 function Set-QpShortcut([string]$Link, $Paths) {
+    Initialize-QpShortcut
     $target = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
     # (not $args: PowerShell keeps that name for a function's own arguments)
     $argLine = '-NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Hidden -File "{0}"' -f $Paths.Script
@@ -6440,53 +6571,124 @@ function Invoke-QpVendorUninstall {
 
 #region ---------------------------------------------------------------- one-click
 
+# The parts of what the window shows, in the order their problems have always been listed. Each stands
+# on its own: if one cannot be read on this PC, the rest of the window still works and the part that
+# failed says so, rather than leaving the whole window empty. A part gets what was read before it.
+$script:StateParts = @(
+    @{ Key = 'Startup'; What = 'what starts at sign-in'; Body = { param($v) @(Get-QpStartupItems) } },
+    @{ Key = 'Privacy'; What = 'the privacy settings'; Body = { param($v) Get-QpPrivacyStatus } },
+    @{ Key = 'Vendors'; What = 'the brand extras'; Body = { param($v) @(Get-QpVendorStatus) } },
+    @{ Key = 'Apps'; What = 'the installed apps'; Body = { param($v) @(Get-QpBloatApps) } },
+    # Read once, then cost it: what signing in costs is about these very startup items.
+    @{ Key = 'SignIn'; What = 'what signing in costs'; Body = {
+            param($v)
+            $times = Get-QpSignInTime
+            $record = Get-QpBootRecord
+            [pscustomobject]@{ Times = $times; Record = $record; RecordStatus = $script:BootRecordStatus; Costs = @(Get-QpSignInCost -Items $v['Startup'] -Record $record -Times $times) }
+        }
+    },
+    @{ Key = 'Devices'; What = 'camera, microphone and location use'; Body = { param($v) @(Get-QpDeviceUse) } },
+    @{ Key = 'Addons'; What = 'your browser add-ons'; Body = { param($v) @(Get-QpBrowserExtensions) } },
+    @{ Key = 'Cleanup'; What = 'what can be cleaned up'; Body = { param($v) @(Get-QpCleanupTargets) } },
+    @{ Key = 'Restore'; What = 'the restore points'; Body = { param($v) @(Get-QpRestorePoints) } }
+)
+
+function Read-QpStateParts {
+    param([string[]]$Keys)
+    $parts = @{}
+    $failed = New-Object System.Collections.ArrayList
+    foreach ($part in $script:StateParts) {
+        if ($Keys -notcontains $part.Key) { continue }
+        $parts[$part.Key] = try { & $part.Body $parts }
+        catch {
+            [void]$failed.Add($part.Key)
+            Write-QpLog "Could not read $($part.What) : $($_.Exception.Message)" 'WARN'
+            if ($part.Key -eq 'Privacy') { @{} } else { $null }
+        }
+    }
+    @{ Parts = $parts; Failed = @($failed) }
+}
+
+function Complete-QpState {
+    param([hashtable]$Parts, [string[]]$Failed)
+    $state = @{ Problems = @(foreach ($part in $script:StateParts) { if ($Failed -contains $part.Key) { $part.What } }) }
+    foreach ($part in $script:StateParts) { $state[$part.Key] = $Parts[$part.Key] }
+    # What needs administrator rights: worked out here, by the same rules the changes themselves obey,
+    # so the shields on screen always match what the engine will allow.
+    $state.Policy = try { Get-QpOptionPolicies -State $state } catch { Write-QpLog "Could not read what needs administrator rights : $($_.Exception.Message)" 'WARN'; @{} }
+    # What couldn't be seen without administrator rights - kept apart from what went wrong.
+    $limited = @()
+    if (@($state.Privacy.Values | Where-Object { $_ -eq 'NeedsAdmin' }).Count -or @($state.Vendors | ForEach-Object { @($_.Items) } | Where-Object { $_.Status -eq 'NeedsAdmin' }).Count) { $limited += 'system tasks Windows hides' }
+    if (@($state.Cleanup | Where-Object { $_ -and $_.Availability -eq 'NeedsAdmin' }).Count) { $limited += "the size of Windows' own temporary files" }
+    if ($state.SignIn -and $state.SignIn.RecordStatus -eq 'NeedsAdmin') { $limited += "Windows' own restart timing" }
+    $state.Limited = @($limited)
+    $state
+}
+
 function Get-QpState {
     <#
         Everything the window shows about this PC, read in one pass that shares its slow lookups.
         Read-only. Battery and drive health aren't here: the Health tab reads those itself, when open.
     #>
     Start-QpStateCache
-    $problems = New-Object System.Collections.ArrayList
-    # Each part stands on its own: if one cannot be read on this PC, the rest of the window still works
-    # and the part that failed says so, rather than leaving the whole window empty.
-    function Read-Part([string]$What, [scriptblock]$Body, $Fallback) {
-        try { return (& $Body) }
-        catch {
-            [void]$problems.Add($What)
-            Write-QpLog "Could not read $What : $($_.Exception.Message)" 'WARN'
-            return $Fallback
-        }
-    }
     try {
-        # Read once, then cost it: what signing in costs is about these very items.
-        $startup = Read-Part 'what starts at sign-in' { @(Get-QpStartupItems) } @()
-        $state = @{
-            Privacy  = Read-Part 'the privacy settings' { Get-QpPrivacyStatus } @{}
-            Vendors  = Read-Part 'the brand extras' { @(Get-QpVendorStatus) } @()
-            Apps     = Read-Part 'the installed apps' { @(Get-QpBloatApps) } @()
-            Startup  = $startup
-            SignIn   = Read-Part 'what signing in costs' {
-                $times = Get-QpSignInTime
-                $record = Get-QpBootRecord
-                [pscustomobject]@{ Times = $times; Record = $record; RecordStatus = $script:BootRecordStatus; Costs = @(Get-QpSignInCost -Items $startup -Record $record -Times $times) }
-            } $null
-            Devices  = Read-Part 'camera, microphone and location use' { @(Get-QpDeviceUse) } @()
-            Addons   = Read-Part 'your browser add-ons' { @(Get-QpBrowserExtensions) } @()
-            Cleanup  = Read-Part 'what can be cleaned up' { @(Get-QpCleanupTargets) } @()
-            Restore  = Read-Part 'the restore points' { @(Get-QpRestorePoints) } @()
-            Problems = @($problems)
-        }
-        # What needs administrator rights: worked out here, by the same rules the changes themselves obey,
-        # so the shields on screen always match what the engine will allow.
-        $state.Policy = Read-Part 'what needs administrator rights' { Get-QpOptionPolicies -State $state } @{}
-        # What couldn't be seen without administrator rights - kept apart from what went wrong.
-        $limited = @()
-        if (@($state.Privacy.Values | Where-Object { $_ -eq 'NeedsAdmin' }).Count -or @($state.Vendors | ForEach-Object { @($_.Items) } | Where-Object { $_.Status -eq 'NeedsAdmin' }).Count) { $limited += 'system tasks Windows hides' }
-        if (@($state.Cleanup | Where-Object { $_ -and $_.Availability -eq 'NeedsAdmin' }).Count) { $limited += "the size of Windows' own temporary files" }
-        if ($state.SignIn -and $state.SignIn.RecordStatus -eq 'NeedsAdmin') { $limited += "Windows' own restart timing" }
-        $state.Limited = @($limited)
-        $state
+        $r = Read-QpStateParts -Keys @($script:StateParts | ForEach-Object { $_.Key })
+        Complete-QpState $r.Parts $r.Failed
     } finally { Stop-QpStateCache }
+}
+
+function Get-QpStateParallel {
+    <#
+        The same answer as Get-QpState, read in four groups side by side, each in a thread of its own -
+        about half the time on most PCs. The groups are the parts that share slow lookups (installed
+        apps; scheduled tasks), so nothing is read twice. Read-only, like Get-QpState. Log lines come
+        back group by group, problems in the same order as always.
+    #>
+    $groups = @(@('Startup', 'Apps', 'SignIn'), @('Privacy', 'Vendors'), @('Cleanup'), @('Devices', 'Addons', 'Restore'))
+    $modulePath = Join-Path $PSScriptRoot 'Quietpane.psm1'
+    $sid = (Get-QpActor).RequesterSid
+    # The same stores as the caller (a test run points them elsewhere). The machine store is checked again in
+    # each thread, never taken as already checked.
+    $stores = @{ MachineRoot = $script:MachineRoot; LegacyDataRoot = $script:LegacyDataRoot; UserDataRoot = $script:UserDataRoot }
+    $jobs = @(foreach ($g in $groups) {
+        $log = New-Object System.Collections.ArrayList
+        $rs = [runspacefactory]::CreateRunspace()
+        $rs.ApartmentState = 'STA'
+        $rs.Open()
+        $rs.SessionStateProxy.SetVariable('QpGroupLog', $log)
+        $ps = [powershell]::Create()
+        $ps.Runspace = $rs
+        [void]$ps.AddScript({
+            param($ModulePath, $Sid, $Keys, $Stores)
+            Import-Module $ModulePath -Force
+            & (Get-Module Quietpane) { param($s) foreach ($n in $s.Keys) { Set-Variable -Scope Script -Name $n -Value $s[$n] }; $script:MachineVerified = $null } $Stores
+            Set-QpActor -RequesterSid $Sid      # the same account as the caller - no more, no less
+            Set-QpLogSink { param($line) [void]$QpGroupLog.Add($line) }
+            & (Get-Module Quietpane) { param($k) Start-QpStateCache; try { Read-QpStateParts -Keys $k } finally { Stop-QpStateCache } } $Keys
+        }).AddArgument($modulePath).AddArgument($sid).AddArgument([string[]]$g).AddArgument($stores)
+        @{ PS = $ps; RS = $rs; Handle = $ps.BeginInvoke(); Log = $log; Keys = $g }
+    })
+    $parts = @{}; $failed = New-Object System.Collections.ArrayList
+    try {
+        foreach ($j in $jobs) {
+            $res = $null
+            try { $res = @($j.PS.EndInvoke($j.Handle) | Where-Object { $_ -is [hashtable] -and $_.ContainsKey('Parts') })[-1] } catch { }
+            foreach ($line in @($j.Log)) { if ($script:LogSink) { & $script:LogSink $line } else { Write-Host $line } }
+            if (-not $res) {
+                # The whole group could not be read: each of its parts says so, as it would have on its own.
+                $why = if ($j.PS.Streams.Error.Count) { $j.PS.Streams.Error[0].Exception.Message } else { 'it stopped before it finished' }
+                foreach ($k in $j.Keys) {
+                    $what = @($script:StateParts | Where-Object { $_.Key -eq $k })[0].What
+                    Write-QpLog "Could not read $what : $why" 'WARN'
+                    [void]$failed.Add($k); $parts[$k] = $(if ($k -eq 'Privacy') { @{} } else { $null })
+                }
+                continue
+            }
+            foreach ($k in $res.Parts.Keys) { $parts[$k] = $res.Parts[$k] }
+            foreach ($k in @($res.Failed)) { [void]$failed.Add($k) }
+        }
+    } finally { foreach ($j in $jobs) { try { $j.PS.Dispose(); $j.RS.Dispose() } catch { } } }
+    Complete-QpState $parts @($failed)
 }
 
 function Get-QpOptionPolicies {
@@ -6616,23 +6818,42 @@ function Invoke-QpRecommended {
 $script:SeverityRank = @{ Critical = 0; High = 1; Medium = 2; Low = 3; Info = 4 }
 $script:DefenderStatusMap = @{ '0' = 'Detected'; '1' = 'Detected'; '2' = 'Removed'; '3' = 'Quarantined'; '4' = 'Removed'; '5' = 'Allowed'; '6' = 'Removed' }
 
+function Get-QpOtherAntivirus {
+    <#
+        Antivirus other than Defender that Windows Security knows about, and whether each says it is on
+        (bits 12-15 of productState: 1 = on). Throws when Windows Security can't be asked.
+    #>
+    foreach ($p in @(Get-CimInstance -Namespace 'root\SecurityCenter2' -ClassName AntiVirusProduct -ErrorAction Stop)) {
+        $name = [string]$p.displayName
+        if (-not $name -or $name -match '(?i)(windows|microsoft) defender') { continue }
+        $on = $false
+        try { $on = (([int64]$p.productState -band 0xF000) -eq 0x1000) } catch { }
+        [pscustomobject]@{ Name = $name; On = $on }
+    }
+}
+
+# The note properties PowerShell adds to a registry read - never real values (a value named 'PSExec' is real).
+$script:QpRegNoteNames = @('PSPath', 'PSParentPath', 'PSChildName', 'PSDrive', 'PSProvider')
+
 function Get-QpDefenderState {
     <# Can we ask Defender anything, and should we trust the answer? Never throws. #>
     $s = [pscustomobject]@{
         Available = $false; RealTime = $false; SignatureAge = $null
-        CanScan = $false; CanRemediate = $false; ThirdParty = @(); Note = ''
+        CanScan = $false; CanRemediate = $false; ThirdParty = @(); ThirdPartyActive = @(); Note = ''
     }
     $mp = Get-MpComputerStatus -ErrorAction SilentlyContinue
     if ($mp) {
         $s.Available = $true
         $s.RealTime = [bool]$mp.RealTimeProtectionEnabled
-        $s.SignatureAge = [int]$mp.AntivirusSignatureAge
+        # A Defender with no definitions says 4294967295 days, which doesn't fit an [int].
+        try { $s.SignatureAge = [int64]$mp.AntivirusSignatureAge } catch { }
         $s.CanScan = [bool](Get-Command Start-MpScan -ErrorAction SilentlyContinue)
         $s.CanRemediate = [bool](Get-Command Remove-MpThreat -ErrorAction SilentlyContinue)
     }
     try {
-        $av = @(Get-CimInstance -Namespace 'root\SecurityCenter2' -ClassName AntiVirusProduct -ErrorAction Stop | ForEach-Object { [string]$_.displayName })
-        $s.ThirdParty = @($av | Where-Object { $_ -and $_ -notmatch '(?i)(windows|microsoft) defender' })
+        $products = @(Get-QpOtherAntivirus)
+        $s.ThirdParty = @($products | ForEach-Object { $_.Name })
+        $s.ThirdPartyActive = @($products | Where-Object { $_.On } | ForEach-Object { $_.Name })
     } catch { }
     if (-not $s.Available) {
         $s.Note = 'Microsoft Defender could not be reached, so only Quietpane''s own checks ran. Nothing here can confirm a virus by name.'
@@ -6735,9 +6956,11 @@ function Get-QpDefenderFindings {
         $vendorSev = if ($t) { [int]$t.SeverityID } else { 0 }
         $info = Resolve-QpThreatInfo -ThreatName $name -VendorSeverity $vendorSev
         $path = ''; $kind = 'file'
+        $raw = ''
         foreach ($r in @($d.Resources | Where-Object { $_ })) {
-            if ($r -match '^(?<k>[a-z]+):_?(?<v>.+)$') { if (-not $path) { $kind = $matches['k']; $path = $matches['v'] } }
-            elseif (-not $path) { $path = [string]$r }
+            # 'webfile:_C:\x\a.exe|https://...|pid:12' - the file is the part before the first '|'.
+            if ($r -match '^(?<k>[a-z]+):_?(?<v>.+)$') { if (-not $path) { $kind = $matches['k']; $raw = $matches['v']; $path = ($raw -split '\|', 2)[0].Trim() } }
+            elseif (-not $path) { $path = [string]$r; $raw = $path }
         }
         $key = "$name|$path"
         if ($seen.ContainsKey($key)) { continue }   # keep only the newest detection of the same thing
@@ -6750,13 +6973,13 @@ function Get-QpDefenderFindings {
             "Defender threat name: $name"
             "Defender severity: $vendorSev (5 = severe, 4 = high, 2 = moderate, 1 = low)"
             "Defender status: $($d.ThreatStatusID) ($status)"
-            "Resource: $kind $path"
+            "Resource: $kind $raw"
             "Detected: $($d.InitialDetectionTime)"
             "Ran before it was caught: $(if ($t) { $t.DidThreatExecute } else { 'unknown' })"
             "Matched Quietpane note by: $($info.MatchedBy)"
         ) -join "`n"
         New-QpFinding -Section 'Threats' -Severity $info.Tier -ThreatName $name -Family $info.Family -Category $info.Category `
-            -Source 'Microsoft Defender' -Method 'Antivirus signature' -Object (Split-Path $path -Leaf) -Path $path `
+            -Source 'Microsoft Defender' -Method 'Antivirus signature' -Object $(if ($path) { Split-Path $path -Leaf } else { $name }) -Path $path `
             -Sha256 (Get-QpFileHash $path) -Confidence $confidence -VendorName $name -VendorSeverity "$vendorSev" `
             -FirstSeen $d.InitialDetectionTime -Recommended $recommended -Status $status `
             -What $info.What -Why $info.Why -Technical $tech `
@@ -7457,7 +7680,7 @@ function Invoke-QpAudit {
         $names = @{}
         if (-not $ApprovedKey) { return $names }
         $p = Get-ItemProperty -Path $ApprovedKey -ErrorAction SilentlyContinue
-        if ($p) { $p.PSObject.Properties | Where-Object { $_.Name -notlike 'PS*' } | ForEach-Object { if ($_.Value -is [byte[]] -and $_.Value.Length -and ($_.Value[0] -band 1)) { $names[$_.Name] = $true } } }
+        if ($p) { $p.PSObject.Properties | Where-Object { $_.Name -notin $script:QpRegNoteNames } | ForEach-Object { if ($_.Value -is [byte[]] -and $_.Value.Length -and ($_.Value[0] -band 1)) { $names[$_.Name] = $true } } }
         return $names
     }
     function Test-StartupTarget([string]$Command) {
@@ -7476,7 +7699,7 @@ function Invoke-QpAudit {
         $p = Get-ItemProperty -Path $rk.Key -ErrorAction SilentlyContinue
         if (-not $p) { continue }
         $off = Get-DisabledNames $rk.Approved
-        foreach ($prop in ($p.PSObject.Properties | Where-Object { $_.Name -notlike 'PS*' })) {
+        foreach ($prop in ($p.PSObject.Properties | Where-Object { $_.Name -notin $script:QpRegNoteNames })) {
             $startupTotal++; $scanned++
             $disabled = $off.ContainsKey($prop.Name)
             $exists = Test-StartupTarget $prop.Value
@@ -7721,9 +7944,15 @@ function Invoke-QpAudit {
     Write-QpLog 'Checking Microsoft Defender and firewall...' 'INFO'
     $mp = Get-MpComputerStatus -ErrorAction SilentlyContinue
     if ($mp) {
-        if (-not $mp.RealTimeProtectionEnabled) { Add-Finding 'Security' 'High' 'Defender real-time protection is OFF' 'Turn it back on in Windows Security unless another antivirus is installed.' }
-        $age = ((Get-Date) - $mp.AntivirusSignatureLastUpdated).Days
-        if ($age -gt 7) { Add-Finding 'Security' 'Medium' "Defender virus definitions are $age days old" 'Run Windows Update or open Windows Security > Protection updates.' }
+        # With another antivirus switched on, Defender standing down is what Windows does - not a problem.
+        $otherOn = @(); try { $otherOn = @(Get-QpOtherAntivirus | Where-Object { $_.On }) } catch { }
+        if (-not $mp.RealTimeProtectionEnabled -and -not $otherOn.Count) { Add-Finding 'Security' 'High' 'Defender real-time protection is OFF' 'Turn it back on in Windows Security unless another antivirus is installed.' }
+        # (A Defender that has never had definitions has no date at all.)
+        $updated = $mp.AntivirusSignatureLastUpdated
+        if ($updated -is [datetime] -and $updated -gt [datetime]::MinValue -and -not $otherOn.Count) {
+            $age = ((Get-Date) - $updated).Days
+            if ($age -gt 7) { Add-Finding 'Security' 'Medium' "Defender virus definitions are $age days old" 'Run Windows Update or open Windows Security > Protection updates.' }
+        }
         $lastFull = if ($mp.FullScanEndTime) { Get-QpStamp 'yyyy-MM-dd' $mp.FullScanEndTime } else { 'never' }
         Add-Finding 'Security' 'Info' 'Microsoft Defender status' ("Real-time protection: {0}`nDefinitions updated: {1:yyyy-MM-dd}`nLast full scan: {2}" -f $mp.RealTimeProtectionEnabled, $mp.AntivirusSignatureLastUpdated, $lastFull)
     }
@@ -8245,7 +8474,7 @@ function Test-QpElevationArguments {
 #endregion
 Export-ModuleMember -Function Get-QpInfo, Set-QpLogSink, Write-QpLog, Test-QpAdmin, Get-QpCatalog, Format-QpBytes, Format-QpRate,
     Set-QpProgressSink, Write-QpProgress, Set-QpCancelCheck, Test-QpCancelled, New-QpScanSummary,
-    Get-QpState, Get-QpSystemUsage, Get-QpTotals, New-QpLiveMonitor, Get-QpLiveReading, Get-QpHeatWord, Get-QpTempUnit, Set-QpTempUnit, Format-QpTemp, Get-QpLiveVerdict, Get-QpSystemFacts, ConvertTo-QpSystemFacts, ConvertFrom-QpPowerCfg,
+    Get-QpState, Get-QpStateParallel, Get-QpSystemUsage, Get-QpTotals, New-QpLiveMonitor, Get-QpLiveReading, Get-QpHeatWord, Get-QpTempUnit, Set-QpTempUnit, Format-QpTemp, Get-QpLiveVerdict, Get-QpSystemFacts, ConvertTo-QpSystemFacts, ConvertFrom-QpPowerCfg,
     Select-QpNetworkCards, ConvertTo-QpCounterInstance, Get-QpNetRates, Get-QpProgramName,
     New-QpCounter, New-QpCounterGroup,
     New-QpSessionWatch, Add-QpSessionSample, Stop-QpSessionWatch, Get-QpSessionSummary, Format-QpSpan,
@@ -8278,7 +8507,7 @@ Export-ModuleMember -Function Get-QpInfo, Set-QpLogSink, Write-QpLog, Test-QpAdm
     ConvertTo-QpRegTarget, Test-QpRegistryWritable, New-QpOperation, Get-QpOperationPolicy, Get-QpItemPolicy, Get-QpActionOperations,
     Get-QpAppOperations, Get-QpStartupOperations, Get-QpDeviceOperations, Get-QpExtensionOperations, Get-QpCleanupOperations,
     Get-QpManifestLevel, Get-QpUninstallPrivilege, Test-QpBatchPlan, Invoke-QpPreflight, Assert-QpOperation, Get-QpOutcomeSummary,
-    New-QpAdminOnlySecurity, Test-QpAdminOnlyAcl, Protect-QpMachineStore, Get-QpMachineStorePath, Test-QpRestoreDestination,
+    New-QpAdminOnlySecurity, Test-QpAdminOnlyAcl, Protect-QpMachineStore, Get-QpMachineStorePath, Use-QpSelfTestStores, Test-QpRestoreDestination,
     Test-QpJsonKeysUnique, ConvertFrom-QpStrictJson, Test-QpJsonShape, Test-QpJsonFields,
     Read-QpRestorePoint, Test-QpUndoEntry, Get-QpLegacyRestorePoints, Get-QpOptionPolicies, Get-QpItemStatus,
     Get-QpQuarantineRoot, Get-QpLegacyQuarantine, Copy-QpFileFresh, Read-QpQuarantineItem, Get-QpVsCodeSettingsPath, Test-QpActionApplied,

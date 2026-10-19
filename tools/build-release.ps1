@@ -19,7 +19,9 @@ param([string]$OutDir = (Join-Path (Split-Path $PSScriptRoot -Parent) 'dist'))
 
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path $PSScriptRoot -Parent
-$work = Join-Path $env:TEMP ('Qp-build-' + (Get-Date -Format 'yyyyMMddHHmmss'))
+# The long spelling: %TEMP% can be 8.3-short (C:\Users\RUNNER~1\...), and the file names below are cut from
+# the full paths Windows lists, which are always long.
+$work = Join-Path ([IO.Path]::GetFullPath($env:TEMP).TrimEnd('\')) ('Qp-build-' + (Get-Date -Format 'yyyyMMddHHmmss'))
 $stage = Join-Path $work 'Quietpane'
 $app = Join-Path $stage 'App files - no need to open'
 New-Item -ItemType Directory -Force -Path $app | Out-Null
