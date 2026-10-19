@@ -2513,7 +2513,8 @@ Test-Case 'clean-up refuses a %TEMP% or %WINDIR% pointed somewhere else, even wi
     $refused.Count -eq 5 -and $normal.Trim() -eq 'False'
 }
 Test-Case 'a %TEMP% written with 8.3 short names (C:\Users\JOHNSM~1\...) is still cleared' {
-    $long = Join-Path $env:TEMP 'Quietpane long folder name for short names'
+    # Built from the long spelling: on some PCs (and CI) %TEMP% itself is already written short.
+    $long = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'Temp\Quietpane long folder name for short names'
     [void][IO.Directory]::CreateDirectory($long)
     try {
         $short = (New-Object -ComObject Scripting.FileSystemObject).GetFolder($long).ShortPath
