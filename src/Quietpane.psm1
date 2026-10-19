@@ -463,6 +463,50 @@ function Get-QpCanonicalPath {
     return $full.TrimEnd('\')
 }
 
+function Get-QpLongPath([string]$Path) {
+    <#
+        Windows' long spelling of an existing folder written with 8.3 short names (%TEMP% often is, as
+        C:\Users\JOHNSM~1\...). Only short names are re-spelled: '..', '.' and a trailing dot or space are
+        left as they are, so Get-QpCanonicalPath still refuses them.
+    #>
+    if ($Path -notmatch '~' -or $Path -match '(^|\\)\.{1,2}(\\|$)|[. ](\\|$)') { return $Path }
+    try { $long = (Get-Item -LiteralPath $Path -Force -ErrorAction Stop).FullName.TrimEnd('\') } catch { return $Path }
+    $a = $Path.TrimEnd('\').Split('\'); $b = $long.Split('\')
+    if ($a.Count -ne $b.Count) { return $Path }
+    for ($i = 0; $i -lt $a.Count; $i++) { if ($a[$i] -ine $b[$i] -and $a[$i] -notmatch '~') { return $Path } }
+    return $long
+}
+
+function Get-QpCleanupRoots {
+    <#
+        The only folders clean-up may work in: the catalog's own places, worked out with Windows' own idea
+        of each folder - never from environment variables, which an ordinary account can point anywhere
+        (an elevated window of the same account reads them too). %TEMP% may be anywhere inside this
+        account's local app data, but never that whole folder.
+    #>
+    $local = [Environment]::GetFolderPath('LocalApplicationData'); $userHome = [Environment]::GetFolderPath('UserProfile')
+    $localOk = $local -and $userHome -and (Test-QpPathUnder $local $userHome) -and -not (Test-QpSamePath $local $userHome)
+    $win = [Environment]::GetFolderPath('Windows')
+    $map = @{ LOCALAPPDATA = $local; TEMP = $local; TMP = $local; WINDIR = $win; SYSTEMROOT = $win; PROGRAMDATA = [Environment]::GetFolderPath('CommonApplicationData') }
+    foreach ($item in (Get-QpCatalog cleanup).Items) {
+        foreach ($pat in @($item.Paths)) {
+            if ([string]$pat -notmatch '^%(\w+)%(.*)$') { continue }
+            $var = $matches[1].ToUpperInvariant(); $rest = $matches[2]
+            if (-not $map[$var] -or ($map[$var] -eq $local -and -not $localOk)) { continue }
+            $keep = @()
+            foreach ($p in @(($map[$var] + $rest).TrimEnd('\').Split('\'))) { if ([Management.Automation.WildcardPattern]::ContainsWildcardCharacters($p)) { break }; $keep += $p }
+            [pscustomobject]@{ Root = ($keep -join '\'); Strict = ($var -in 'TEMP', 'TMP') }
+        }
+    }
+}
+
+function Test-QpCleanupPlace([string]$Path) {
+    foreach ($r in @(Get-QpCleanupRoots)) {
+        if ((Test-QpPathUnder $Path $r.Root) -and -not ($r.Strict -and (Test-QpSamePath $Path $r.Root))) { return $true }
+    }
+    return $false
+}
+
 function Test-QpPathUnder([string]$Path, [string]$Root) {
     if (-not $Path -or -not $Root) { return $false }
     try { $p = [IO.Path]::GetFullPath($Path).TrimEnd('\'); $r = [IO.Path]::GetFullPath($Root).TrimEnd('\') } catch { return $false }
@@ -826,6 +870,9 @@ function Get-QpOperationPolicy {
         }
         'Cleanup' {
             if (-not (Get-QpCanonicalPath $Op.Target)) { return (& $refuse "that is not a place Quietpane clears ($($Op.Target))") }
+            # Only inside the folders made for leftovers: a %TEMP% pointed at Program Files, ProgramData,
+            # your profile or Documents is refused, even with administrator rights.
+            if (-not (Test-QpCleanupPlace $Op.Target)) { return (& $refuse "that is not a place Quietpane clears ($($Op.Target))") }
             $scope = Get-QpPathScope $Op.Target
             $priv = if ($scope -eq 'User') { 'User' } else { 'Admin' }
         }
@@ -4835,10 +4882,10 @@ function Resolve-QpPaths {
                     else { $next = Join-Path $dir $seg; if ([IO.Directory]::Exists($next)) { $next } }
                 })
             }
-            $found | Where-Object { $_ -notmatch '^[A-Za-z]:\\$' }
+            $found | Where-Object { $_ -notmatch '^[A-Za-z]:\\$' } | ForEach-Object { Get-QpLongPath $_ }
             continue
         }
-        Get-Item -Path $expanded -Force -ErrorAction SilentlyContinue | Where-Object { $_.PSIsContainer } | ForEach-Object { $_.FullName }
+        Get-Item -Path $expanded -Force -ErrorAction SilentlyContinue | Where-Object { $_.PSIsContainer } | ForEach-Object { Get-QpLongPath $_.FullName }
     }
 }
 
@@ -4854,7 +4901,7 @@ function Get-QpCleanupOperations {
         $parts = @($expanded.TrimEnd('\').Split('\'))
         $keep = @()
         foreach ($p in $parts) { if ([Management.Automation.WildcardPattern]::ContainsWildcardCharacters($p)) { break }; $keep += $p }
-        $base = ($keep -join '\')
+        $base = Get-QpLongPath ($keep -join '\')
         if ($base -match '^[A-Za-z]:$') { $base += '\' }
         New-QpOperation -Kind Cleanup -Target $base -Item $Item.Id
     }

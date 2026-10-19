@@ -2437,6 +2437,34 @@ Test-Case 'startup items, clean-up places and Undo points are classified by wher
     $userRun.Scope -eq 'User' -and $userRun.Privilege -eq 'User' -and $allRun.Scope -eq 'Machine' -and $allRun.Privilege -eq 'Admin' -and
     $temp.Privilege -eq 'User' -and $winTemp.Privilege -eq 'Admin' -and $userPoint.Privilege -eq 'User' -and $machinePoint.Privilege -eq 'Admin'
 }
+Test-Case 'clean-up refuses a %TEMP% or %WINDIR% pointed somewhere else, even with administrator rights (security)' {
+    # Both are environment variables an ordinary account can change, and an elevated window of the same
+    # account reads them too: they must never decide where a clean-up with admin rights runs.
+    $mod = Join-Path $root 'src\Quietpane.psm1'
+    $ask = { param($Var, $Value, $Id) & powershell.exe -NoProfile -ExecutionPolicy Bypass -Command ("`$env:{0} = '{1}'; Import-Module '{2}'; & (Get-Module Quietpane) {{ `$i = (Get-QpCatalog cleanup).Items | Where-Object Id -eq '{3}'; @(Get-QpCleanupOperations `$i | ForEach-Object {{ (Get-QpOperationPolicy `$_).Refused }}) -join ',' }}" -f $Var, $Value, $mod, $Id) 2>&1 | Out-String }
+    $refused = @(
+        (& $ask 'TEMP' 'C:\ProgramData' 'temp.user'),
+        (& $ask 'TEMP' $env:USERPROFILE 'temp.user'),
+        (& $ask 'TEMP' ([Environment]::GetFolderPath('MyDocuments')) 'temp.user'),
+        (& $ask 'TEMP' $env:LOCALAPPDATA 'temp.user'),
+        (& $ask 'WINDIR' ([Environment]::GetFolderPath('MyDocuments')) 'temp.windows')
+    ) | Where-Object { $_.Trim() -eq 'True' }
+    $normal = & $ask 'QP_UNUSED' 'x' 'temp.user'
+    $refused.Count -eq 5 -and $normal.Trim() -eq 'False'
+}
+Test-Case 'a %TEMP% written with 8.3 short names (C:\Users\JOHNSM~1\...) is still cleared' {
+    $long = Join-Path $env:TEMP 'Quietpane long folder name for short names'
+    [void][IO.Directory]::CreateDirectory($long)
+    try {
+        $short = (New-Object -ComObject Scripting.FileSystemObject).GetFolder($long).ShortPath
+        if ($short -notmatch '~') { $true }   # this drive keeps no short names, so there is nothing to show
+        else {
+            $mod = Join-Path $root 'src\Quietpane.psm1'
+            $out = & powershell.exe -NoProfile -ExecutionPolicy Bypass -Command ("`$env:TEMP = '{0}'; Import-Module '{1}'; & (Get-Module Quietpane) {{ `$i = (Get-QpCatalog cleanup).Items | Where-Object Id -eq 'temp.user'; `$op = @(Get-QpCleanupOperations `$i)[0]; '{{0}}|{{1}}' -f `$op.Target, (Get-QpOperationPolicy `$op).Refused }}" -f $short, $mod) 2>&1 | Out-String
+            $out.Trim() -ieq "$long|False"
+        }
+    } finally { [IO.Directory]::Delete($long, $true) }
+}
 Test-Case 'the privilege probe opens an existing key to ask, and changes nothing' {
     $k = 'HKCU:\Software\QuietpaneTest\Probe'
     [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey('Software\QuietpaneTest\Probe').Close()
