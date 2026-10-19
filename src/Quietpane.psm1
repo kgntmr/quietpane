@@ -246,11 +246,24 @@ function Format-QpRate {
 
 function Get-QpSize {
     param([string[]]$Paths)
-    $sum = 0
+    # Every file is counted (hidden ones and cloud placeholders too), but a linked folder is not followed,
+    # exactly as Get-ChildItem -Recurse counted them - about ten times faster. This also decides whether
+    # the Recycle Bin can take a folder, so it must never count low.
+    $sum = [int64]0
     foreach ($p in $Paths) {
-        if (-not (Test-Path -LiteralPath $p)) { continue }
-        $m = Get-ChildItem -LiteralPath $p -Recurse -File -Force -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum
-        if ($m.Sum) { $sum += $m.Sum }
+        if (-not $p) { continue }
+        if ([IO.File]::Exists($p)) { try { $sum += (New-Object IO.FileInfo $p).Length } catch { }; continue }
+        if (-not [IO.Directory]::Exists($p)) { continue }
+        $stack = New-Object 'System.Collections.Generic.Stack[IO.DirectoryInfo]'
+        $stack.Push((New-Object IO.DirectoryInfo $p))
+        while ($stack.Count) {
+            $d = $stack.Pop()
+            try { $entries = $d.GetFileSystemInfos() } catch { continue }
+            foreach ($e in $entries) {
+                if ($e -is [IO.FileInfo]) { $sum += $e.Length }
+                elseif (-not ($e.Attributes -band [IO.FileAttributes]::ReparsePoint)) { $stack.Push($e) }
+            }
+        }
     }
     return $sum
 }
@@ -2600,7 +2613,7 @@ function Get-QpReliability {
     } catch { }
 
     $up = $null
-    try { $up = $Now - (Get-CimInstance Win32_OperatingSystem -ErrorAction Stop).LastBootUpTime } catch { }
+    try { $up = $Now - (Get-CimInstance Win32_OperatingSystem -Property LastBootUpTime -ErrorAction Stop).LastBootUpTime } catch { }
     # Windows' own scale: ten is perfect, and it drops for days with a crash on them.
     $word = if ($null -eq $score) { 'not scored' } elseif ($score -ge 9) { 'steady' } elseif ($score -ge 7) { 'mostly steady' } else { 'bumpy' }
     [pscustomobject]@{
@@ -3862,11 +3875,35 @@ function Get-QpStartupItems {
     if ($AppRoot -and (Test-Path $AppRoot)) {
         $names = @{}
         try { foreach ($pkg in @(Get-QpAppxPackages)) { $names[$pkg.PackageFamilyName] = $pkg } } catch { }
-        foreach ($pkgKey in @(Get-ChildItem -Path $AppRoot -ErrorAction SilentlyContinue)) {
-            foreach ($task in @(Get-ChildItem -Path $pkgKey.PSPath -ErrorAction SilentlyContinue)) {
-                $state = (Get-ItemProperty -Path $task.PSPath -ErrorAction SilentlyContinue).State
-                if ($null -eq $state) { continue }
-                $pfn = $pkgKey.PSChildName
+        # Each app's switch, read straight from the registry (read-only) rather than through the provider:
+        # the same keys and values, several times faster.
+        $switches = New-Object System.Collections.ArrayList
+        $at = ConvertTo-QpRegTarget $AppRoot
+        if ($at) {
+            $hiveKey = if ($at.Hive -eq 'HKCU') { [Microsoft.Win32.Registry]::CurrentUser } else { [Microsoft.Win32.Registry]::LocalMachine }
+            $prefix = 'Microsoft.PowerShell.Core\Registry::{0}\{1}' -f $(if ($at.Hive -eq 'HKCU') { 'HKEY_CURRENT_USER' } else { 'HKEY_LOCAL_MACHINE' }), $at.Key
+            $rootKey = $null; try { $rootKey = $hiveKey.OpenSubKey($at.Key, $false) } catch { }
+            if ($rootKey) {
+                try {
+                    foreach ($pfnName in $rootKey.GetSubKeyNames()) {
+                        $pk = $null; try { $pk = $rootKey.OpenSubKey($pfnName, $false) } catch { }
+                        if (-not $pk) { continue }
+                        try {
+                            foreach ($taskName in $pk.GetSubKeyNames()) {
+                                $tk = $null; try { $tk = $pk.OpenSubKey($taskName, $false) } catch { }
+                                if (-not $tk) { continue }
+                                try { [void]$switches.Add([pscustomobject]@{ Pfn = $pfnName; Task = $taskName; State = $tk.GetValue('State'); PSPath = "$prefix\$pfnName\$taskName" }) } finally { $tk.Close() }
+                            }
+                        } finally { $pk.Close() }
+                    }
+                } finally { $rootKey.Close() }
+            }
+        }
+        foreach ($sw in $switches) {
+            if ($null -ne $sw.State) {
+                $task = [pscustomobject]@{ PSChildName = $sw.Task; PSPath = $sw.PSPath }
+                $state = $sw.State
+                $pfn = $sw.Pfn
                 $display = ''; $publisher = ''
                 $pkg = $names[$pfn]
                 if ($pkg) {
@@ -3906,7 +3943,7 @@ function Get-QpStartupItems {
 function Get-QpSignInTime {
     <# When this Windows session signed in, and when the PC last started. Never throws. #>
     $boot = $null; $logon = $null
-    try { $boot = (Get-CimInstance Win32_OperatingSystem -ErrorAction Stop).LastBootUpTime } catch { }
+    try { $boot = (Get-CimInstance Win32_OperatingSystem -Property LastBootUpTime -ErrorAction Stop).LastBootUpTime } catch { }   # one property: ~20 ms, not ~200
     try {
         # The oldest process of this sign-in session is the closest honest mark for "when you signed in".
         $session = (Get-Process -Id $PID -ErrorAction Stop).SessionId
@@ -4200,7 +4237,7 @@ function Get-QpDeviceUse {
     #>
     param([string]$UserRoot = $script:ConsentRoot, [string]$MachineRoot = $script:ConsentRootMachine, $BootTime)
     if ($null -eq $BootTime) {
-        $BootTime = try { (Get-CimInstance Win32_OperatingSystem -ErrorAction Stop).LastBootUpTime } catch { [datetime]::MinValue }
+        $BootTime = try { (Get-CimInstance Win32_OperatingSystem -Property LastBootUpTime -ErrorAction Stop).LastBootUpTime } catch { [datetime]::MinValue }
     }
     function Get-Use($props) {
         # Windows notes when each use started and stopped. Started but not stopped (since the PC was
@@ -4490,14 +4527,20 @@ function Get-QpExtensionBlocks {
     foreach ($hive in 'HKCU', 'HKLM') {
         foreach ($listName in 'ExtensionInstallBlocklist', 'ExtensionInstallBlacklist') {
             $key = '{0}:\{1}\{2}' -f $hive, $Policy, $listName
+            # Opened read-only and directly: a policy that isn't there is the usual case, and asking the
+            # registry provider for it costs an exception every time.
+            $base = if ($hive -eq 'HKCU') { [Microsoft.Win32.Registry]::CurrentUser } else { [Microsoft.Win32.Registry]::LocalMachine }
             $k = $null
-            try { $k = Get-Item -Path $key -ErrorAction Stop } catch { continue }
-            foreach ($name in @($k.GetValueNames())) {
-                $id = [string]$k.GetValue($name)
-                if (-not $id) { continue }
-                $id = $id.ToLowerInvariant()
-                if (-not $out.ContainsKey($id)) { $out[$id] = [pscustomobject]@{ Key = $key; Name = $name; Mine = ($hive -eq 'HKCU') } }
-            }
+            try { $k = $base.OpenSubKey("$Policy\$listName", $false) } catch { continue }
+            if (-not $k) { continue }
+            try {
+                foreach ($name in @($k.GetValueNames())) {
+                    $id = [string]$k.GetValue($name)
+                    if (-not $id) { continue }
+                    $id = $id.ToLowerInvariant()
+                    if (-not $out.ContainsKey($id)) { $out[$id] = [pscustomobject]@{ Key = $key; Name = $name; Mine = ($hive -eq 'HKCU') } }
+                }
+            } finally { $k.Close() }
         }
     }
     return $out
@@ -4781,6 +4824,20 @@ function Resolve-QpPaths {
     param([string[]]$Patterns)
     foreach ($pat in $Patterns) {
         $expanded = [Environment]::ExpandEnvironmentVariables($pat)
+        $segments = $expanded -split '\\'
+        # The common shapes - fixed folders, and '*' standing for a whole folder name (a browser profile) -
+        # are walked directly; anything else goes through Get-Item exactly as before.
+        if ($segments[0] -match '^[A-Za-z]:$' -and $expanded -notmatch '[\[\]?]' -and -not @($segments | Where-Object { $_ -ne '*' -and $_.Contains('*') }).Count) {
+            $found = @($segments[0] + '\')
+            foreach ($seg in @($segments | Select-Object -Skip 1 | Where-Object { $_ })) {
+                $found = @(foreach ($dir in $found) {
+                    if ($seg -eq '*') { try { [IO.Directory]::GetDirectories($dir) } catch { } }
+                    else { $next = Join-Path $dir $seg; if ([IO.Directory]::Exists($next)) { $next } }
+                })
+            }
+            $found | Where-Object { $_ -notmatch '^[A-Za-z]:\\$' }
+            continue
+        }
         Get-Item -Path $expanded -Force -ErrorAction SilentlyContinue | Where-Object { $_.PSIsContainer } | ForEach-Object { $_.FullName }
     }
 }
@@ -4816,8 +4873,10 @@ function Get-QpCleanupTargets {
             try { [void][IO.Directory]::GetFileSystemEntries($p) }
             catch { $availability = if (Test-QpAccessDenied $_.Exception) { 'NeedsAdmin' } else { 'Unavailable' }; continue }
             if ($cutoff) {
-                foreach ($c in @(Get-ChildItem -LiteralPath $p -Force -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -lt $cutoff -and -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) })) {
-                    $size += if ($c.PSIsContainer) { Get-QpSize @($c.FullName) } else { $c.Length }
+                $children = @(); try { $children = (New-Object IO.DirectoryInfo $p).GetFileSystemInfos() } catch { }
+                foreach ($c in $children) {
+                    if ($c.LastWriteTime -ge $cutoff -or ($c.Attributes -band [IO.FileAttributes]::ReparsePoint)) { continue }
+                    $size += if ($c -is [IO.DirectoryInfo]) { Get-QpSize @($c.FullName) } else { $c.Length }
                 }
             } else {
                 $size += Get-QpSize @($p)
