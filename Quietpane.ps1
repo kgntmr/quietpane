@@ -1287,11 +1287,34 @@ $homePanel.Children.Clear()
 $meters.Margin = Get-Thick '0,20,0,0'
 foreach ($x in @($homeTop) + @($script:UpdatePanel, $cards, $script:BackPanel, $homeButtons, $homeHint, $script:ResultPanel, $meters, $script:TotalsText, $homeDisclaimer, $homeRather)) { [void]$homePanel.Children.Add($x) }
 
+# Every tab's header is made now, so the strip is complete the moment the window appears.
+$healthPanel = New-TabPage 'Health' 'health' ''
+$scanPanel = New-TabPage 'Safety scan' 'scan' ('Asks Microsoft Defender what it has found, and looks for the tricks adware uses. Looking changes nothing.')
+$privacyPanel = New-TabPage 'Privacy' 'privacy' ('What your PC shares, and the tracking and ads you can switch off. Security and Windows Update are never touched.')
+$vendorPanel = New-TabPage 'Telemetry' 'vendors' ('')
+$appsPanel = New-TabPage 'Apps' 'apps' ('What starts when you sign in, and apps you never asked for. Tick, then Preview or Apply.')
+$cleanupPanel = New-TabPage 'Free up space' 'cleanup' ('Leftovers nobody needs, like temporary files and old installers. They go to your Recycle Bin. Close your browsers first.')
+$undoPanel = New-TabPage 'Undo' 'undo' ('Changes that can be undone are saved as restore points. Pick one to put it back.')
+$aboutPanel = New-TabPage 'Settings' 'about' ''
+
+# On an ordinary start the window appears as soon as Home is ready, and the other tabs are filled in behind
+# it - about a second sooner. (Not for the self-test, a start at sign-in or a window opened with admin rights,
+# which carry on as before.)
+$script:EarlyShown = $false
+if (-not $SelfTest -and -not $Minimized -and -not $script:Elevated -and -not $Snapshot) {
+    try {
+        $window.Show()
+        $window.Cursor = [System.Windows.Input.Cursors]::AppStarting
+        # Let it paint once before the rest is built.
+        $window.Dispatcher.Invoke([Action] { }, [System.Windows.Threading.DispatcherPriority]::ContextIdle)
+        $script:EarlyShown = $true
+    } catch { }
+}
+
 # 1. Health - how hard the PC is working, how warm it is, and how it is holding up, laid out the way
 # MSI Center lays out its hardware: the answer in one line, the four readings that change by the second
 # on the left, and one plain list of everything else on the right. Nothing here is read unless this tab
 # is open. On a narrow window the list drops underneath rather than being squeezed.
-$healthPanel = New-TabPage 'Health' 'health' ''
 # The answer first. Why, one step away: it appears when you point at it, and screen readers read it out.
 $verdictRow = New-Object System.Windows.Controls.StackPanel
 $verdictRow.Orientation = 'Horizontal'
@@ -1392,7 +1415,6 @@ foreach ($box in $script:Details.Values) { [void]$healthRight.Children.Add($box.
 [void]$healthPanel.Children.Add($healthColumns)
 
 # 1. Safety scan - Microsoft Defender's detections plus Quietpane's own checks
-$scanPanel = New-TabPage 'Safety scan' 'scan' ('Asks Microsoft Defender what it has found, and looks for the tricks adware uses. Looking changes nothing.')
 Set-MoreInfo $scanPanel.Children[0] 'Odd startup entries, hidden tasks, browser add-ons and tampered programs. Threat names come from Defender; anything Quietpane spots itself is marked as its own check - a warning sign, not proof.'
 $scanButtons = New-Object System.Windows.Controls.StackPanel
 $scanButtons.Orientation = 'Horizontal'
@@ -1477,7 +1499,6 @@ function New-Section([string]$Header) {
     $ex.Content = $sp
     return [pscustomobject]@{ Expander = $ex; Content = $sp }
 }
-$privacyPanel = New-TabPage 'Privacy' 'privacy' ('What your PC shares, and the tracking and ads you can switch off. Security and Windows Update are never touched.')
 [void]$privacyPanel.Children.Add((New-GlanceBox 'privacy'))
 
 # Add-ons see more of your browsing than anything else on this PC, so they come first.
@@ -1525,7 +1546,6 @@ foreach ($g in @((Get-QpCatalog privacy).Items | ForEach-Object { $_.Group } | S
 }
 
 # 3. Telemetry - the brand and hardware software that came with this PC
-$vendorPanel = New-TabPage 'Telemetry' 'vendors' ('')
 $vendorIntroText = New-Text 'Background extras from the companies that made your PC, and what they report. Quietpane targets known helpers rather than drivers, and each item says what it affects.' 13.5 'Normal' '#4B5B5C' '0,0,0,12'
 Set-MoreInfo $vendorIntroText 'The laptop maker, the graphics chip, the processor: most PCs arrive with helpers from each, and many quietly report home. Only what is actually on this PC is listed.'
 [void]$vendorPanel.Children.Add($vendorIntroText)
@@ -1536,7 +1556,6 @@ $script:VendorList = New-Object System.Windows.Controls.StackPanel
 [void]$vendorPanel.Children.Add($script:VendorList)
 
 # 4. Apps - what starts when you sign in, and apps you could remove
-$appsPanel = New-TabPage 'Apps' 'apps' ('What starts when you sign in, and apps you never asked for. Tick, then Preview or Apply.')
 [void]$appsPanel.Children.Add((New-GlanceBox 'apps'))
 
 $script:StartupSection = New-Section 'Starts when you sign in'
@@ -1564,7 +1583,6 @@ $script:AppsList = New-Object System.Windows.Controls.StackPanel
 [void]$appsPanel.Children.Add($script:RemoveSection.Expander)
 
 # 5. Clean-up
-$cleanupPanel = New-TabPage 'Free up space' 'cleanup' ('Leftovers nobody needs, like temporary files and old installers. They go to your Recycle Bin. Close your browsers first.')
 [void]$cleanupPanel.Children.Add((New-GlanceBox 'cleanup'))
 $script:CleanupList = New-Object System.Windows.Controls.StackPanel
 [void]$script:CleanupList.Children.Add((New-Text 'Measuring sizes...' 13 'Normal' '#4B5B5C'))
@@ -1610,7 +1628,6 @@ foreach ($e in $script:SpaceWinsHead, $script:SpaceWinsNote, $script:SpaceCrumb,
 [void]$cleanupPanel.Children.Add($script:SpaceSection.Expander)
 
 # 6. Undo
-$undoPanel = New-TabPage 'Undo' 'undo' ('Changes that can be undone are saved as restore points. Pick one to put it back.')
 Set-MoreInfo $undoPanel.Children[0] 'Settings go back exactly as they were. Cleaned-up files are waiting in your Recycle Bin, and removed apps come back from the Microsoft Store.'
 [void]$undoPanel.Children.Add((New-GlanceBox 'undo'))
 $script:UndoList = New-Object System.Windows.Controls.ListBox
@@ -1637,7 +1654,6 @@ $script:BtnMachineUndo.Add_Click({ [void](Request-Elevation 'undo' 'undo') })
 # settings page: what each setting is on the left, its switch or choice on the right, a hairline between.
 # A switch is used only where flipping it changes things there and then; it shows "on" only once that
 # has worked. The version and the small print sit at the bottom.
-$aboutPanel = New-TabPage 'Settings' 'about' ''
 [void]$aboutPanel.Children.Add((New-Text 'Settings' 24 'SemiBold' '#0F1B1C' '0,0,0,6' 'Fraunces, Georgia'))
 
 function New-ChoiceRow([string]$Group, [string]$Label, [object[]]$Choices, [string]$Current, [scriptblock]$OnPick) {
@@ -5943,6 +5959,16 @@ if ($Minimized -and $Watch) { $window.Add_Loaded({ Start-SignInCheck }) }
 $window.Add_StateChanged({ if ($window.WindowState -ne 'Minimized') { Start-FirstShow }; Set-TimerQuick })
 # Opened minimised at sign-in, even the clock waits until Quietpane is first opened.
 if (-not $Minimized) { $timer.Start() }
-[void]$window.ShowDialog()
+if ($script:EarlyShown) {
+    # Already on screen: what ShowDialog would have done from here - the first show, then wait until it closes.
+    $window.Cursor = $null
+    Update-TabIcons $window.ActualWidth
+    Start-FirstShow
+    $script:WindowFrame = New-Object System.Windows.Threading.DispatcherFrame
+    $window.Add_Closed({ $script:WindowFrame.Continue = $false })
+    if ($window.IsVisible) { [System.Windows.Threading.Dispatcher]::PushFrame($script:WindowFrame) }
+} else {
+    [void]$window.ShowDialog()
+}
 Stop-LiveSampler   # in case the window went away without Closing firing
 if ($script:RemoveCopyOnClose) { try { [void](Start-QpCopyRemoval) } catch { } }
