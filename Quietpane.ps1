@@ -59,6 +59,8 @@ function Test-IsAdmin {
 # change that needs them asks, when it is pressed (Request-Elevation), and nothing else ever does.
 
 Import-Module $modulePath -Force
+# A window built only to be tested keeps its own store, even with administrator rights.
+if ($SelfTest) { Use-QpSelfTestStores }
 $info = Get-QpInfo
 
 # Who this window works for. An ordinary window works for the account running it. A window opened with

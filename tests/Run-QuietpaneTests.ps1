@@ -3189,6 +3189,13 @@ Test-Case 'nothing outside the engine''s own store functions refers to the machi
     $engineStrays = @($engine | Select-String -Pattern "env:ProgramData\b" | Where-Object { $_.Line -notmatch '^\s*#' -and $_.Line -notmatch 'correlationRoots|Test-Under \$env:ProgramData|\$old = foreach|AppData\\LocalLow''\), \$env:ProgramData' })
     $windowHits.Count -eq 0 -and $engineStrays.Count -eq 0
 }
+Test-Case 'a self-test window, and every thread of a parallel read, keep to the stores they were given' {
+    $mod = Join-Path $root 'src\Quietpane.psm1'
+    $out = & powershell.exe -NoProfile -ExecutionPolicy Bypass -Command ("Import-Module '{0}'; `$real = & (Get-Module Quietpane) {{ `$script:MachineRoot }}; Use-QpSelfTestStores; & (Get-Module Quietpane) {{ param(`$r) '{{0}}|{{1}}' -f (`$script:MachineRoot -ne `$r), `$script:MachineRoot.StartsWith([IO.Path]::GetFullPath([IO.Path]::GetTempPath()), 'OrdinalIgnoreCase') }} `$real" -f $mod) 2>&1 | Out-String
+    $win = Get-Content (Join-Path $root 'Quietpane.ps1') -Raw
+    $par = (Get-Command Get-QpStateParallel).Definition
+    $out.Trim() -eq 'True|True' -and $win -match "if \(\`$SelfTest\) \{ Use-QpSelfTestStores \}" -and $par -match 'AddArgument\(\$stores\)' -and $par -match '\$script:MachineVerified = \$null'
+}
 Test-Case 'without admin rights, reading this PC, the sign-in check, undo and quarantine never touch it' {
     $m = Join-Path $scratch 'watched-store'; [void][IO.Directory]::CreateDirectory($m)
     & $mod { param($r) $script:MachineRoot = $r; $script:MachineVerified = $null } $m

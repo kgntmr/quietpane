@@ -1150,6 +1150,17 @@ function Get-QpMachineStorePath {
     return $base
 }
 
+function Use-QpSelfTestStores {
+    <#
+        For a window built only to be tested (-SelfTest): its machine store is a new, empty folder of its own
+        under %TEMP%, so a test run with administrator rights never opens the real one. It takes no path, so
+        it can only ever point away from it; the store there is checked and locked as usual.
+    #>
+    $base = Join-Path ([IO.Path]::GetFullPath([IO.Path]::GetTempPath())) ('qp-selftest-' + [guid]::NewGuid().ToString('N'))
+    $script:MachineRoot = Join-Path $base 'ProgramData\Quietpane'
+    $script:LegacyDataRoot = Join-Path $base 'ProgramData\CleanMyPC'
+    $script:MachineVerified = $null
+}
 function Test-QpRestoreDestination {
     <# Whether a restore point made now has somewhere safe to go. #>
     if (Test-QpAdmin) {
@@ -6636,6 +6647,9 @@ function Get-QpStateParallel {
     $groups = @(@('Startup', 'Apps', 'SignIn'), @('Privacy', 'Vendors'), @('Cleanup'), @('Devices', 'Addons', 'Restore'))
     $modulePath = Join-Path $PSScriptRoot 'Quietpane.psm1'
     $sid = (Get-QpActor).RequesterSid
+    # The same stores as the caller (a test run points them elsewhere). The machine store is checked again in
+    # each thread, never taken as already checked.
+    $stores = @{ MachineRoot = $script:MachineRoot; LegacyDataRoot = $script:LegacyDataRoot; UserDataRoot = $script:UserDataRoot }
     $jobs = @(foreach ($g in $groups) {
         $log = New-Object System.Collections.ArrayList
         $rs = [runspacefactory]::CreateRunspace()
@@ -6645,12 +6659,13 @@ function Get-QpStateParallel {
         $ps = [powershell]::Create()
         $ps.Runspace = $rs
         [void]$ps.AddScript({
-            param($ModulePath, $Sid, $Keys)
+            param($ModulePath, $Sid, $Keys, $Stores)
             Import-Module $ModulePath -Force
+            & (Get-Module Quietpane) { param($s) foreach ($n in $s.Keys) { Set-Variable -Scope Script -Name $n -Value $s[$n] }; $script:MachineVerified = $null } $Stores
             Set-QpActor -RequesterSid $Sid      # the same account as the caller - no more, no less
             Set-QpLogSink { param($line) [void]$QpGroupLog.Add($line) }
             & (Get-Module Quietpane) { param($k) Start-QpStateCache; try { Read-QpStateParts -Keys $k } finally { Stop-QpStateCache } } $Keys
-        }).AddArgument($modulePath).AddArgument($sid).AddArgument([string[]]$g)
+        }).AddArgument($modulePath).AddArgument($sid).AddArgument([string[]]$g).AddArgument($stores)
         @{ PS = $ps; RS = $rs; Handle = $ps.BeginInvoke(); Log = $log; Keys = $g }
     })
     $parts = @{}; $failed = New-Object System.Collections.ArrayList
@@ -8492,7 +8507,7 @@ Export-ModuleMember -Function Get-QpInfo, Set-QpLogSink, Write-QpLog, Test-QpAdm
     ConvertTo-QpRegTarget, Test-QpRegistryWritable, New-QpOperation, Get-QpOperationPolicy, Get-QpItemPolicy, Get-QpActionOperations,
     Get-QpAppOperations, Get-QpStartupOperations, Get-QpDeviceOperations, Get-QpExtensionOperations, Get-QpCleanupOperations,
     Get-QpManifestLevel, Get-QpUninstallPrivilege, Test-QpBatchPlan, Invoke-QpPreflight, Assert-QpOperation, Get-QpOutcomeSummary,
-    New-QpAdminOnlySecurity, Test-QpAdminOnlyAcl, Protect-QpMachineStore, Get-QpMachineStorePath, Test-QpRestoreDestination,
+    New-QpAdminOnlySecurity, Test-QpAdminOnlyAcl, Protect-QpMachineStore, Get-QpMachineStorePath, Use-QpSelfTestStores, Test-QpRestoreDestination,
     Test-QpJsonKeysUnique, ConvertFrom-QpStrictJson, Test-QpJsonShape, Test-QpJsonFields,
     Read-QpRestorePoint, Test-QpUndoEntry, Get-QpLegacyRestorePoints, Get-QpOptionPolicies, Get-QpItemStatus,
     Get-QpQuarantineRoot, Get-QpLegacyQuarantine, Copy-QpFileFresh, Read-QpQuarantineItem, Get-QpVsCodeSettingsPath, Test-QpActionApplied,
