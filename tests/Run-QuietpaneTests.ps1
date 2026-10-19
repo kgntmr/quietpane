@@ -36,6 +36,9 @@ $script:IsAdminRun = ([Security.Principal.WindowsPrincipal][Security.Principal.W
 # and %ProgramData%\Quietpane are never written. The engine is pointed there from inside the module, the
 # way the registry area above is; nothing in the app itself changes, and with administrator rights the
 # machine store here is checked and locked by the same Protect-QpMachineStore as the real one.
+# %TEMP% can be written with 8.3 short names (CI's is C:\Users\RUNNER~1\...). The stores refuse a path that
+# is not spelled the way Windows spells it, so the run uses the long spelling, and so does every child.
+$env:TEMP = [IO.Path]::GetFullPath($env:TEMP).TrimEnd('\'); $env:TMP = $env:TEMP
 $script:RealUserRoot = & (Get-Module Quietpane) { $script:UserDataRoot }
 $script:RealMachineRoot = & (Get-Module Quietpane) { $script:MachineRoot }
 $script:RunRoot = Join-Path $env:TEMP ('qp-run-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
