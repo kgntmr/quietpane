@@ -6559,53 +6559,120 @@ function Invoke-QpVendorUninstall {
 
 #region ---------------------------------------------------------------- one-click
 
+# The parts of what the window shows, in the order their problems have always been listed. Each stands
+# on its own: if one cannot be read on this PC, the rest of the window still works and the part that
+# failed says so, rather than leaving the whole window empty. A part gets what was read before it.
+$script:StateParts = @(
+    @{ Key = 'Startup'; What = 'what starts at sign-in'; Body = { param($v) @(Get-QpStartupItems) } },
+    @{ Key = 'Privacy'; What = 'the privacy settings'; Body = { param($v) Get-QpPrivacyStatus } },
+    @{ Key = 'Vendors'; What = 'the brand extras'; Body = { param($v) @(Get-QpVendorStatus) } },
+    @{ Key = 'Apps'; What = 'the installed apps'; Body = { param($v) @(Get-QpBloatApps) } },
+    # Read once, then cost it: what signing in costs is about these very startup items.
+    @{ Key = 'SignIn'; What = 'what signing in costs'; Body = {
+            param($v)
+            $times = Get-QpSignInTime
+            $record = Get-QpBootRecord
+            [pscustomobject]@{ Times = $times; Record = $record; RecordStatus = $script:BootRecordStatus; Costs = @(Get-QpSignInCost -Items $v['Startup'] -Record $record -Times $times) }
+        }
+    },
+    @{ Key = 'Devices'; What = 'camera, microphone and location use'; Body = { param($v) @(Get-QpDeviceUse) } },
+    @{ Key = 'Addons'; What = 'your browser add-ons'; Body = { param($v) @(Get-QpBrowserExtensions) } },
+    @{ Key = 'Cleanup'; What = 'what can be cleaned up'; Body = { param($v) @(Get-QpCleanupTargets) } },
+    @{ Key = 'Restore'; What = 'the restore points'; Body = { param($v) @(Get-QpRestorePoints) } }
+)
+
+function Read-QpStateParts {
+    param([string[]]$Keys)
+    $parts = @{}
+    $failed = New-Object System.Collections.ArrayList
+    foreach ($part in $script:StateParts) {
+        if ($Keys -notcontains $part.Key) { continue }
+        $parts[$part.Key] = try { & $part.Body $parts }
+        catch {
+            [void]$failed.Add($part.Key)
+            Write-QpLog "Could not read $($part.What) : $($_.Exception.Message)" 'WARN'
+            if ($part.Key -eq 'Privacy') { @{} } else { $null }
+        }
+    }
+    @{ Parts = $parts; Failed = @($failed) }
+}
+
+function Complete-QpState {
+    param([hashtable]$Parts, [string[]]$Failed)
+    $state = @{ Problems = @(foreach ($part in $script:StateParts) { if ($Failed -contains $part.Key) { $part.What } }) }
+    foreach ($part in $script:StateParts) { $state[$part.Key] = $Parts[$part.Key] }
+    # What needs administrator rights: worked out here, by the same rules the changes themselves obey,
+    # so the shields on screen always match what the engine will allow.
+    $state.Policy = try { Get-QpOptionPolicies -State $state } catch { Write-QpLog "Could not read what needs administrator rights : $($_.Exception.Message)" 'WARN'; @{} }
+    # What couldn't be seen without administrator rights - kept apart from what went wrong.
+    $limited = @()
+    if (@($state.Privacy.Values | Where-Object { $_ -eq 'NeedsAdmin' }).Count -or @($state.Vendors | ForEach-Object { @($_.Items) } | Where-Object { $_.Status -eq 'NeedsAdmin' }).Count) { $limited += 'system tasks Windows hides' }
+    if (@($state.Cleanup | Where-Object { $_ -and $_.Availability -eq 'NeedsAdmin' }).Count) { $limited += "the size of Windows' own temporary files" }
+    if ($state.SignIn -and $state.SignIn.RecordStatus -eq 'NeedsAdmin') { $limited += "Windows' own restart timing" }
+    $state.Limited = @($limited)
+    $state
+}
+
 function Get-QpState {
     <#
         Everything the window shows about this PC, read in one pass that shares its slow lookups.
         Read-only. Battery and drive health aren't here: the Health tab reads those itself, when open.
     #>
     Start-QpStateCache
-    $problems = New-Object System.Collections.ArrayList
-    # Each part stands on its own: if one cannot be read on this PC, the rest of the window still works
-    # and the part that failed says so, rather than leaving the whole window empty.
-    function Read-Part([string]$What, [scriptblock]$Body, $Fallback) {
-        try { return (& $Body) }
-        catch {
-            [void]$problems.Add($What)
-            Write-QpLog "Could not read $What : $($_.Exception.Message)" 'WARN'
-            return $Fallback
-        }
-    }
     try {
-        # Read once, then cost it: what signing in costs is about these very items.
-        $startup = Read-Part 'what starts at sign-in' { @(Get-QpStartupItems) } @()
-        $state = @{
-            Privacy  = Read-Part 'the privacy settings' { Get-QpPrivacyStatus } @{}
-            Vendors  = Read-Part 'the brand extras' { @(Get-QpVendorStatus) } @()
-            Apps     = Read-Part 'the installed apps' { @(Get-QpBloatApps) } @()
-            Startup  = $startup
-            SignIn   = Read-Part 'what signing in costs' {
-                $times = Get-QpSignInTime
-                $record = Get-QpBootRecord
-                [pscustomobject]@{ Times = $times; Record = $record; RecordStatus = $script:BootRecordStatus; Costs = @(Get-QpSignInCost -Items $startup -Record $record -Times $times) }
-            } $null
-            Devices  = Read-Part 'camera, microphone and location use' { @(Get-QpDeviceUse) } @()
-            Addons   = Read-Part 'your browser add-ons' { @(Get-QpBrowserExtensions) } @()
-            Cleanup  = Read-Part 'what can be cleaned up' { @(Get-QpCleanupTargets) } @()
-            Restore  = Read-Part 'the restore points' { @(Get-QpRestorePoints) } @()
-            Problems = @($problems)
-        }
-        # What needs administrator rights: worked out here, by the same rules the changes themselves obey,
-        # so the shields on screen always match what the engine will allow.
-        $state.Policy = Read-Part 'what needs administrator rights' { Get-QpOptionPolicies -State $state } @{}
-        # What couldn't be seen without administrator rights - kept apart from what went wrong.
-        $limited = @()
-        if (@($state.Privacy.Values | Where-Object { $_ -eq 'NeedsAdmin' }).Count -or @($state.Vendors | ForEach-Object { @($_.Items) } | Where-Object { $_.Status -eq 'NeedsAdmin' }).Count) { $limited += 'system tasks Windows hides' }
-        if (@($state.Cleanup | Where-Object { $_ -and $_.Availability -eq 'NeedsAdmin' }).Count) { $limited += "the size of Windows' own temporary files" }
-        if ($state.SignIn -and $state.SignIn.RecordStatus -eq 'NeedsAdmin') { $limited += "Windows' own restart timing" }
-        $state.Limited = @($limited)
-        $state
+        $r = Read-QpStateParts -Keys @($script:StateParts | ForEach-Object { $_.Key })
+        Complete-QpState $r.Parts $r.Failed
     } finally { Stop-QpStateCache }
+}
+
+function Get-QpStateParallel {
+    <#
+        The same answer as Get-QpState, read in four groups side by side, each in a thread of its own -
+        about half the time on most PCs. The groups are the parts that share slow lookups (installed
+        apps; scheduled tasks), so nothing is read twice. Read-only, like Get-QpState. Log lines come
+        back group by group, problems in the same order as always.
+    #>
+    $groups = @(@('Startup', 'Apps', 'SignIn'), @('Privacy', 'Vendors'), @('Cleanup'), @('Devices', 'Addons', 'Restore'))
+    $modulePath = Join-Path $PSScriptRoot 'Quietpane.psm1'
+    $sid = (Get-QpActor).RequesterSid
+    $jobs = @(foreach ($g in $groups) {
+        $log = New-Object System.Collections.ArrayList
+        $rs = [runspacefactory]::CreateRunspace()
+        $rs.ApartmentState = 'STA'
+        $rs.Open()
+        $rs.SessionStateProxy.SetVariable('QpGroupLog', $log)
+        $ps = [powershell]::Create()
+        $ps.Runspace = $rs
+        [void]$ps.AddScript({
+            param($ModulePath, $Sid, $Keys)
+            Import-Module $ModulePath -Force
+            Set-QpActor -RequesterSid $Sid      # the same account as the caller - no more, no less
+            Set-QpLogSink { param($line) [void]$QpGroupLog.Add($line) }
+            & (Get-Module Quietpane) { param($k) Start-QpStateCache; try { Read-QpStateParts -Keys $k } finally { Stop-QpStateCache } } $Keys
+        }).AddArgument($modulePath).AddArgument($sid).AddArgument([string[]]$g)
+        @{ PS = $ps; RS = $rs; Handle = $ps.BeginInvoke(); Log = $log; Keys = $g }
+    })
+    $parts = @{}; $failed = New-Object System.Collections.ArrayList
+    try {
+        foreach ($j in $jobs) {
+            $res = $null
+            try { $res = @($j.PS.EndInvoke($j.Handle) | Where-Object { $_ -is [hashtable] -and $_.ContainsKey('Parts') })[-1] } catch { }
+            foreach ($line in @($j.Log)) { if ($script:LogSink) { & $script:LogSink $line } else { Write-Host $line } }
+            if (-not $res) {
+                # The whole group could not be read: each of its parts says so, as it would have on its own.
+                $why = if ($j.PS.Streams.Error.Count) { $j.PS.Streams.Error[0].Exception.Message } else { 'it stopped before it finished' }
+                foreach ($k in $j.Keys) {
+                    $what = @($script:StateParts | Where-Object { $_.Key -eq $k })[0].What
+                    Write-QpLog "Could not read $what : $why" 'WARN'
+                    [void]$failed.Add($k); $parts[$k] = $(if ($k -eq 'Privacy') { @{} } else { $null })
+                }
+                continue
+            }
+            foreach ($k in $res.Parts.Keys) { $parts[$k] = $res.Parts[$k] }
+            foreach ($k in @($res.Failed)) { [void]$failed.Add($k) }
+        }
+    } finally { foreach ($j in $jobs) { try { $j.PS.Dispose(); $j.RS.Dispose() } catch { } } }
+    Complete-QpState $parts @($failed)
 }
 
 function Get-QpOptionPolicies {
@@ -8364,7 +8431,7 @@ function Test-QpElevationArguments {
 #endregion
 Export-ModuleMember -Function Get-QpInfo, Set-QpLogSink, Write-QpLog, Test-QpAdmin, Get-QpCatalog, Format-QpBytes, Format-QpRate,
     Set-QpProgressSink, Write-QpProgress, Set-QpCancelCheck, Test-QpCancelled, New-QpScanSummary,
-    Get-QpState, Get-QpSystemUsage, Get-QpTotals, New-QpLiveMonitor, Get-QpLiveReading, Get-QpHeatWord, Get-QpTempUnit, Set-QpTempUnit, Format-QpTemp, Get-QpLiveVerdict, Get-QpSystemFacts, ConvertTo-QpSystemFacts, ConvertFrom-QpPowerCfg,
+    Get-QpState, Get-QpStateParallel, Get-QpSystemUsage, Get-QpTotals, New-QpLiveMonitor, Get-QpLiveReading, Get-QpHeatWord, Get-QpTempUnit, Set-QpTempUnit, Format-QpTemp, Get-QpLiveVerdict, Get-QpSystemFacts, ConvertTo-QpSystemFacts, ConvertFrom-QpPowerCfg,
     Select-QpNetworkCards, ConvertTo-QpCounterInstance, Get-QpNetRates, Get-QpProgramName,
     New-QpCounter, New-QpCounterGroup,
     New-QpSessionWatch, Add-QpSessionSample, Stop-QpSessionWatch, Get-QpSessionSummary, Format-QpSpan,

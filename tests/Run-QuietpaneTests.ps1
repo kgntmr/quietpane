@@ -1294,6 +1294,25 @@ Test-Case 'the whole state comes back in one pass, and the shared lookups are le
     $keysOk = @('Privacy', 'Vendors', 'Apps', 'Startup', 'Devices', 'Addons', 'Cleanup', 'Restore', 'Problems' | Where-Object { -not $s.ContainsKey($_) }).Count -eq 0
     $keysOk -and $null -eq (& (Get-Module Quietpane) { $script:StateCache })
 }
+Test-Case 'reading the PC in four groups side by side gives exactly the same answer as one pass' {
+    # In a fresh process, so both reads see this PC as it is (this run's own stores are swapped in here).
+    $out = & powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -Command {
+        param($Mod)
+        Import-Module $Mod
+        $a = Get-QpState; $b = Get-QpStateParallel
+        # Sizes and memory move between two reads on a busy PC; everything else must match exactly.
+        function Shape($s, $k) {
+            $v = $s[$k]
+            if ($k -eq 'Cleanup') { $v = @($v | ForEach-Object { '{0}|{1}|{2}' -f $_.Id, ($_.Paths -join ';'), $_.Availability }) }
+            if ($k -eq 'SignIn') { $v = @($v.Costs | ForEach-Object { $_.Name }) }
+            $v | ConvertTo-Json -Depth 6 -Compress
+        }
+        $keys = @($a.Keys | Sort-Object)
+        $same = @($keys | Where-Object { (Shape $a $_) -ceq (Shape $b $_) })
+        '{0}|{1}|{2}' -f ($keys -join ','), ($same.Count -eq $keys.Count), (($a.Problems -join ';') -ceq ($b.Problems -join ';'))
+    } -args (Join-Path $root 'src\Quietpane.psm1') 2>&1 | Out-String
+    $out.Trim() -eq 'Addons,Apps,Cleanup,Devices,Limited,Policy,Privacy,Problems,Restore,SignIn,Startup,Vendors|True|True'
+}
 Test-Case 'asking Task Scheduler directly lists exactly the tasks Get-ScheduledTask lists' {
     # Names and whether each is switched off; "running" or "ready" can change between the two reads.
     $fast = @(foreach ($kv in (Get-QpTasksByPath).GetEnumerator()) { foreach ($t in $kv.Value) { '{0}{1}|{2}' -f $t.TaskPath, $t.TaskName, ($t.State -eq 'Disabled') } }) | Sort-Object

@@ -4118,7 +4118,7 @@ function Set-LogVisible([bool]$Visible) {
 }
 
 # One pass over the PC, sharing its slow lookups (see Get-QpState). Health is read by its own tab.
-$script:ReadState = { Get-QpState }
+$script:ReadState = { Get-QpStateParallel }
 
 function Update-State {
     Start-Work -StatusText 'Reading the current state of this PC...' -Work $script:ReadState -OnDone { param($s) Update-FromState $s }
@@ -5888,7 +5888,7 @@ function Start-FirstRead([switch]$Gated) {
     Start-Work -StatusText 'Reading the current state of this PC...' -Params @{ Gated = [bool]$Gated } -Work {
         param([bool]$Gated)
         if (-not $Gated) { try { [void](Sync-QpInstall) } catch { Write-QpLog "Could not check the shortcuts: $($_.Exception.Message)" 'WARN' } }
-        $state = Get-QpState
+        $state = Get-QpStateParallel
         if ($Gated) {
             [void]$Sync.Go.WaitOne()
             if ($Sync.Cancel) { return $null }
