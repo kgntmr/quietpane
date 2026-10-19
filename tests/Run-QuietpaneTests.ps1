@@ -1882,6 +1882,23 @@ Test-Case 'without a call of its own, the window is still drawn at the screen''s
     } 2>&1 | Out-String
     $out.Trim() -eq 'True'
 }
+Test-Case 'a finding''s result is shown from where it can still be found, and a failing result never stops the window''s clock' {
+    # The result handler runs on the clock after Invoke-FindingAction has returned, so its own $f is gone;
+    # an error there used to escape the clock's tick and stop every job and reading after it.
+    $src = Get-Content (Join-Path $root 'Quietpane.ps1') -Raw
+    $finding = [regex]::Match($src, '(?s)function Invoke-FindingAction.*?\r?\n\}\r?\n').Value
+    $onDone = $finding.Substring($finding.IndexOf('-OnDone'))
+    $tick = [regex]::Match($src, '(?s)\$timer\.Add_Tick\(\{.*?\r?\n\}\)').Value
+    $finding -match '\$script:FindingPending = \$f\r?\n\s*Start-Work' -and $onDone -match '\$f = \$script:FindingPending' -and
+        $tick -match 'try \{ & \$job\.OnDone \$script:Sync\.Result \}' -and $tick -match 'try \{ Sync-ThemeWithWindows \} catch' -and
+        $src -match '\$timer\.Stop\(\); \$timer\.Start\(\)'
+}
+Test-Case 'asking for admin rights while something is running waits instead of closing the window under it' {
+    $src = Get-Content (Join-Path $root 'Quietpane.ps1') -Raw
+    $req = [regex]::Match($src, '(?s)function Request-Elevation.*?\r?\n\}\r?\n').Value
+    $busy = $req.IndexOf('if (Test-Busy) { return $true }')
+    $busy -gt 0 -and $busy -lt $req.IndexOf('Get-QpShortcutPaths') -and $busy -gt $req.IndexOf('if ($script:Handoff)')
+}
 
 Section 'What signing in costs'
 # The window's own self-test, shared by the checks below and in the next two sections.

@@ -629,6 +629,9 @@ $window.Dispatcher.add_UnhandledException({
         [void][System.Windows.MessageBox]::Show(
             "Something went wrong inside Quietpane:`n`n$($e.Exception.Message)`n`nThe app is still running and nothing on your PC was changed by this. There is more under `"Show details`" at the bottom.",
             'Quietpane')
+        # An error that escaped the window's clock stops it, and with it every job, reading and log line
+        # after this one. Stop and start it again (start alone does not bring it back).
+        if ($timer -and $timer.IsEnabled) { $timer.Stop(); $timer.Start() }
     } catch { }
 })
 
@@ -2120,6 +2123,8 @@ function Request-Elevation {
     if ($script:Elevated) { return $false }
     if ($SelfTest -and -not $script:HandoffTest) { $script:LastElevationRequest = [pscustomobject]@{ Pending = $PendingId; Tab = $TabKey; Ticks = @($Ticks) }; return $true }
     if ($script:Handoff) { $ui.Status.Text = 'Already asking Windows for admin rights...'; return $true }
+    # This window closes once the new one is open, which would end whatever is still running here.
+    if (Test-Busy) { return $true }
     if (-not $TabKey) { $TabKey = [string]$ui.Tabs.SelectedItem.Tag }
     # The copy in Program Files, when it is this very version (only an administrator can change it);
     # otherwise this one.
@@ -2459,13 +2464,13 @@ $timer.Interval = [TimeSpan]::FromMilliseconds(150)
 # internet list. Otherwise it slows right down, so a Quietpane that is just sitting there costs nothing.
 function Set-TimerQuick { if ($timer.Interval.TotalMilliseconds -ne 150) { $timer.Interval = [TimeSpan]::FromMilliseconds(150) } }
 $timer.Add_Tick({
-    Sync-ThemeWithWindows
+    try { Sync-ThemeWithWindows } catch { }
     $line = $null
     $got = $false
     while ($script:Sync.Queue.TryDequeue([ref]$line)) { $ui.LogBox.AppendText($line + [Environment]::NewLine); $got = $true }
     if ($got) { $ui.LogBox.ScrollToEnd() }
-    if ($script:Job -and $script:ScanRunning) { Update-ScanProgress }
-    if ($script:Job -and $script:SpaceRunning) { Update-SpaceProgress }
+    if ($script:Job -and $script:ScanRunning) { try { Update-ScanProgress } catch { } }
+    if ($script:Job -and $script:SpaceRunning) { try { Update-SpaceProgress } catch { } }
     # Readings are taken while the Health tab is showing - and, if you asked it to watch the session,
     # while you are somewhere else as well, but then only every ten seconds.
     $onHealth = ([string]$ui.Tabs.SelectedItem.Tag -eq 'health') -and ($window.WindowState -ne 'Minimized')
@@ -2510,7 +2515,19 @@ $timer.Add_Tick({
         while ($script:Sync.Queue.TryDequeue([ref]$line)) { $ui.LogBox.AppendText($line + [Environment]::NewLine) }
         $ui.LogBox.ScrollToEnd()
         Set-Busy $false 'All done - nothing running.'
-        if ($job.OnDone) { & $job.OnDone $script:Sync.Result }
+        # A mistake in showing a result must not stop this clock: it also runs every job after this one.
+        if ($job.OnDone) {
+            try { & $job.OnDone $script:Sync.Result }
+            catch {
+                $ui.LogBox.AppendText(('[{0}] ERROR   {1}' -f (Get-Date -Format 'HH:mm:ss'), $_.Exception.Message) + [Environment]::NewLine)
+                Set-Busy $false 'Something went wrong - Quietpane is still running.'
+                if (-not $SelfTest) {
+                    [void][System.Windows.MessageBox]::Show(
+                        "Something went wrong inside Quietpane:`n`n$($_.Exception.Message)`n`nThe app is still running and nothing on your PC was changed by this. There is more under `"Show details`" at the bottom.",
+                        'Quietpane')
+                }
+            }
+        }
     }
     $wanted = if ($script:Job -or $script:Live.Active -or $script:Live.NetActive) { 150 } elseif ($window.WindowState -eq 'Minimized') { 2000 } else { 750 }
     if ($timer.Interval.TotalMilliseconds -ne $wanted) { $timer.Interval = [TimeSpan]::FromMilliseconds($wanted) }
@@ -4625,10 +4642,15 @@ function Invoke-FindingAction([string]$Id, [string]$Action) {
     }
     $ui.LogBox.AppendText([Environment]::NewLine)
     Set-LogVisible $true
+    # The result arrives on the window's clock, long after this function has returned: keep the finding where
+    # it can still be found then (as Move-SpaceItem does), not in a variable that will be gone.
+    $script:FindingPending = $f
     Start-Work -StatusText 'Dealing with it...' -Params @{ Finding = $f; Action = $Action; Force = $force } -Work { param($Finding, $Action, $Force) Invoke-QpRemediate -Finding $Finding -Action $Action -Force:$Force } -OnDone {
         param($r)
         $r = @($r)[-1]
-        if ($r) {
+        $f = $script:FindingPending
+        $script:FindingPending = $null
+        if ($r -and $f) {
             $f.Status = $r.Status
             [void][System.Windows.MessageBox]::Show($r.Note, 'Quietpane')
             Show-Findings
