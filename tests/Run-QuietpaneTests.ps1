@@ -229,6 +229,32 @@ Test-Case 'when Defender is unavailable the scan says so instead of pretending' 
     if ($s.Available) { 'skip' } else { $s.Note -match 'Defender' }
 }
 Test-Case 'reading detections never throws' { $null -ne @(Get-QpDefenderFindings) }
+Test-Case 'a download detection names the file, and one with no file still shows up' {
+    $m = Get-Module Quietpane
+    & $m {
+        function script:Get-MpThreat { [pscustomobject]@{ ThreatID = 7; ThreatName = 'Trojan:Win32/Test'; SeverityID = 5; DidThreatExecute = $false; IsActive = $true } }
+        function script:Get-MpThreatDetection {
+            [pscustomobject]@{ ThreatID = 7; InitialDetectionTime = (Get-Date); ThreatStatusID = 1; Resources = @('webfile:_C:\Users\x\Downloads\bad.exe|https://example.test/bad.exe|pid:12,ProcessStart:1') }
+            [pscustomobject]@{ ThreatID = 8; InitialDetectionTime = (Get-Date).AddMinutes(-1); ThreatStatusID = 1; Resources = @() }
+        }
+    }
+    try { $f = @(Get-QpDefenderFindings) } finally { & $m { Remove-Item function:Get-MpThreat, function:Get-MpThreatDetection } }
+    $web = @($f | Where-Object { $_.ThreatId -eq '7' })[0]; $none = @($f | Where-Object { $_.ThreatId -eq '8' })[0]
+    $f.Count -eq 2 -and $web.Path -eq 'C:\Users\x\Downloads\bad.exe' -and $web.Object -eq 'bad.exe' -and $none.Object -eq 'Unnamed detection 8'
+}
+Test-Case 'Defender standing down for another switched-on antivirus is not reported as a High problem' {
+    $src = & (Get-Module Quietpane) { (Get-Command Get-QpOtherAntivirus).Definition }
+    $s = Get-QpDefenderState
+    $src -match '0xF000' -and $null -ne $s.PSObject.Properties['ThirdPartyActive'] -and
+    (Get-Module Quietpane).Definition -match "RealTimeProtectionEnabled -and -not \`$otherOn\.Count"
+}
+Test-Case 'registry values that merely start with PS are still read' {
+    $k = 'HKCU:\Software\QuietpaneTestPS'
+    New-Item $k -Force | Out-Null; New-ItemProperty $k -Name 'PSExecHelper' -Value 'x' -Force | Out-Null
+    try { $p = Get-ItemProperty $k; $kept = @($p.PSObject.Properties | Where-Object { $_.Name -notin (& (Get-Module Quietpane) { $script:QpRegNoteNames }) } | ForEach-Object Name) }
+    finally { Remove-Item $k -Recurse -Force }
+    $kept -contains 'PSExecHelper' -and $kept -notcontains 'PSPath' -and $kept -notcontains 'PSProvider'
+}
 Test-Case 'a Quietpane heuristic can never be sent to Defender for removal' {
     $h = New-QpFinding -Source 'Quietpane check' -ThreatName '' -Title 'heuristic thing' -Confidence Heuristic
     (Invoke-QpRemediate -Finding $h -Action Defender).Ok -eq $false
@@ -820,6 +846,21 @@ Test-Case 'Firefox add-ons are read too, and Quietpane says it cannot switch tho
     # Themes are not add-ons that can read your browsing, so they are not listed.
     $ff.Count -eq 2 -and $old.Reach.Everywhere -and $old.PolicyRoot -eq '' -and $old.Browser -eq 'Firefox' -and
     @($ff | Where-Object { $_.Name -eq 'Firefox Built-in' })[0].BuiltIn
+}
+Test-Case 'a Firefox add-on built into the browser says so, and one another program placed says that' {
+    $dir = Join-Path $addonRoot 'FirefoxProfiles2\test.default'
+    [void][IO.Directory]::CreateDirectory($dir)
+    $addons = @{ addons = @(
+        @{ id = 'shipped@mozilla.org'; type = 'extension'; version = '1.0'; active = $true; location = 'app-builtin'; defaultLocale = @{ name = 'Shipped' } },
+        @{ id = 'mine@example.com'; type = 'extension'; version = '1.0'; active = $true; location = 'app-profile'; defaultLocale = @{ name = 'Mine' } },
+        @{ id = 'pushed@example.com'; type = 'extension'; version = '1.0'; active = $true; location = 'app-system-share'; defaultLocale = @{ name = 'Pushed' } }
+    ) }
+    [IO.File]::WriteAllText((Join-Path $dir 'extensions.json'), ($addons | ConvertTo-Json -Depth 10))
+    $ff = @(Get-QpFirefoxAddons -Root (Join-Path $addonRoot 'FirefoxProfiles2'))
+    $by = @{}; foreach ($a in $ff) { $by[$a.Name] = $a }
+    $by['Shipped'].BuiltIn -and $by['Shipped'].Source -eq 'Part of the browser itself' -and
+    -not $by['Mine'].BuiltIn -and $by['Mine'].Source -eq 'You added it yourself' -and
+    -not $by['Pushed'].BuiltIn -and $by['Pushed'].Source -eq 'Another program on this PC put it there'
 }
 Test-Case 'reading the real browsers on this PC never throws' {
     $real = @(Get-QpBrowserExtensions)

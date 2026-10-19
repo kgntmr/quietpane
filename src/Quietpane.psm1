@@ -3884,7 +3884,7 @@ function Get-QpStartupItems {
     foreach ($s in $RunSources) {
         $p = Get-ItemProperty -Path $s.Key -ErrorAction SilentlyContinue
         if (-not $p) { continue }
-        foreach ($prop in ($p.PSObject.Properties | Where-Object { $_.Name -notlike 'PS*' })) {
+        foreach ($prop in ($p.PSObject.Properties | Where-Object { $_.Name -notin $script:QpRegNoteNames })) {
             $target = Resolve-QpCommandTarget $prop.Value
             $advice = Get-QpStartupAdvice -Text "$($prop.Name) $($prop.Value)" -Catalog $cat
             [void]$out.Add([pscustomobject]@{
@@ -4730,7 +4730,8 @@ function Get-QpFirefoxAddons {
         foreach ($a in @($js.addons)) {
             if ([string]$a.type -ne 'extension') { continue }
             $loc = [string]$a.location
-            $builtIn = $loc -like 'app-*'
+            # Only Firefox's own locations are its own parts; 'app-profile' is where your own add-ons live.
+            $builtIn = $loc -in @('app-builtin', 'app-system-defaults', 'app-system-addons', 'app-system-profile')
             $perms = @()
             if ($a.userPermissions) { $perms += @($a.userPermissions.permissions) + @($a.userPermissions.origins) }
             $added = $null
@@ -4750,7 +4751,7 @@ function Get-QpFirefoxAddons {
                 Locked      = $false
                 Blocked     = $false
                 BlockedByMe = $false
-                Source      = $(if ($builtIn) { 'Part of the browser itself' } elseif ($loc -like 'winreg*') { 'Another program on this PC put it there' } else { 'You added it yourself' })
+                Source      = $(if ($builtIn) { 'Part of the browser itself' } elseif ($loc -in 'app-profile', 'app-temporary') { 'You added it yourself' } else { 'Another program on this PC put it there' })
                 Reach       = (Get-QpExtensionReach -Permissions $perms)
                 Added       = $added
                 Folder      = [string]$a.path
@@ -6802,23 +6803,42 @@ function Invoke-QpRecommended {
 $script:SeverityRank = @{ Critical = 0; High = 1; Medium = 2; Low = 3; Info = 4 }
 $script:DefenderStatusMap = @{ '0' = 'Detected'; '1' = 'Detected'; '2' = 'Removed'; '3' = 'Quarantined'; '4' = 'Removed'; '5' = 'Allowed'; '6' = 'Removed' }
 
+function Get-QpOtherAntivirus {
+    <#
+        Antivirus other than Defender that Windows Security knows about, and whether each says it is on
+        (bits 12-15 of productState: 1 = on). Throws when Windows Security can't be asked.
+    #>
+    foreach ($p in @(Get-CimInstance -Namespace 'root\SecurityCenter2' -ClassName AntiVirusProduct -ErrorAction Stop)) {
+        $name = [string]$p.displayName
+        if (-not $name -or $name -match '(?i)(windows|microsoft) defender') { continue }
+        $on = $false
+        try { $on = (([int64]$p.productState -band 0xF000) -eq 0x1000) } catch { }
+        [pscustomobject]@{ Name = $name; On = $on }
+    }
+}
+
+# The note properties PowerShell adds to a registry read - never real values (a value named 'PSExec' is real).
+$script:QpRegNoteNames = @('PSPath', 'PSParentPath', 'PSChildName', 'PSDrive', 'PSProvider')
+
 function Get-QpDefenderState {
     <# Can we ask Defender anything, and should we trust the answer? Never throws. #>
     $s = [pscustomobject]@{
         Available = $false; RealTime = $false; SignatureAge = $null
-        CanScan = $false; CanRemediate = $false; ThirdParty = @(); Note = ''
+        CanScan = $false; CanRemediate = $false; ThirdParty = @(); ThirdPartyActive = @(); Note = ''
     }
     $mp = Get-MpComputerStatus -ErrorAction SilentlyContinue
     if ($mp) {
         $s.Available = $true
         $s.RealTime = [bool]$mp.RealTimeProtectionEnabled
-        $s.SignatureAge = [int]$mp.AntivirusSignatureAge
+        # A Defender with no definitions says 4294967295 days, which doesn't fit an [int].
+        try { $s.SignatureAge = [int64]$mp.AntivirusSignatureAge } catch { }
         $s.CanScan = [bool](Get-Command Start-MpScan -ErrorAction SilentlyContinue)
         $s.CanRemediate = [bool](Get-Command Remove-MpThreat -ErrorAction SilentlyContinue)
     }
     try {
-        $av = @(Get-CimInstance -Namespace 'root\SecurityCenter2' -ClassName AntiVirusProduct -ErrorAction Stop | ForEach-Object { [string]$_.displayName })
-        $s.ThirdParty = @($av | Where-Object { $_ -and $_ -notmatch '(?i)(windows|microsoft) defender' })
+        $products = @(Get-QpOtherAntivirus)
+        $s.ThirdParty = @($products | ForEach-Object { $_.Name })
+        $s.ThirdPartyActive = @($products | Where-Object { $_.On } | ForEach-Object { $_.Name })
     } catch { }
     if (-not $s.Available) {
         $s.Note = 'Microsoft Defender could not be reached, so only Quietpane''s own checks ran. Nothing here can confirm a virus by name.'
@@ -6921,9 +6941,11 @@ function Get-QpDefenderFindings {
         $vendorSev = if ($t) { [int]$t.SeverityID } else { 0 }
         $info = Resolve-QpThreatInfo -ThreatName $name -VendorSeverity $vendorSev
         $path = ''; $kind = 'file'
+        $raw = ''
         foreach ($r in @($d.Resources | Where-Object { $_ })) {
-            if ($r -match '^(?<k>[a-z]+):_?(?<v>.+)$') { if (-not $path) { $kind = $matches['k']; $path = $matches['v'] } }
-            elseif (-not $path) { $path = [string]$r }
+            # 'webfile:_C:\x\a.exe|https://...|pid:12' - the file is the part before the first '|'.
+            if ($r -match '^(?<k>[a-z]+):_?(?<v>.+)$') { if (-not $path) { $kind = $matches['k']; $raw = $matches['v']; $path = ($raw -split '\|', 2)[0].Trim() } }
+            elseif (-not $path) { $path = [string]$r; $raw = $path }
         }
         $key = "$name|$path"
         if ($seen.ContainsKey($key)) { continue }   # keep only the newest detection of the same thing
@@ -6936,13 +6958,13 @@ function Get-QpDefenderFindings {
             "Defender threat name: $name"
             "Defender severity: $vendorSev (5 = severe, 4 = high, 2 = moderate, 1 = low)"
             "Defender status: $($d.ThreatStatusID) ($status)"
-            "Resource: $kind $path"
+            "Resource: $kind $raw"
             "Detected: $($d.InitialDetectionTime)"
             "Ran before it was caught: $(if ($t) { $t.DidThreatExecute } else { 'unknown' })"
             "Matched Quietpane note by: $($info.MatchedBy)"
         ) -join "`n"
         New-QpFinding -Section 'Threats' -Severity $info.Tier -ThreatName $name -Family $info.Family -Category $info.Category `
-            -Source 'Microsoft Defender' -Method 'Antivirus signature' -Object (Split-Path $path -Leaf) -Path $path `
+            -Source 'Microsoft Defender' -Method 'Antivirus signature' -Object $(if ($path) { Split-Path $path -Leaf } else { $name }) -Path $path `
             -Sha256 (Get-QpFileHash $path) -Confidence $confidence -VendorName $name -VendorSeverity "$vendorSev" `
             -FirstSeen $d.InitialDetectionTime -Recommended $recommended -Status $status `
             -What $info.What -Why $info.Why -Technical $tech `
@@ -7643,7 +7665,7 @@ function Invoke-QpAudit {
         $names = @{}
         if (-not $ApprovedKey) { return $names }
         $p = Get-ItemProperty -Path $ApprovedKey -ErrorAction SilentlyContinue
-        if ($p) { $p.PSObject.Properties | Where-Object { $_.Name -notlike 'PS*' } | ForEach-Object { if ($_.Value -is [byte[]] -and $_.Value.Length -and ($_.Value[0] -band 1)) { $names[$_.Name] = $true } } }
+        if ($p) { $p.PSObject.Properties | Where-Object { $_.Name -notin $script:QpRegNoteNames } | ForEach-Object { if ($_.Value -is [byte[]] -and $_.Value.Length -and ($_.Value[0] -band 1)) { $names[$_.Name] = $true } } }
         return $names
     }
     function Test-StartupTarget([string]$Command) {
@@ -7662,7 +7684,7 @@ function Invoke-QpAudit {
         $p = Get-ItemProperty -Path $rk.Key -ErrorAction SilentlyContinue
         if (-not $p) { continue }
         $off = Get-DisabledNames $rk.Approved
-        foreach ($prop in ($p.PSObject.Properties | Where-Object { $_.Name -notlike 'PS*' })) {
+        foreach ($prop in ($p.PSObject.Properties | Where-Object { $_.Name -notin $script:QpRegNoteNames })) {
             $startupTotal++; $scanned++
             $disabled = $off.ContainsKey($prop.Name)
             $exists = Test-StartupTarget $prop.Value
@@ -7907,9 +7929,15 @@ function Invoke-QpAudit {
     Write-QpLog 'Checking Microsoft Defender and firewall...' 'INFO'
     $mp = Get-MpComputerStatus -ErrorAction SilentlyContinue
     if ($mp) {
-        if (-not $mp.RealTimeProtectionEnabled) { Add-Finding 'Security' 'High' 'Defender real-time protection is OFF' 'Turn it back on in Windows Security unless another antivirus is installed.' }
-        $age = ((Get-Date) - $mp.AntivirusSignatureLastUpdated).Days
-        if ($age -gt 7) { Add-Finding 'Security' 'Medium' "Defender virus definitions are $age days old" 'Run Windows Update or open Windows Security > Protection updates.' }
+        # With another antivirus switched on, Defender standing down is what Windows does - not a problem.
+        $otherOn = @(); try { $otherOn = @(Get-QpOtherAntivirus | Where-Object { $_.On }) } catch { }
+        if (-not $mp.RealTimeProtectionEnabled -and -not $otherOn.Count) { Add-Finding 'Security' 'High' 'Defender real-time protection is OFF' 'Turn it back on in Windows Security unless another antivirus is installed.' }
+        # (A Defender that has never had definitions has no date at all.)
+        $updated = $mp.AntivirusSignatureLastUpdated
+        if ($updated -is [datetime] -and $updated -gt [datetime]::MinValue -and -not $otherOn.Count) {
+            $age = ((Get-Date) - $updated).Days
+            if ($age -gt 7) { Add-Finding 'Security' 'Medium' "Defender virus definitions are $age days old" 'Run Windows Update or open Windows Security > Protection updates.' }
+        }
         $lastFull = if ($mp.FullScanEndTime) { Get-QpStamp 'yyyy-MM-dd' $mp.FullScanEndTime } else { 'never' }
         Add-Finding 'Security' 'Info' 'Microsoft Defender status' ("Real-time protection: {0}`nDefinitions updated: {1:yyyy-MM-dd}`nLast full scan: {2}" -f $mp.RealTimeProtectionEnabled, $mp.AntivirusSignatureLastUpdated, $lastFull)
     }
