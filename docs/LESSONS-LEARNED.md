@@ -45,4 +45,5 @@ This one cost a reinstall.
 - **Windows re-creates some tip/"SoftLanding" tasks** after updates. They stay harmless while the tips settings are off. Just run the tool again after big updates.
 - **Clicking inside a PowerShell console window pauses the script.** The title shows "Select". Press Esc or Enter to resume.
 - **Windows paths have a 260-character limit.** Scripts stored in very deep folders can fail to start for no obvious reason. Keep the tool in a short path such as `C:\Tools\quietpane`.
-- **Recycle Bin instead of delete.** Clean-up tools that permanently delete things can't be undone when they get something wrong. Moving files to the Recycle Bin costs nothing, and you empty it once you're sure.
+- **Show first, then decide.** An age rule must not make a large new crash dump invisible. Quietpane reports total and eligible bytes separately, leaves young items unticked, and checks project protection again before applying.
+- **Recycle Bin first, exact confirmation when it cannot fit.** Moving files to the Recycle Bin is the normal path. An oversized item is never silently deleted: the person must select it, see its exact path and size, and confirm permanent deletion twice.

@@ -88,6 +88,27 @@ These need eyes, not assertions:
   say where to uninstall rather than offer the Recycle Bin. A folder bigger than the Recycle Bin's
   limit must say "Too big for the bin", never move. Move a small file of your own and check it lands
   in the Recycle Bin, the totals drop, and a restore point appears in Undo.
+- **Storage findings show before age filtering.** Put one new and one two-day-old file in a test folder
+  covered by the clean-up catalog. Both appear and count toward visible bytes; only the old file counts
+  as eligible and is selected when the category is recommended.
+- **Real missed-space regression.** Confirm Free up space separately shows large WSL crash dumps, the
+  Docker Desktop update cache, known subfolders under `.cache` and `.agent-browser`, Docker resources,
+  the Docker virtual-disk advisory, and the hibernation file. Do not apply this check to project data.
+- **Project protection.** Put a `package.json` or `.git` marker beside a test cache, add a second test
+  folder under Settings > Protected folders, and refresh. Descendants in both places are disabled with
+  the reason shown. Remove or rename the marker after the scan; Apply must still rescan before acting.
+- **Docker selection.** With Docker running, compare containers, images and volumes with Docker Desktop.
+  Running or dependency-bound resources are disabled, Compose ownership is named, named volumes start
+  unticked, and the app never offers a broad prune. With Docker stopped, the section asks you to start it.
+- **Oversized confirmation.** Select a disposable test file larger than the configured Recycle Bin limit.
+  Cancelling either warning keeps it byte-for-byte. Continuing shows its exact path and size twice and
+  deletes only that selected item.
+- **Hibernation.** Compare the shown hibernation size with `C:\hiberfil.sys`. Preview states the Hibernate
+  and Fast Startup effect. Apply requests administrator rights, disables it through `powercfg`, and the
+  same row then offers to enable it again.
+- **Installed apps are neutral.** Compare desktop and Store entries with Settings > Installed apps. Check
+  duplicates are folded together, unknown sizes say so, protected Windows components cannot be selected,
+  and a test uninstall runs only the registered uninstaller.
 - **What's talking to the internet.** Privacy > What's talking to the internet right now. Open a
   website and the browser should appear within about five seconds; close everything and the list
   shrinks. Compare it with Resource Monitor > Network > TCP Connections: the same programs, allowing

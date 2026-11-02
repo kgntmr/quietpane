@@ -1294,8 +1294,8 @@ $healthPanel = New-TabPage 'Health' 'health' ''
 $scanPanel = New-TabPage 'Safety scan' 'scan' ('Asks Microsoft Defender what it has found, and looks for the tricks adware uses. Looking changes nothing.')
 $privacyPanel = New-TabPage 'Privacy' 'privacy' ('What your PC shares, and the tracking and ads you can switch off. Security and Windows Update are never touched.')
 $vendorPanel = New-TabPage 'Telemetry' 'vendors' ('')
-$appsPanel = New-TabPage 'Apps' 'apps' ('What starts when you sign in, and apps you never asked for. Tick, then Preview or Apply.')
-$cleanupPanel = New-TabPage 'Free up space' 'cleanup' ('Leftovers nobody needs, like temporary files and old installers. They go to your Recycle Bin. Close your browsers first.')
+$appsPanel = New-TabPage 'Apps' 'apps' ('What starts when you sign in, and every app Windows lists as installed. Nothing is labelled bloat or selected for you.')
+$cleanupPanel = New-TabPage 'Free up space' 'cleanup' ('See all reclaimable storage before deciding. Young files, project data and sensitive actions stay unticked.')
 $undoPanel = New-TabPage 'Undo' 'undo' ('Changes that can be undone are saved as restore points. Pick one to put it back.')
 $aboutPanel = New-TabPage 'Settings' 'about' ''
 
@@ -1568,16 +1568,17 @@ $script:StartupList = New-Object System.Windows.Controls.StackPanel
 [void]$script:StartupSection.Content.Children.Add($script:StartupList)
 [void]$appsPanel.Children.Add($script:StartupSection.Expander)
 
-$script:RemoveSection = New-Section 'Apps you could remove'
+$script:RemoveSection = New-Section 'Installed apps'
 $script:RemoveSection.Expander.IsExpanded = $true
-$appsNote = New-Text 'Essentials like the Store, Camera and Photos are never listed. Removed apps can be reinstalled from the Store.' 12.5 'Normal' '#4B5B5C' '0,2,0,6'
-Set-MoreInfo $appsNote 'Never on this list: the Store, Camera, Photos, Calculator, Notepad, Paint, Snipping Tool and anything driver-related.'
+$appsNote = New-Text 'A neutral inventory from Windows. Sizes are reported by the installer; unknown sizes are not guessed. Protected Windows components cannot be selected.' 12.5 'Normal' '#4B5B5C' '0,2,0,6'
+Set-MoreInfo $appsNote 'Quietpane runs only the registered uninstaller. It never deletes an application folder as a substitute for uninstalling it.'
 [void]$script:RemoveSection.Content.Children.Add($appsNote)
 $script:DeprovisionCb = New-Object System.Windows.Controls.CheckBox
 $script:DeprovisionCb.Content = New-Text 'Also keep them off new user accounts' 12.5 'Normal' '#0F1B1C' '2,0,0,0'
 Set-MoreInfo $script:DeprovisionCb 'Stops removed apps being installed again for anyone who gets a new account on this PC.'
 $script:DeprovisionCb.IsChecked = $true
 $script:DeprovisionCb.Margin = Get-Thick '0,0,0,8'
+$script:DeprovisionCb.Visibility = 'Collapsed'
 [void]$script:RemoveSection.Content.Children.Add($script:DeprovisionCb)
 $script:AppsList = New-Object System.Windows.Controls.StackPanel
 [void]$script:AppsList.Children.Add((New-Text 'Looking for installed apps...' 13 'Normal' '#4B5B5C'))
@@ -1586,9 +1587,19 @@ $script:AppsList = New-Object System.Windows.Controls.StackPanel
 
 # 5. Clean-up
 [void]$cleanupPanel.Children.Add((New-GlanceBox 'cleanup'))
-$script:CleanupList = New-Object System.Windows.Controls.StackPanel
-[void]$script:CleanupList.Children.Add((New-Text 'Measuring sizes...' 13 'Normal' '#4B5B5C'))
-[void]$cleanupPanel.Children.Add($script:CleanupList)
+$script:CleanupGroups = @{}
+$script:CleanupGroupOrder = @('Temporary files and crash dumps', 'Application and automation caches', 'Docker storage', 'Windows system storage')
+foreach ($groupName in $script:CleanupGroupOrder) {
+    $section = New-Section $groupName
+    $section.Expander.IsExpanded = $true
+    $list = New-Object System.Windows.Controls.StackPanel
+    [void]$list.Children.Add((New-Text 'Measuring sizes...' 13 'Normal' '#4B5B5C'))
+    [void]$section.Content.Children.Add($list)
+    [void]$cleanupPanel.Children.Add($section.Expander)
+    $script:CleanupGroups[$groupName] = [pscustomobject]@{ Section = $section; List = $list }
+}
+$script:CleanupList = $script:CleanupGroups['Temporary files and crash dumps'].List
+$script:StorageFindingsById = @{}
 
 # Where the space went: only when asked, because adding up a whole drive takes a few seconds.
 $script:SpaceSection = New-Section 'Where your space went'
@@ -1694,6 +1705,46 @@ $temp = New-ChoiceRow 'Temperature' 'Temperatures' @(@('C', "${deg}C"), @('F', "
 $script:TempButtons = $temp.Buttons
 $tempRow = New-SettingRow 'Temperatures' 'On the Health tab and in session reports.' $temp.Panel
 [void]$aboutPanel.Children.Add($tempRow.Border)
+
+# Folders a person never wants a storage action to touch. Project markers are protected automatically;
+# this list covers source archives, workspaces or any other folder the person chooses.
+$protectedPanel = New-Object System.Windows.Controls.StackPanel
+$protectedPanel.Orientation = 'Horizontal'
+$script:ProtectedFolderChoice = New-Object System.Windows.Controls.ComboBox
+$script:ProtectedFolderChoice.MinWidth = 300
+$script:ProtectedFolderChoice.Margin = Get-Thick '0,0,8,0'
+[System.Windows.Automation.AutomationProperties]::SetName($script:ProtectedFolderChoice, 'Folders protected from storage cleanup')
+function Update-ProtectedFolderChoice {
+    $script:ProtectedFolderChoice.Items.Clear()
+    foreach ($p in @(Get-QpProtectedPaths)) { [void]$script:ProtectedFolderChoice.Items.Add($p) }
+    if ($script:ProtectedFolderChoice.Items.Count) { $script:ProtectedFolderChoice.SelectedIndex = 0 }
+}
+Update-ProtectedFolderChoice
+$btnProtectAdd = New-Button 'Add folder'
+$btnProtectRemove = New-Button 'Remove selected' '8,0,0,0'
+$btnProtectAdd.Add_Click({
+    try {
+        Add-Type -AssemblyName System.Windows.Forms
+        $pick = New-Object System.Windows.Forms.FolderBrowserDialog
+        $pick.Description = 'Choose a folder Quietpane must never clean'
+        if ($pick.ShowDialog() -eq 'OK') {
+            $paths = @((Get-QpProtectedPaths) + $pick.SelectedPath | Sort-Object -Unique)
+            if (Set-QpProtectedPaths -Paths $paths) { Update-ProtectedFolderChoice; $ui.Status.Text = 'Protected folders updated. Refreshing storage findings...'; Update-StateAfterChange }
+        }
+        $pick.Dispose()
+    } catch { [void][System.Windows.MessageBox]::Show("That folder could not be protected:`n`n$($_.Exception.Message)", 'Quietpane') }
+})
+$btnProtectRemove.Add_Click({
+    $selected = [string]$script:ProtectedFolderChoice.SelectedItem
+    if (-not $selected) { return }
+    $paths = @(Get-QpProtectedPaths | Where-Object { $_ -ne $selected })
+    if (Set-QpProtectedPaths -Paths $paths) { Update-ProtectedFolderChoice; $ui.Status.Text = 'Protected folder removed. Refreshing storage findings...'; Update-StateAfterChange }
+})
+[void]$protectedPanel.Children.Add($script:ProtectedFolderChoice)
+[void]$protectedPanel.Children.Add($btnProtectAdd)
+[void]$protectedPanel.Children.Add($btnProtectRemove)
+$protectedRow = New-SettingRow 'Protected folders' 'Quietpane also detects common project markers automatically. Protection is checked again immediately before every cleanup.' $protectedPanel
+[void]$aboutPanel.Children.Add($protectedRow.Border)
 
 # Starting when you sign in, and checking once as it does. Both take effect the moment they are flipped.
 $script:SignInBox = New-Switch 'Start Quietpane when I sign in'
@@ -2267,6 +2318,10 @@ function Set-PendingTicks {
     #>
     $p = $script:PendingTicks
     if (-not $p) { return }
+    # Free up space starts with only the quick hibernation row, then loads files and Docker on demand.
+    # Keep the carried choices until that detailed list exists, or a shielded cleanup would reopen
+    # with its selection silently dropped. Self-tests use their complete made-up state synchronously.
+    if ($script:Asked.Tab -eq 'cleanup' -and -not $script:DockerStorageLoaded -and -not $SelfTest) { return }
     $script:PendingTicks = $null
     $lists = @(switch ($script:Asked.Tab) { 'privacy' { 'privacy', 'devices', 'extensions' } 'vendors' { 'vendors', 'junk' } 'apps' { 'startup', 'apps', 'deprovision' } 'cleanup' { 'cleanup' } })
     foreach ($k in $lists) {
@@ -2597,31 +2652,68 @@ function Update-FromState($state) {
     }
     $script:AppsList.Children.Clear()
     $script:Options['apps'].Clear()
-    $apps = @($state.Apps | Where-Object { $_ })
-    $script:RemoveSection.Expander.Header = New-Text ('Apps you could remove   ({0} found)' -f $apps.Count) 14.5 'SemiBold' '#117A68' '0' 'Fraunces, Georgia'
-    Set-Glance 'apps' 'remove' 'Apps you could remove' $(if ($apps.Count) { '{0} found' -f $apps.Count } else { 'none found' }) -Tone $(if ($apps.Count) { 'warn' } else { 'good' })
-    if ($apps.Count -eq 0) { [void]$script:AppsList.Children.Add((New-Text 'No known bloat apps found on this PC.' 13 'SemiBold' '#117A68')) }
-    foreach ($a in $apps) { Add-Option -Panel $script:AppsList -Key 'apps' -Id $a.Name -Title $a.Title -Short $a.Description -Description ('{0}  (Windows calls it {1}.)' -f $a.Description, $a.Name) -Recommended ([bool]$a.Recommended) }
-    $script:CleanupList.Children.Clear()
-    $script:Options['cleanup'].Clear()
-    $leftover = [double](@($state.Cleanup | Where-Object { $_ } | ForEach-Object { [double]$_.SizeBytes }) | Measure-Object -Sum).Sum
-    Set-Glance 'cleanup' 'leftovers' 'Leftovers you could clear' $(if ($leftover -gt 0) { Format-QpBytes $leftover } else { 'none - already tidy' }) -Tip 'Temporary files, crash dumps and old installers, listed below. They go to your Recycle Bin.'
-    foreach ($c in @($state.Cleanup | Where-Object { $_ })) {
-        if ($c.Availability -eq 'NeedsAdmin') {
-            # Its size can't be seen without administrator rights - which is not the same as nothing to clean.
-            Add-Option -Panel $script:CleanupList -Key 'cleanup' -Id $c.Id -Title $c.Title -Description $c.Description -Recommended ([bool]$c.Recommended)
-            $last = $script:Options['cleanup'][$script:Options['cleanup'].Count - 1]
-            $last.Label.Text = "$($c.Title)   [size needs admin rights to see]"
-            $last.Label.Foreground = Get-Brush '#9A6700'
-            continue
-        }
-        $title = '{0}   ({1})' -f $c.Title, (Format-QpBytes $c.SizeBytes)
-        Add-Option -Panel $script:CleanupList -Key 'cleanup' -Id $c.Id -Title $title -Description $c.Description -Recommended ([bool]$c.Recommended)
-        if ($c.SizeBytes -le 0) {
-            $last = $script:Options['cleanup'][$script:Options['cleanup'].Count - 1]
+    $apps = @($state.InstalledApps | Where-Object { $_ })
+    $script:RemoveSection.Expander.Header = New-Text ('Installed apps   ({0} found)' -f $apps.Count) 14.5 'SemiBold' '#117A68' '0' 'Fraunces, Georgia'
+    Set-Glance 'apps' 'remove' 'Installed apps' $(if ($apps.Count) { '{0} found' -f $apps.Count } else { 'none found' })
+    if ($apps.Count -eq 0) { [void]$script:AppsList.Children.Add((New-Text 'Windows did not return an installed-app inventory.' 13 'SemiBold' '#9A6700')) }
+    foreach ($a in $apps) {
+        $size = if ($a.SizeKnown) { Format-QpBytes $a.SizeBytes } else { 'size unknown' }
+        $publisher = if ($a.Publisher) { $a.Publisher } else { 'publisher not reported' }
+        Add-Option -Panel $script:AppsList -Key 'apps' -Id $a.Id -Title ('{0}   ({1})' -f $a.Title, $size) -Short ('{0} | {1}' -f $publisher, $a.Source) -Description $a.Description -Recommended $false
+        if ($a.Protected -or -not $a.CanUninstall) {
+            $last = $script:Options['apps'][$script:Options['apps'].Count - 1]
+            $last.CheckBox.IsEnabled = $false
             Set-OptionStatus $last 'NotApplicable'
-            $last.Label.Text = "$title   [nothing to clean]"
         }
+    }
+    foreach ($g in $script:CleanupGroups.Values) { $g.List.Children.Clear() }
+    $script:Options['cleanup'].Clear()
+    $script:StorageFindingsById = @{}
+    $findings = @($state.Cleanup | Where-Object { $_ })
+    # Older snapshots and the self-test use the 2.2 aggregate shape. Keep them readable while live
+    # scans use the richer 2.3 finding shape.
+    foreach ($c in $findings) {
+        if (-not $c.PSObject.Properties['TotalBytes']) { $c | Add-Member NoteProperty TotalBytes ([int64]$c.SizeBytes) }
+        if (-not $c.PSObject.Properties['EligibleBytes']) { $c | Add-Member NoteProperty EligibleBytes ([int64]$c.SizeBytes) }
+        if (-not $c.PSObject.Properties['Category']) { $c | Add-Member NoteProperty Category 'Temporary files and crash dumps' }
+        if (-not $c.PSObject.Properties['ActionType']) { $c | Add-Member NoteProperty ActionType 'FileCleanup' }
+        if (-not $c.PSObject.Properties['DefaultSelected']) { $c | Add-Member NoteProperty DefaultSelected ([bool]$c.Recommended) }
+        if (-not $c.PSObject.Properties['Protected']) { $c | Add-Member NoteProperty Protected $false }
+        if (-not $c.PSObject.Properties['Availability']) { $c | Add-Member NoteProperty Availability 'Available' }
+    }
+    # Advisory host files such as Docker's VHDX are shown separately, not added to the logical
+    # resources inside them. Adding both would double-count the same disk space.
+    $countedFindings = @($findings | Where-Object { $_.ActionType -ne 'Advisory' })
+    $visibleBytes = [double]($countedFindings | Measure-Object -Property TotalBytes -Sum).Sum
+    $eligibleBytes = [double]($countedFindings | Measure-Object -Property EligibleBytes -Sum).Sum
+    Set-Glance 'cleanup' 'leftovers' 'Visible / eligible now' ('{0} / {1}' -f (Format-QpBytes $visibleBytes), (Format-QpBytes $eligibleBytes)) -Tip 'The first number includes young and protected items. Only explicitly selected eligible items can be changed.'
+    foreach ($category in $script:CleanupGroupOrder) {
+        $group = $script:CleanupGroups[$category]
+        $all = @($findings | Where-Object { $_.Category -eq $category } | Sort-Object @{ Expression = { [int64]$_.TotalBytes }; Descending = $true }, Title)
+        $shown = @($all | Select-Object -First 20)
+        $shown += @($all | Where-Object { $_.TotalBytes -ge 100MB -and $shown.Id -notcontains $_.Id })
+        $shown = @($shown | Sort-Object @{ Expression = { [int64]$_.TotalBytes }; Descending = $true }, Title -Unique)
+        $counted = @($all | Where-Object { $_.ActionType -ne 'Advisory' })
+        $visibleLabel = if ($category -eq 'Docker storage') { 'logical' } else { 'visible' }
+        $group.Section.Expander.Header = New-Text ('{0}   ({1} {2}, {3} eligible)' -f $category, (Format-QpBytes ([double]($counted | Measure-Object TotalBytes -Sum).Sum)), $visibleLabel, (Format-QpBytes ([double]($counted | Measure-Object EligibleBytes -Sum).Sum))) 14.5 'SemiBold' '#117A68' '0' 'Fraunces, Georgia'
+        if (-not $shown.Count) { [void]$group.List.Children.Add((New-Text 'Nothing found in this category.' 12.5 'Normal' '#66706F')); continue }
+        foreach ($c in $shown) {
+            $script:StorageFindingsById[$c.Id] = $c
+            $age = if ($c.LastWriteTime -and $c.LastWriteTime -ne [datetime]::MinValue) { 'Last changed ' + (Format-QpWhen $c.LastWriteTime) + '. ' } else { '' }
+            $note = $age + $c.Description
+            if ($c.Protected) { $note += ' Protected: ' + $c.ProtectionReason }
+            if ($c.ActionType -eq 'DockerVolume') { $note += ' Named volumes are never selected automatically.' }
+            if ($c.NeedsPermanentDelete) { $note += ' This item is too large for the Recycle Bin; permanent deletion needs two confirmations.' }
+            $sizeText = if ($c.TotalBytes -gt 0) { Format-QpBytes $c.TotalBytes } else { 'size unknown or none' }
+            Add-Option -Panel $group.List -Key 'cleanup' -Id $c.Id -Title ('{0}   ({1})' -f $c.Title, $sizeText) -Description $note -Recommended ([bool]$c.DefaultSelected)
+            $last = $script:Options['cleanup'][$script:Options['cleanup'].Count - 1]
+            if ($c.Protected -or $c.Availability -notin 'Available', 'NeedsAdmin') {
+                $last.CheckBox.IsEnabled = $false
+                Set-OptionStatus $last 'NotApplicable'
+            }
+        }
+        $hidden = $all.Count - $shown.Count
+        if ($hidden -gt 0) { [void]$group.List.Children.Add((New-Text ("$hidden smaller items are grouped out of the first view. The category totals above still include them.") 12 'Normal' '#66706F' '0,8,0,0')) }
     }
     Show-Part 'the restore points' { Update-UndoList @($state.Restore) }
     Show-Part 'the quarantine' { Update-QuarantineList }
@@ -2652,6 +2744,7 @@ function Update-FromState($state) {
     Update-TickCount
     Update-Shields
     if ($script:PendingStatus) { $ui.Status.Text = $script:PendingStatus; $script:PendingStatus = $null }
+    if ([string]$ui.Tabs.SelectedItem.Tag -eq 'cleanup') { Load-DockerStorage }
 }
 
 $script:CameBack = $null
@@ -3404,8 +3497,9 @@ function Remove-TickedExtras {
 function Update-HomeCards($state) {
     # Same rules as Get-QpRecommendedPlan in the engine: recommended items that are not done yet.
     $priv = @($script:Options['privacy'] | Where-Object { $_.Recommended -and $_.Status -in 'NotApplied', 'Partial' }).Count
-    $apps = @($state.Apps | Where-Object { $_ -and $_.Recommended }).Count
-    $bytes = [int64](@($state.Cleanup | Where-Object { $_ -and $_.Recommended -and $_.SizeBytes -gt 0 }) | Measure-Object -Property SizeBytes -Sum).Sum
+    $apps = 0   # app removal is always a reviewed choice, never part of one-click
+    $installedCount = @($state.InstalledApps | Where-Object { $_ }).Count
+    $bytes = [int64](@($state.Cleanup | Where-Object { $_ -and $_.DefaultSelected -and $_.EligibleBytes -gt 0 }) | Measure-Object -Property EligibleBytes -Sum).Sum
     $vendors = @($state.Vendors | Where-Object { $_ })
     $brandOpen = [int](@($vendors | ForEach-Object { @($_.Items | Where-Object { $_.Recommended -and $_.Status -ne 'Applied' }).Count }) | Measure-Object -Sum).Sum
     $brandNames = ($vendors | ForEach-Object { $_.Name }) -join ', '
@@ -3414,8 +3508,9 @@ function Update-HomeCards($state) {
     $good = Get-Brush '#117A68'; $todo = Get-Brush '#0F1B1C'
     if ($priv) { $script:CardTracking.Value.Text = "$priv to switch off"; $script:CardTracking.Value.Foreground = $todo; $script:CardTracking.Caption.Text = 'Telemetry, ads and tips' }
     else { $script:CardTracking.Value.Text = 'All set'; $script:CardTracking.Value.Foreground = $good; $script:CardTracking.Caption.Text = 'Already switched off' }
-    if ($apps) { $script:CardApps.Value.Text = "$apps to remove"; $script:CardApps.Value.Foreground = $todo; $script:CardApps.Caption.Text = 'Pre-installed extras' }
-    else { $script:CardApps.Value.Text = 'None found'; $script:CardApps.Value.Foreground = $good; $script:CardApps.Caption.Text = 'No known bloat apps' }
+    $script:CardApps.Value.Text = $(if ($installedCount) { [string]$installedCount } else { 'None found' })
+    $script:CardApps.Value.Foreground = $(if ($installedCount) { $todo } else { $good })
+    $script:CardApps.Caption.Text = 'Installed apps - review only'
     # Startup is never part of one-click (what you want at sign-in is personal), so just point to it.
     $starting = @($state.Startup | Where-Object { $_ -and $_.On -and -not $_.Keep -and -not $_.Locked }).Count
     if ($starting) { $script:CardApps.Caption.Text = ('{0} start when you sign in' -f $starting); Set-MoreInfo $script:CardApps.Border 'Choose what starts when you sign in on the Apps tab.' }
@@ -4137,8 +4232,25 @@ function Set-LogVisible([bool]$Visible) {
 
 # One pass over the PC, sharing its slow lookups (see Get-QpState). Health is read by its own tab.
 $script:ReadState = { Get-QpStateParallel }
+$script:DockerStorageLoaded = $false
+$script:DockerStorageLoading = $false
+
+function Load-DockerStorage {
+    if ($SelfTest -or $script:DockerStorageLoaded -or $script:DockerStorageLoading -or -not $script:LastState -or (Test-Busy)) { return }
+    $script:DockerStorageLoading = $true
+    Start-Work -StatusText 'Measuring temporary files, caches and Docker storage...' -Work { @(Get-QpStorageFindings -RefreshDocker) } -OnDone {
+        param($storage)
+        $script:DockerStorageLoading = $false
+        if (-not $script:LastState) { return }
+        $script:LastState.Cleanup = @($storage | Where-Object { $_ })
+        $script:DockerStorageLoaded = $true
+        Update-FromState $script:LastState
+    }
+}
 
 function Update-State {
+    $script:DockerStorageLoaded = $false
+    $script:DockerStorageLoading = $false
     Start-Work -StatusText 'Reading the current state of this PC...' -Work $script:ReadState -OnDone { param($s) Update-FromState $s }
 }
 
@@ -4235,7 +4347,7 @@ function Invoke-Selected([bool]$Preview) {
                 if ($ids.Count) { $parts += "remove $($ids.Count) app(s) - the Microsoft Store has them if you want them back" }
                 "Shall I " + ($parts -join ",`nand ") + "?"
             }
-            'cleanup' { "Move the ticked items to the Recycle Bin?`n`nNothing is deleted for good - you empty the bin yourself when you are happy." }
+            'cleanup' { "Apply the selected storage actions?`n`nFiles use the Recycle Bin when they fit. Docker, hibernation and oversized-file effects are stated separately before they run." }
             default   { "Go ahead with the $($ids.Count) ticked item(s)?`n`nA restore point is saved first, so you can undo this from the Undo tab." }
         }
         if ([System.Windows.MessageBox]::Show($msg, 'Quietpane', 'YesNo', 'Question') -ne 'Yes') { return }
@@ -4257,16 +4369,37 @@ function Invoke-Selected([bool]$Preview) {
         }
         'vendors' { Start-Work -StatusText "$verb brand and hardware changes..." -Params @{ Ids = $ids; Preview = $Preview } -OnDone $after -Work { param($Ids, $Preview) Invoke-QpVendor -Ids $Ids -Preview:$Preview } }
         'apps'    {
-            $dep = [bool]$script:DeprovisionCb.IsChecked
-            Start-Work -StatusText "$verb apps and startup changes..." -Params @{ Ids = $ids; Startup = $startupIds; Preview = $Preview; Deprovision = $dep } -OnDone $after -Work {
-                param($Ids, $Startup, $Preview, $Deprovision)
+            Start-Work -StatusText "$verb apps and startup changes..." -Params @{ Ids = $ids; Startup = $startupIds; Preview = $Preview } -OnDone $after -Work {
+                param($Ids, $Startup, $Preview)
                 # An empty list arrives as $null, and @($null).Count is 1 - so count real entries only.
                 $Startup = @($Startup | Where-Object { $_ }); $Ids = @($Ids | Where-Object { $_ })
                 if ($Startup.Count) { Invoke-QpStartup -Ids $Startup -Preview:$Preview }
-                if ($Ids.Count) { Invoke-QpRemoveApps -Names $Ids -Preview:$Preview -Deprovision:$Deprovision }
+                if ($Ids.Count) { Invoke-QpUninstallApplication -Ids $Ids -Preview:$Preview }
             }
         }
-        'cleanup' { Start-Work -StatusText "$verb clean-up..." -Params @{ Ids = $ids; Preview = $Preview } -OnDone $after -Work { param($Ids, $Preview) Invoke-QpCleanup -Ids $Ids -Preview:$Preview } }
+        'cleanup' {
+            $permanent = @()
+            # Discovery runs in a short-lived worker. Carry only the selected rows' comparison facts
+            # into the action worker; the engine still re-discovers every ID before doing anything.
+            $expected = @($ids | ForEach-Object { $script:StorageFindingsById[$_] } | Where-Object { $_ })
+            if (-not $Preview) {
+                $large = @($ids | ForEach-Object { $script:StorageFindingsById[$_] } | Where-Object { $_ -and $_.NeedsPermanentDelete })
+                if ($large.Count) {
+                    $list = ($large | ForEach-Object { '  - {0} ({1})' -f $_.Identity, (Format-QpBytes $_.TotalBytes) }) -join "`n"
+                    $first = "These selected items cannot fit in the Recycle Bin:`n`n$list`n`nDeleting them is permanent. Continue to a final confirmation?"
+                    if ([System.Windows.MessageBox]::Show($first, 'Quietpane - permanent deletion', 'YesNo', 'Warning') -ne 'Yes') { return }
+                    $second = "Final confirmation: permanently delete only the exact items listed above?`n`nProtected folders and changed targets will still be refused."
+                    if ([System.Windows.MessageBox]::Show($second, 'Quietpane - confirm permanent deletion', 'YesNo', 'Warning') -ne 'Yes') { return }
+                    $permanent = @($large | ForEach-Object { $_.Id })
+                }
+                $hib = @($ids | ForEach-Object { $script:StorageFindingsById[$_] } | Where-Object { $_.ActionType -eq 'Hibernation' -and $_.Metadata.Enabled })
+                if ($hib.Count -and [System.Windows.MessageBox]::Show('Disabling hibernation frees the shown space, disables Hibernate, and may affect Fast Startup. Continue?', 'Quietpane - hibernation', 'YesNo', 'Warning') -ne 'Yes') { return }
+            }
+            Start-Work -StatusText "$verb storage changes..." -Params @{ Ids = $ids; Preview = $Preview; Permanent = $permanent; Expected = $expected } -OnDone $after -Work {
+                param($Ids, $Preview, $Permanent, $Expected)
+                Invoke-QpStorageCleanup -FindingIds $Ids -Preview:$Preview -PermanentDeleteIds $Permanent -ExpectedFindings $Expected
+            }
+        }
     }
 }
 
@@ -5003,7 +5136,10 @@ $btnUndo.Add_Click({
 
 $ui.Tabs.Add_SelectionChanged({
     param($s, $e)
-    if ($e.OriginalSource -eq $ui.Tabs) { Update-Buttons; Set-TimerQuick }
+    if ($e.OriginalSource -eq $ui.Tabs) {
+        Update-Buttons; Set-TimerQuick
+        if ([string]$ui.Tabs.SelectedItem.Tag -eq 'cleanup') { Load-DockerStorage }
+    }
 })
 # F5 reads the PC again, as in most Windows apps. (If something is already running, the status line says so.)
 $window.Add_PreviewKeyDown({ param($s, $e) if ($e.Key -eq 'F5') { $e.Handled = $true; Update-State } })
@@ -5675,17 +5811,17 @@ function Test-Glance {
         that starts at sign-in and nothing else. Each box sums up its tab; a box with nothing says so.
     #>
     Update-FromState @{
-        Privacy = @{}; Vendors = @(); Apps = @(); Devices = @(); Addons = @(); Problems = @()
+        Privacy = @{}; Vendors = @(); Apps = @(); InstalledApps = @(); Devices = @(); Addons = @(); Problems = @()
         Startup = @([pscustomobject]@{ Id = 'a'; Name = 'Chat app'; On = $true; Keep = $false; Locked = $false; Publisher = 'Test'; Command = 'a.exe'; Note = ''; Missing = $false; Everyone = $false },
                     [pscustomobject]@{ Id = 'b'; Name = 'Old helper'; On = $false; Keep = $false; Locked = $false; Publisher = 'Test'; Command = 'b.exe'; Note = ''; Missing = $false; Everyone = $false })
-        Cleanup = @([pscustomobject]@{ Id = 'temp'; Title = 'Temporary files'; Description = 'Left behind by programs.'; SizeBytes = [int64]5MB; Recommended = $true })
+        Cleanup = @([pscustomobject]@{ Id = 'temp'; Title = 'Temporary files'; Description = 'Left behind by programs.'; SizeBytes = [int64]5MB; TotalBytes = [int64]5MB; EligibleBytes = [int64]5MB; Category = 'Temporary files and crash dumps'; ActionType = 'FileCleanup'; DefaultSelected = $true; Recommended = $true; Protected = $false; Availability = 'Available' })
         Restore = @([pscustomobject]@{ Name = '20260930-101500-one-click'; Path = 'C:\nowhere'; Changes = 3; Undone = $false })
     }
     $g = @{}
     foreach ($k in 'apps', 'cleanup', 'undo', 'vendors') { $g[$k] = Get-DetailsText $script:GlanceBoxes[$k] }
     'apps: {0}; leftovers: {1}; drive: {2}; restore points: {3}; brands: {4}' -f
-        [bool](($g.apps -match 'Start when you sign in: 1 on, 1 off') -and ($g.apps -match 'Apps you could remove: none found')),
-        [bool]($g.cleanup -match 'Leftovers you could clear: 5\.0 MB'), [bool]($g.cleanup -match 'Drive [A-Z]:: .+ free of '),
+        [bool](($g.apps -match 'Start when you sign in: 1 on, 1 off') -and ($g.apps -match 'Installed apps: none found')),
+        [bool]($g.cleanup -match 'Visible / eligible now: 5\.0 MB / 5\.0 MB'), [bool]($g.cleanup -match 'Drive [A-Z]:: .+ free of '),
         [bool](($g.undo -match 'Restore points: 1') -and ($g.undo -match 'Newest: .*Quiet my PC now')),
         [bool](($g.vendors -match 'Brand software found: none that Quietpane knows') -and ($g.vendors -match 'Still switched on: nothing'))
 }
@@ -5815,10 +5951,18 @@ if ($SelfTest) {
         return
     }
     if ($Snapshot) {
-        Update-FromState (& $script:ReadState)
+        $snapshotState = & $script:ReadState
+        Update-FromState $snapshotState
         $ui.LogBox.Text = "[12:00:00] STEP    Quietpane $($info.Version) - Developed by KomodoWorks.com`r`n[12:00:01] OK      Ready."
         $ui.Status.Text = 'Ready when you are.'
         $ui.Tabs.SelectedIndex = $SnapshotTab
+        # The ordinary window loads the detailed storage inventory only when this tab is opened. A
+        # self-test does not start background work, so collect it synchronously for the release image.
+        if ([string]$ui.Tabs.SelectedItem.Tag -eq 'cleanup') {
+            $snapshotState.Cleanup = @(Get-QpStorageFindings -RefreshDocker)
+            Update-FromState $snapshotState
+            $ui.Tabs.SelectedIndex = $SnapshotTab
+        }
         if ([string]$ui.Tabs.SelectedItem.Tag -eq 'health') {
             # Real readings for the picture. The slow ones are read first, so the tiles have the drive's
             # temperature to show, and then several live ones a second apart, so the trends have a shape

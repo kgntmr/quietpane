@@ -13,10 +13,13 @@ Quietpane can look at your computer without changing it (the Safety scan, the He
 
 **It only makes changes you have chosen and confirmed.** Before applying settings you can use "Preview" to see exactly what would change.
 
-Most changes are recorded in a restore point that you can undo, and clean-up only ever moves files to your Recycle Bin. Three things cannot be undone by Quietpane, and the app says so before you confirm them:
+Most settings changes are recorded in a restore point that you can undo, and file clean-up uses your Recycle Bin when an item fits. Actions that cannot be undone by Quietpane say so before confirmation:
 - **removing an app** (you can reinstall it from the Microsoft Store);
 - **uninstalling a brand extra** (you can reinstall it from its maker);
-- **deleting a threat for good** (you're asked twice).
+- **deleting a threat for good** (you're asked twice);
+- **permanently deleting an oversized clean-up item** after its exact path and size are confirmed twice;
+- **removing a Docker container, image, build cache or volume**; and
+- **disabling hibernation**, which also disables Hibernate and may affect Fast Startup. It can be enabled again, but the old hibernation file is not restored byte-for-byte.
 
 ## 3. Using it responsibly
 - Use it only on computers you own or are authorised to administer. On a work or school computer, ask the administrator first, because changing settings may conflict with your organisation's policies.

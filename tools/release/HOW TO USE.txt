@@ -55,13 +55,17 @@ ALSO IN THE APP
               want. Also which apps used your camera, microphone and
               location, and when, and what is talking to the internet
               right now.
-   Apps       Choose what starts when you sign in - and see what each one
-              is costing you, heaviest first.
-   Free up    "Worth clearing first" finds the easy room: installers you
-    space     have already used, downloads from years ago, big files you
-              have not changed in ages. One button sends them to the
-              Recycle Bin. Under it, "Where your space went" shows the
-              biggest folders and files, so you can see where it all went.
+   Apps       See every desktop and Microsoft Store app Windows reports,
+              including publisher and reported size. Tick an app only when
+              you want Windows or its registered uninstaller to remove it.
+              Choose what starts when you sign in underneath.
+   Free up    See temporary files, caches, Docker storage and Windows system
+    space     storage in separate groups. Young files and protected projects
+              stay unticked. Named Docker volumes are never preselected.
+              Files go to the Recycle Bin when they fit; an oversized item
+              needs two exact confirmations before permanent deletion.
+              "Where your space went" still shows the biggest folders and
+              files without offering program or project folders for removal.
    Settings   One row per setting. A switch starts Quietpane when you sign
               in, and another has it tell you - with a small badge on its
               taskbar icon - if Windows switches things back on. One button
@@ -75,7 +79,8 @@ ALSO IN THE APP
               Download the new Quietpane.zip, open Quietpane again, and
               Home offers to install it for you.
    Undo       Changed your mind? Everything recorded can be put back.
-              Cleaned-up files are in your Recycle Bin.
+              Cleaned-up files are in your Recycle Bin when they fit. An
+              oversized item is deleted only after two exact confirmations.
 
    Open Quietpane again now and then. Big Windows updates sometimes switch
    things back on, and Home will tell you what came back.
