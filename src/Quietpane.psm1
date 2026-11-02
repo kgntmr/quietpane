@@ -23,8 +23,8 @@
       * No network requests, no telemetry, no data collection. Everything stays on this PC.
 #>
 
-$script:AppVersion  = '2.2.0'
-$script:AppReleased = '2026-10-19'   # the day this version was published; bumped with the version
+$script:AppVersion  = '2.3.0'
+$script:AppReleased = '2026-11-02'   # the day this version was published; bumped with the version
 $script:Brand       = @{ Name = 'KomodoWorks'; Url = 'https://www.komodoworks.com'; Email = 'info@komodoworks.com'; Repo = 'https://github.com/kgntmr/quietpane' }
 $script:AssetsRoot  = Join-Path (Split-Path $PSScriptRoot -Parent) 'assets'
 $script:LogSink     = $null
@@ -487,7 +487,7 @@ function Get-QpCleanupRoots {
     $local = [Environment]::GetFolderPath('LocalApplicationData'); $userHome = [Environment]::GetFolderPath('UserProfile')
     $localOk = $local -and $userHome -and (Test-QpPathUnder $local $userHome) -and -not (Test-QpSamePath $local $userHome)
     $win = [Environment]::GetFolderPath('Windows')
-    $map = @{ LOCALAPPDATA = $local; TEMP = $local; TMP = $local; WINDIR = $win; SYSTEMROOT = $win; PROGRAMDATA = [Environment]::GetFolderPath('CommonApplicationData') }
+    $map = @{ LOCALAPPDATA = $local; TEMP = $local; TMP = $local; USERPROFILE = $userHome; WINDIR = $win; SYSTEMROOT = $win; PROGRAMDATA = [Environment]::GetFolderPath('CommonApplicationData') }
     foreach ($item in (Get-QpCatalog cleanup).Items) {
         foreach ($pat in @($item.Paths)) {
             if ([string]$pat -notmatch '^%(\w+)%(.*)$') { continue }
@@ -697,7 +697,7 @@ function Test-QpRegistryWritable {
 # ---- operations: every change Quietpane can make, described before it is made
 
 $script:OperationKinds = @('Reg', 'Service', 'Task', 'Env', 'Hosts', 'File', 'AppxUser', 'AppxProvisioned', 'Uninstall',
-    'StartupApproved', 'ExtBlock', 'Quarantine', 'Remediate', 'SignInTask', 'ProgramFilesCopy', 'Shortcut', 'Cleanup', 'Recycle', 'Undo')
+    'StartupApproved', 'ExtBlock', 'Quarantine', 'Remediate', 'SignInTask', 'ProgramFilesCopy', 'Shortcut', 'Cleanup', 'Recycle', 'Docker', 'Hibernation', 'Undo')
 
 function New-QpOperation {
     <#
@@ -882,6 +882,14 @@ function Get-QpOperationPolicy {
             if (-not (Get-QpCanonicalPath $Op.Target)) { return (& $refuse "that is not a place Quietpane moves things from ($($Op.Target))") }
             $scope = Get-QpPathScope $Op.Target
             $priv = 'User'
+        }
+        'Docker' {
+            if ($Op.Target -notmatch '^(container|image|volume|build-cache):') { return (& $refuse 'that is not a Docker resource Quietpane manages') }
+            $scope = 'User'; $priv = 'User'
+        }
+        'Hibernation' {
+            if ($Op.Target -ne 'hibernation') { return (& $refuse 'that is not the Windows hibernation setting') }
+            $scope = 'Machine'; $priv = 'Admin'
         }
         'Uninstall' {
             if ($Op.Hive -notin 'HKCU', 'HKLM') { return (& $refuse 'Quietpane does not know where that program is registered') }
@@ -4901,6 +4909,262 @@ function Resolve-QpPaths {
     }
 }
 
+# ---- storage findings: discovery is separate from eligibility and execution
+
+function Get-QpStorageId([string]$Kind, [string]$Identity) {
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try {
+        $bytes = [Text.Encoding]::UTF8.GetBytes(($Kind + '|' + $Identity).ToLowerInvariant())
+        $hash = $sha.ComputeHash($bytes)
+        return ('{0}:{1}' -f $Kind, (([BitConverter]::ToString($hash)).Replace('-', '').Substring(0, 20).ToLowerInvariant()))
+    } finally { $sha.Dispose() }
+}
+
+function Get-QpProtectedPaths {
+    param([string]$Path = (Get-QpUserStorePath 'protected-paths.json'))
+    $text = Read-QpTextFile -Path $Path -MaxBytes 256KB
+    if (-not $text) { return @() }
+    try {
+        $data = @(ConvertFrom-QpStrictJson -Text $text -MaxBytes 256KB)
+        @($data | ForEach-Object {
+            $value = if ($_ -is [string]) { [string]$_ } elseif ($_['Path']) { [string]$_['Path'] } else { '' }
+            Get-QpCanonicalPath $value
+        } | Where-Object { $_ } | Sort-Object -Unique)
+    } catch {
+        Write-QpLog "Your protected folders could not be read: $($_.Exception.Message)" 'WARN'
+        @()
+    }
+}
+
+function Set-QpProtectedPaths {
+    param([string[]]$Paths, [string]$Path = (Get-QpUserStorePath 'protected-paths.json'))
+    $clean = @($Paths | ForEach-Object { Get-QpCanonicalPath $_ } | Where-Object { $_ } | Sort-Object -Unique)
+    $json = ConvertTo-Json -InputObject @($clean | ForEach-Object { [pscustomobject]@{ Path = $_ } }) -Depth 3
+    if (-not (Write-QpTextFile -Path $Path -Text $json)) { return $false }
+    return $true
+}
+
+function Test-QpProjectPath {
+    param([string]$Path, [string[]]$ProtectedPaths = $(Get-QpProtectedPaths))
+    $full = Get-QpCanonicalPath $Path
+    if (-not $full) { return [pscustomobject]@{ Protected = $true; Reason = 'Its path could not be verified.' } }
+    foreach ($p in @($ProtectedPaths)) {
+        if (Test-QpPathUnder $full $p) { return [pscustomobject]@{ Protected = $true; Reason = "It is inside your protected folder $p." } }
+    }
+    $markers = @('.git', '.hg', '.svn', 'package.json', 'pnpm-workspace.yaml', 'pyproject.toml', 'Cargo.toml', 'go.mod', 'Gemfile', 'composer.json')
+    $dir = if ([IO.Directory]::Exists($full)) { $full } else { Split-Path -Parent $full }
+    $profile = Get-QpCanonicalPath ([Environment]::GetFolderPath('UserProfile'))
+    while ($dir -and (Test-QpPathUnder $dir $profile) -and -not (Test-QpSamePath $dir $profile)) {
+        foreach ($marker in $markers) {
+            if ([IO.File]::Exists((Join-Path $dir $marker)) -or [IO.Directory]::Exists((Join-Path $dir $marker))) {
+                return [pscustomobject]@{ Protected = $true; Reason = "It belongs to the project at $dir." }
+            }
+        }
+        $parent = Split-Path -Parent $dir
+        if (-not $parent -or $parent -eq $dir) { break }
+        $dir = $parent
+    }
+    [pscustomobject]@{ Protected = $false; Reason = '' }
+}
+
+function New-QpStorageFinding {
+    param(
+        [string]$Id, [string]$Category, [string]$Title, [string]$Description, [string]$ActionType,
+        [string]$Identity, [string[]]$Paths = @(), [int64]$TotalBytes = 0, [int64]$EligibleBytes = 0,
+        [string]$RiskTier = 'Review', [bool]$DefaultSelected = $false, [string]$Privilege = 'User',
+        [bool]$Protected = $false, [string]$ProtectionReason = '', [string]$Availability = 'Available',
+        [datetime]$LastWriteTime = [datetime]::MinValue, [bool]$NeedsPermanentDelete = $false, $Metadata = $null
+    )
+    [pscustomobject]@{
+        Id = $Id; Category = $Category; Title = $Title; Description = $Description; ActionType = $ActionType
+        Identity = $Identity; Paths = @($Paths); TotalBytes = $TotalBytes; EligibleBytes = $EligibleBytes
+        SizeBytes = $TotalBytes; RiskTier = $RiskTier; Recommended = $DefaultSelected; DefaultSelected = $DefaultSelected
+        Privilege = $Privilege; Protected = $Protected; ProtectionReason = $ProtectionReason; Availability = $Availability
+        LastWriteTime = $LastWriteTime; NeedsPermanentDelete = $NeedsPermanentDelete; Metadata = $Metadata
+    }
+}
+
+function Get-QpFileStorageFindings {
+    param([object[]]$Catalog = $null, [datetime]$Now = (Get-Date), [string[]]$ProtectedPaths = $(Get-QpProtectedPaths))
+    $source = if ($null -ne $Catalog) { @($Catalog) } else { @((Get-QpCatalog cleanup).Items) }
+    foreach ($item in $source) {
+        $category = if ($item.Id -match '^(temp|crash|wer)') { 'Temporary files and crash dumps' }
+            elseif ($item.Id -match '^(browser|nvidia|d3d|automation)') { 'Application and automation caches' }
+            else { 'Windows system storage' }
+        $risk = if ($item.Recommended) { 'Safe' } else { 'Review' }
+        $cutoff = if ($item.MinAgeHours) { $Now.AddHours(-[double]$item.MinAgeHours) } else { $null }
+        foreach ($root in @(Resolve-QpPaths $item.Paths)) {
+            $rootProtection = Test-QpProjectPath -Path $root -ProtectedPaths $ProtectedPaths
+            $children = @()
+            try { $children = @((New-Object IO.DirectoryInfo $root).GetFileSystemInfos()) }
+            catch {
+                $availability = if (Test-QpAccessDenied $_.Exception) { 'NeedsAdmin' } else { 'Unavailable' }
+                New-QpStorageFinding -Id (Get-QpStorageId 'file-root' $root) -Category $category -Title $item.Title -Description $item.Description -ActionType 'FileCleanup' -Identity $root -Paths @($root) -RiskTier $risk -Privilege $(if ((Get-QpPathScope $root) -eq 'User') { 'User' } else { 'Admin' }) -Protected $rootProtection.Protected -ProtectionReason $rootProtection.Reason -Availability $availability
+                continue
+            }
+            foreach ($child in $children) {
+                $protected = Test-QpProjectPath -Path $child.FullName -ProtectedPaths $ProtectedPaths
+                $linked = [bool]($child.Attributes -band [IO.FileAttributes]::ReparsePoint)
+                if ($linked) { $protected = [pscustomobject]@{ Protected = $true; Reason = 'It is a link, so its destination is not followed.' } }
+                $size = try { if ($child -is [IO.DirectoryInfo]) { Get-QpSize @($child.FullName) } else { [int64]$child.Length } } catch { [int64]0 }
+                $eligible = -not $cutoff -or $child.LastWriteTime -lt $cutoff
+                $bin = Get-QpRecycleBinLimit $child.FullName
+                $oversized = [bool]($size -gt 0 -and ($bin -le 0 -or $size -gt $bin))
+                $default = [bool]$item.Recommended -and $eligible -and -not $protected.Protected -and -not $oversized
+                $title = if ($child.Name) { $child.Name } else { $item.Title }
+                $desc = $item.Description
+                if (-not $eligible -and $cutoff) { $desc += " It is newer than $($item.MinAgeHours) hours, so it is shown but left unticked." }
+                New-QpStorageFinding -Id (Get-QpStorageId 'file' ($item.Id + '|' + $child.FullName)) -Category $category -Title $title -Description $desc -ActionType 'FileCleanup' -Identity $child.FullName -Paths @($child.FullName) -TotalBytes $size -EligibleBytes $(if ($eligible -and -not $protected.Protected) { $size } else { 0 }) -RiskTier $risk -DefaultSelected $default -Privilege $(if ((Get-QpPathScope $child.FullName) -eq 'User') { 'User' } else { 'Admin' }) -Protected $protected.Protected -ProtectionReason $protected.Reason -LastWriteTime $child.LastWriteTime -NeedsPermanentDelete $oversized -Metadata ([pscustomobject]@{ SourceId = $item.Id; MinAgeHours = [double]$item.MinAgeHours; Root = $root; RequiresClosed = [string]$item.RequiresClosed })
+            }
+        }
+    }
+}
+
+function ConvertFrom-QpSizeText([string]$Text) {
+    if ("$Text" -notmatch '(?i)([0-9]+(?:\.[0-9]+)?)\s*(B|KB|MB|GB|TB)') { return [int64]0 }
+    $n = [double]$matches[1]
+    $power = @{ B = 0; KB = 1; MB = 2; GB = 3; TB = 4 }[$matches[2].ToUpperInvariant()]
+    [int64]($n * [math]::Pow(1024, $power))
+}
+
+function Invoke-QpDockerRead {
+    param([string]$Arguments, [int]$TimeoutSeconds = 20)
+    $cmd = Get-Command docker.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+    $exe = if ($cmd) { $cmd.Source } else { @(
+        (Join-Path $env:LOCALAPPDATA 'Programs\DockerDesktop\resources\bin\docker.exe'),
+        (Join-Path $env:LOCALAPPDATA 'Programs\Docker\Docker\resources\bin\docker.exe'),
+        (Join-Path $env:ProgramFiles 'Docker\Docker\resources\bin\docker.exe')
+    ) | Where-Object { $_ -and [IO.File]::Exists($_) } | Select-Object -First 1 }
+    if (-not $exe) { return [pscustomobject]@{ Available = $false; ExitCode = -1; Text = ''; Error = 'Docker is not installed or its command could not be found.' } }
+    $p = New-Object Diagnostics.Process
+    $p.StartInfo = New-Object Diagnostics.ProcessStartInfo
+    $p.StartInfo.FileName = $exe
+    $p.StartInfo.Arguments = $Arguments
+    $p.StartInfo.UseShellExecute = $false
+    $p.StartInfo.CreateNoWindow = $true
+    $p.StartInfo.RedirectStandardOutput = $true
+    $p.StartInfo.RedirectStandardError = $true
+    try {
+        [void]$p.Start()
+        $out = $p.StandardOutput.ReadToEnd(); $err = $p.StandardError.ReadToEnd()
+        if (-not $p.WaitForExit($TimeoutSeconds * 1000)) { try { $p.Kill() } catch { }; return [pscustomobject]@{ Available = $true; ExitCode = -2; Text = $out; Error = 'Docker did not answer in time.' } }
+        [pscustomobject]@{ Available = $true; ExitCode = $p.ExitCode; Text = $out; Error = $err.Trim() }
+    } catch { [pscustomobject]@{ Available = $true; ExitCode = -1; Text = ''; Error = $_.Exception.Message } } finally { $p.Dispose() }
+}
+
+function Get-QpDockerStorageFindings {
+    param([string[]]$ProtectedPaths = $(Get-QpProtectedPaths), [switch]$Refresh)
+    if (-not $Refresh -and $script:DockerStorageCache -and ((Get-Date) - $script:DockerStorageCacheAt).TotalSeconds -lt 20) { return $script:DockerStorageCache }
+    $answer = @(& {
+    $probe = Invoke-QpDockerRead 'version --format "{{.Server.Version}}"' 10
+    if (-not $probe.Available) {
+        New-QpStorageFinding -Id 'docker:unavailable' -Category 'Docker storage' -Title 'Docker is not installed' -Description $probe.Error -ActionType 'Advisory' -Identity 'docker' -Availability 'Unavailable'
+        return
+    }
+    if ($probe.ExitCode -ne 0) {
+        New-QpStorageFinding -Id 'docker:stopped' -Category 'Docker storage' -Title 'Docker is not running' -Description 'Start Docker Desktop to inspect containers, images, volumes and build cache.' -ActionType 'Advisory' -Identity 'docker' -Availability 'DaemonStopped'
+        return
+    }
+    $containers = @(); $r = Invoke-QpDockerRead 'container ls -a --size --no-trunc --format "{{json .}}"'
+    foreach ($line in @($r.Text -split "`r?`n" | Where-Object { $_ })) { try { $containers += $line | ConvertFrom-Json } catch { } }
+    $inspect = @{}
+    if ($containers.Count) {
+        $ids = @($containers | ForEach-Object { $_.ID }) -join ' '
+        $ir = Invoke-QpDockerRead ("container inspect " + $ids)
+        if ($ir.ExitCode -eq 0) { try { foreach ($x in @($ir.Text | ConvertFrom-Json)) { $inspect[[string]$x.Id] = $x } } catch { } }
+    }
+    $usedImages = @(); $usedVolumes = @(); $protectedProjects = @(); $protectedImages = @()
+    foreach ($x in $inspect.Values) {
+        $usedImages += [string]$x.Image
+        foreach ($m in @($x.Mounts)) { if ($m.Type -eq 'volume') { $usedVolumes += [string]$m.Name } }
+    }
+    foreach ($c in $containers) {
+        $x = $inspect[[string]$c.ID]
+        $size = ConvertFrom-QpSizeText ([string]$c.Size -replace '\s*\(virtual.*$','')
+        $running = [string]$c.State -eq 'running'
+        $project = ''; $workingDir = ''; $protected = $false; $why = ''
+        if ($x -and $x.Config.Labels) {
+            $project = [string]$x.Config.Labels.'com.docker.compose.project'
+            $workingDir = [string]$x.Config.Labels.'com.docker.compose.project.working_dir'
+        }
+        if ($workingDir) {
+            $p = Test-QpProjectPath -Path $workingDir -ProtectedPaths $ProtectedPaths
+            if ($p.Protected) { $protected = $true; $why = $p.Reason }
+        }
+        foreach ($m in @($x.Mounts | Where-Object { $_.Type -eq 'bind' })) {
+            $p = Test-QpProjectPath -Path ([string]$m.Source) -ProtectedPaths $ProtectedPaths
+            if ($p.Protected) { $protected = $true; $why = $p.Reason; break }
+        }
+        if ($protected -and $project) { $protectedProjects += $project }
+        if ($protected -and $x.Image) { $protectedImages += [string]$x.Image }
+        if ($project -and -not $why) { $why = "It belongs to Docker Compose project $project." }
+        $title = if ($c.Names) { [string]$c.Names } else { ([string]$c.ID).Substring(0,12) }
+        New-QpStorageFinding -Id ('docker.container:' + [string]$c.ID) -Category 'Docker storage' -Title $title -Description $(if ($running) { 'Running container. Stop it before removal.' } elseif ($project) { "Stopped container in Compose project $project. Review it before removal." } else { 'Stopped container. Review it before removal.' }) -ActionType 'DockerContainer' -Identity ([string]$c.ID) -TotalBytes $size -EligibleBytes $(if (-not $running -and -not $protected) { $size } else { 0 }) -RiskTier 'Review' -Protected $protected -ProtectionReason $why -Availability $(if ($running) { 'InUse' } else { 'Available' }) -Metadata ([pscustomobject]@{ State = [string]$c.State; Project = $project })
+    }
+    $images = @(); $r = Invoke-QpDockerRead 'image ls -a --no-trunc --digests --format "{{json .}}"'
+    foreach ($line in @($r.Text -split "`r?`n" | Where-Object { $_ })) { try { $images += $line | ConvertFrom-Json } catch { } }
+    foreach ($i in $images) {
+        $id = [string]$i.ID; $inUse = $usedImages -contains $id; $protected = $protectedImages -contains $id; $dangling = [string]$i.Repository -eq '<none>'
+        $name = if ($dangling) { 'Dangling image ' + $id.Substring([math]::Max(0,$id.Length-12)) } else { ([string]$i.Repository + ':' + [string]$i.Tag) }
+        $size = ConvertFrom-QpSizeText ([string]$i.Size)
+        New-QpStorageFinding -Id ('docker.image:' + $id) -Category 'Docker storage' -Title $name -Description $(if ($inUse) { 'Used by a container, so it cannot be removed here.' } elseif ($dangling) { 'Unlabelled image layer no container uses.' } else { 'Unused image. Docker can download or rebuild it again if needed.' }) -ActionType 'DockerImage' -Identity $id -TotalBytes $size -EligibleBytes $(if (-not $inUse -and -not $protected) { $size } else { 0 }) -RiskTier $(if ($dangling) { 'Safe' } else { 'Review' }) -DefaultSelected ([bool]($dangling -and -not $inUse -and -not $protected)) -Protected $protected -ProtectionReason $(if ($protected) { 'It is linked to a protected Docker Compose project.' } else { '' }) -Availability $(if ($inUse) { 'InUse' } else { 'Available' })
+    }
+    $volumeSizes = @{}; $df = Invoke-QpDockerRead 'system df -v'
+    $inVolumes = $false; $volumeHeader = $false
+    foreach ($line in @($df.Text -split "`r?`n")) {
+        if ($line -match '^Local Volumes space usage:') { $inVolumes = $true; $volumeHeader = $false; continue }
+        if ($inVolumes -and $line -match '^VOLUME NAME\s+') { $volumeHeader = $true; continue }
+        if ($inVolumes -and -not $line.Trim()) { if ($volumeHeader) { $inVolumes = $false }; continue }
+        if ($inVolumes -and $line -match '^(.+?)\s+\d+\s+([0-9.]+\s*(?:B|kB|MB|GB|TB))\s*$') { $volumeSizes[$matches[1].Trim()] = ConvertFrom-QpSizeText $matches[2] }
+    }
+    $volumes = @(); $r = Invoke-QpDockerRead 'volume ls --format "{{json .}}"'
+    foreach ($line in @($r.Text -split "`r?`n" | Where-Object { $_ })) { try { $volumes += $line | ConvertFrom-Json } catch { } }
+    foreach ($v in $volumes) {
+        $name = [string]$v.Name; $used = $usedVolumes -contains $name; $project = ''
+        if ($v.Labels -match 'com\.docker\.compose\.project=([^,]+)') { $project = $matches[1] }
+        $size = if ($volumeSizes.ContainsKey($name)) { [int64]$volumeSizes[$name] } else { [int64]0 }
+        $protected = [bool]($project -and $protectedProjects -contains $project)
+        New-QpStorageFinding -Id ('docker.volume:' + $name) -Category 'Docker storage' -Title $name -Description $(if ($used) { 'Attached to a container, so it cannot be removed.' } elseif ($project) { "Unused named volume in Compose project $project. It may contain project data." } else { 'Unused named volume. It may contain databases or other important data.' }) -ActionType 'DockerVolume' -Identity $name -TotalBytes $size -EligibleBytes $(if (-not $used -and -not $protected) { $size } else { 0 }) -RiskTier 'Sensitive' -DefaultSelected $false -Protected $protected -ProtectionReason $(if ($protected) { "It is linked to protected Docker Compose project $project." } elseif ($project) { "It belongs to Docker Compose project $project." } else { '' }) -Availability $(if ($used) { 'InUse' } else { 'Available' }) -Metadata ([pscustomobject]@{ Project = $project; SizeKnown = $volumeSizes.ContainsKey($name) })
+    }
+    $summary = Invoke-QpDockerRead 'system df --format "{{json .}}"'
+    foreach ($line in @($summary.Text -split "`r?`n" | Where-Object { $_ })) {
+        try { $s = $line | ConvertFrom-Json } catch { continue }
+        if ([string]$s.Type -eq 'Build Cache') {
+            $reclaim = ConvertFrom-QpSizeText ([string]$s.Reclaimable)
+            New-QpStorageFinding -Id 'docker.build-cache' -Category 'Docker storage' -Title 'Docker build cache' -Description 'Rebuildable cache from image builds. Docker may recreate it later.' -ActionType 'DockerBuildCache' -Identity 'build-cache' -TotalBytes (ConvertFrom-QpSizeText ([string]$s.Size)) -EligibleBytes $reclaim -RiskTier 'Safe' -DefaultSelected ([bool]($reclaim -gt 0))
+        }
+    }
+    $vhdRoots = @((Join-Path $env:LOCALAPPDATA 'Docker\wsl\data\docker_data.vhdx'), (Join-Path $env:LOCALAPPDATA 'Docker\wsl\disk\docker_data.vhdx'))
+    foreach ($vhd in @($vhdRoots | Sort-Object -Unique)) {
+        if ([IO.File]::Exists($vhd)) {
+            $size = (Get-Item -LiteralPath $vhd -Force).Length
+            New-QpStorageFinding -Id (Get-QpStorageId 'advisory' $vhd) -Category 'Docker storage' -Title 'Docker virtual disk on Windows' -Description 'Host-file size only. Removing Docker resources may not shrink this file until it is compacted; Quietpane does not stop Docker or compact it.' -ActionType 'Advisory' -Identity $vhd -Paths @($vhd) -TotalBytes $size -RiskTier 'Advisory' -Availability 'Advisory'
+        }
+    }
+    })
+    $script:DockerStorageCache = $answer
+    $script:DockerStorageCacheAt = Get-Date
+    $answer
+}
+
+function Get-QpHibernationFinding {
+    $path = Join-Path $env:SystemDrive 'hiberfil.sys'
+    $size = [int64]0; $enabled = [IO.File]::Exists($path); $availability = 'Available'
+    if ($enabled) { try { $size = (Get-Item -LiteralPath $path -Force -ErrorAction Stop).Length } catch { $availability = 'NeedsAdmin' } }
+    New-QpStorageFinding -Id 'windows.hibernation' -Category 'Windows system storage' -Title $(if ($enabled) { 'Windows hibernation file' } else { 'Windows hibernation is disabled' }) -Description $(if ($enabled) { 'Disabling hibernation frees this space but also disables Hibernate and may affect Fast Startup.' } else { 'Enable hibernation to restore Hibernate and Windows Fast Startup support.' }) -ActionType 'Hibernation' -Identity 'hibernation' -Paths @($path) -TotalBytes $size -EligibleBytes $(if ($enabled) { $size } else { 0 }) -RiskTier 'Sensitive' -DefaultSelected $false -Privilege 'Admin' -Availability $availability -Metadata ([pscustomobject]@{ Enabled = $enabled })
+}
+
+function Get-QpStorageFindings {
+    param([switch]$SkipDocker, [switch]$RefreshDocker, [object[]]$Catalog = $null, [datetime]$Now = (Get-Date))
+    $result = @(& {
+        @(Get-QpFileStorageFindings -Catalog $Catalog -Now $Now)
+        if (-not $SkipDocker -and $null -eq $Catalog) { @(Get-QpDockerStorageFindings -Refresh:$RefreshDocker) }
+        if ($null -eq $Catalog) { Get-QpHibernationFinding }
+    })
+    $script:StorageFindingSnapshot = @($result)
+    $result
+}
+
 function Get-QpCleanupOperations {
     <#
         Where one clean-up item would move things from, described. Worked out from the catalog's own
@@ -5009,6 +5273,107 @@ function Invoke-QpCleanup {
             Add-QpTotals -SpaceBytes $total
         }
         [pscustomobject]@{ BytesFreed = [int64]$total }
+        if ($top -and -not $Preview) { Get-QpOutcomeSummary }
+    } finally { Exit-QpBatch }
+}
+
+function Invoke-QpStorageCleanup {
+    <# Executes only finding IDs returned by a fresh discovery pass. PermanentDeleteIds must be the
+       exact IDs the window confirmed twice; it never broadens a selection to a folder or category. #>
+    param(
+        [string[]]$FindingIds, [switch]$Preview, [string[]]$PermanentDeleteIds = @(),
+        [object[]]$ExpectedFindings = @(), [object[]]$Catalog = $null
+    )
+    $FindingIds = @($FindingIds | Where-Object { $_ } | Sort-Object -Unique)
+    if (-not $FindingIds.Count) { Write-QpLog 'Nothing selected.' 'WARN'; return }
+    $expected = @{}
+    $expectedSource = if (@($ExpectedFindings | Where-Object { $_ }).Count) { @($ExpectedFindings) } else { @($script:StorageFindingSnapshot) }
+    foreach ($item in @($expectedSource | Where-Object { $_ -and $_.PSObject.Properties['Id'] })) { $expected[[string]$item.Id] = $item }
+    $fresh = @(Get-QpStorageFindings -Catalog $Catalog -RefreshDocker)
+    $selected = @($fresh | Where-Object { $FindingIds -contains $_.Id })
+    if ($selected.Count -ne $FindingIds.Count) {
+        Write-QpLog 'One or more selected storage items changed or disappeared. Scan again before applying.' 'WARN'
+        return [pscustomobject]@{ BytesFreed = [int64]0; Refused = $true }
+    }
+    $total = [int64]0; $top = Enter-QpBatch
+    try {
+        if ($Preview) { Write-QpLog 'PREVIEW - nothing will be changed.' 'STEP' }
+        foreach ($finding in $selected) {
+            Write-QpLog $finding.Title 'STEP'
+            $before = $expected[$finding.Id]
+            if (-not $before -or $before.Identity -cne $finding.Identity -or $before.ActionType -cne $finding.ActionType) {
+                Write-QpLog "$($finding.Title) changed after it was selected. Scan again before applying." 'WARN'
+                [void](New-QpOutcome 'Refused' $finding.Identity 'the selected item changed')
+                continue
+            }
+            if ($finding.ActionType -eq 'FileCleanup' -and ($before.TotalBytes -ne $finding.TotalBytes -or $before.LastWriteTime -ne $finding.LastWriteTime)) {
+                Write-QpLog "$($finding.Identity) changed in size or date after it was selected, so it was left alone." 'WARN'
+                [void](New-QpOutcome 'Refused' $finding.Identity 'its size or date changed')
+                continue
+            }
+            if ($finding.Protected) { Write-QpLog "$($finding.Identity) is protected: $($finding.ProtectionReason)" 'WARN'; [void](New-QpOutcome 'Refused' $finding.Identity $finding.ProtectionReason); continue }
+            if ($finding.Availability -notin 'Available', 'Advisory') { Write-QpLog "$($finding.Title) is not available: $($finding.Availability)" 'WARN'; continue }
+            switch ($finding.ActionType) {
+                'FileCleanup' {
+                    $path = Get-QpCanonicalPath $finding.Identity
+                    if (-not $path -or -not (Test-Path -LiteralPath $path)) { Write-QpLog 'The item changed or disappeared; scan again.' 'WARN'; continue }
+                    $check = Test-QpProjectPath $path
+                    if ($check.Protected -or -not (Test-QpReparseFree $path)) { Write-QpLog "$path is now protected or behind a link, so it was left alone." 'WARN'; continue }
+                    $current = Get-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+                    $minAge = [double]$finding.Metadata.MinAgeHours
+                    if ($minAge -gt 0 -and $current.LastWriteTime -ge (Get-Date).AddHours(-$minAge)) { Write-QpLog "$path is too new to clear, so it was left alone." 'WARN'; continue }
+                    $size = if ($current.PSIsContainer) { Get-QpSize @($path) } else { [int64]$current.Length }
+                    if ($finding.Metadata.RequiresClosed -and (Get-Process -Name $finding.Metadata.RequiresClosed -ErrorAction SilentlyContinue)) { Write-QpLog "Close $($finding.Metadata.RequiresClosed) first - skipped" 'WARN'; continue }
+                    if ($Preview) { Write-QpLog ("Would clear {0} ({1})" -f $path, (Format-QpBytes $size)) 'PREVIEW'; $total += $size; continue }
+                    if (Move-QpToRecycleBin -Path $path -SizeBytes $size) {
+                        $total += $size; Add-QpUndo @{ Type = 'Recycled'; Path = [string]$path; Items = 1 }; [void](New-QpOutcome 'Changed' $path)
+                    } elseif ($PermanentDeleteIds -contains $finding.Id) {
+                        try {
+                            if ($current.PSIsContainer) { Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction Stop } else { Remove-Item -LiteralPath $path -Force -ErrorAction Stop }
+                            $total += $size; Write-QpLog ("Permanently deleted {0} ({1}) after confirmation." -f $path, (Format-QpBytes $size)) 'OK'; [void](New-QpOutcome 'Changed' $path)
+                        } catch { Write-QpLog "$path could not be deleted: $($_.Exception.Message)" 'WARN'; [void](New-QpOutcome 'Failed' $path $_.Exception.Message) }
+                    } else { Write-QpLog "$path cannot fit in the Recycle Bin and permanent deletion was not confirmed." 'WARN' }
+                }
+                'DockerContainer' {
+                    if ($Preview) { Write-QpLog "Would remove stopped container $($finding.Identity)" 'PREVIEW'; $total += $finding.TotalBytes; continue }
+                    $now = Invoke-QpDockerRead ("container inspect " + $finding.Identity)
+                    if ($now.ExitCode -ne 0) { Write-QpLog 'The container changed or disappeared; scan again.' 'WARN'; continue }
+                    try { $c = @($now.Text | ConvertFrom-Json)[0] } catch { $c = $null }
+                    if (-not $c -or $c.State.Running) { Write-QpLog 'The container is running or could not be verified, so it was left alone.' 'WARN'; continue }
+                    $r = Invoke-QpDockerRead ("container rm " + $finding.Identity)
+                    if ($r.ExitCode -eq 0) { $total += $finding.TotalBytes; [void](New-QpOutcome 'Changed' $finding.Title) } else { Write-QpLog $r.Error 'WARN' }
+                }
+                'DockerImage' {
+                    if ($Preview) { Write-QpLog "Would remove unused image $($finding.Identity)" 'PREVIEW'; $total += $finding.TotalBytes; continue }
+                    $users = Invoke-QpDockerRead ('container ls -a --filter ancestor=' + $finding.Identity + ' --format "{{.ID}}"')
+                    if ($users.ExitCode -ne 0 -or $users.Text.Trim()) { Write-QpLog 'A container now uses this image, so it was left alone.' 'WARN'; continue }
+                    $r = Invoke-QpDockerRead ("image rm " + $finding.Identity)
+                    if ($r.ExitCode -eq 0) { $total += $finding.TotalBytes; [void](New-QpOutcome 'Changed' $finding.Title) } else { Write-QpLog $r.Error 'WARN' }
+                }
+                'DockerVolume' {
+                    if ($Preview) { Write-QpLog "Would remove unused named volume $($finding.Identity)" 'PREVIEW'; $total += $finding.TotalBytes; continue }
+                    $users = Invoke-QpDockerRead ('container ls -a --filter volume=' + $finding.Identity + ' --format "{{.ID}}"')
+                    if ($users.ExitCode -ne 0 -or $users.Text.Trim()) { Write-QpLog 'A container now uses this volume, so it was left alone.' 'WARN'; continue }
+                    $r = Invoke-QpDockerRead ("volume rm " + $finding.Identity)
+                    if ($r.ExitCode -eq 0) { $total += $finding.TotalBytes; [void](New-QpOutcome 'Changed' $finding.Title) } else { Write-QpLog $r.Error 'WARN' }
+                }
+                'DockerBuildCache' {
+                    if ($Preview) { Write-QpLog ("Would prune about {0} of Docker build cache" -f (Format-QpBytes $finding.EligibleBytes)) 'PREVIEW'; $total += $finding.EligibleBytes; continue }
+                    $r = Invoke-QpDockerRead 'builder prune --force' 120
+                    if ($r.ExitCode -eq 0) { $total += $finding.EligibleBytes; [void](New-QpOutcome 'Changed' $finding.Title) } else { Write-QpLog $r.Error 'WARN' }
+                }
+                'Hibernation' {
+                    $enabled = [bool]$finding.Metadata.Enabled
+                    if ($Preview) { Write-QpLog $(if ($enabled) { 'Would disable Hibernate and may affect Fast Startup.' } else { 'Would enable Hibernate and Fast Startup support.' }) 'PREVIEW'; if ($enabled) { $total += $finding.TotalBytes }; continue }
+                    if (-not (Test-QpAdmin)) { Write-QpLog 'Changing hibernation needs administrator rights.' 'WARN'; continue }
+                    & powercfg.exe /hibernate $(if ($enabled) { 'off' } else { 'on' }) 2>&1 | ForEach-Object { Write-QpLog ([string]$_) 'INFO' }
+                    if ($LASTEXITCODE -eq 0) { if ($enabled) { $total += $finding.TotalBytes }; [void](New-QpOutcome 'Changed' 'Windows hibernation') } else { [void](New-QpOutcome 'Failed' 'Windows hibernation' 'powercfg failed') }
+                }
+                default { Write-QpLog "$($finding.Title) is information only." 'INFO' }
+            }
+        }
+        if (-not $Preview) { Add-QpTotals -SpaceBytes $total }
+        [pscustomobject]@{ BytesFreed = $total; Refused = $false }
         if ($top -and -not $Preview) { Get-QpOutcomeSummary }
     } finally { Exit-QpBatch }
 }
@@ -6423,6 +6788,9 @@ function Get-QpInstalledPrograms {
                         [pscustomobject]@{
                             Name      = $display
                             Publisher = [string]$k.GetValue('Publisher')
+                            Version   = [string]$k.GetValue('DisplayVersion')
+                            InstallLocation = [string]$k.GetValue('InstallLocation')
+                            EstimatedSizeBytes = $(if ($k.GetValue('EstimatedSize')) { [int64]$k.GetValue('EstimatedSize') * 1KB } else { [int64]0 })
                             Uninstall = $(if ($quiet) { $quiet } else { [string]$k.GetValue('UninstallString') })
                             Quiet     = [bool]$quiet
                             Key       = $name
@@ -6434,6 +6802,67 @@ function Get-QpInstalledPrograms {
         }
     )
     return $script:InstalledPrograms
+}
+
+function Get-QpInstalledApplications {
+    <# Neutral inventory. Reported sizes are used; Quietpane does not walk Program Files to guess. #>
+    $desktop = @(Get-QpInstalledPrograms | Group-Object { ('{0}|{1}|{2}' -f $_.Name, $_.Publisher, $_.Version).ToLowerInvariant() } | ForEach-Object {
+        $p = @($_.Group | Sort-Object @{ Expression = { [int64]$_.EstimatedSizeBytes }; Descending = $true }, @{ Expression = { [bool]$_.Uninstall }; Descending = $true })[0]
+        $id = Get-QpStorageId 'desktop-app' ($p.Hive + '|' + $p.Key)
+        [pscustomobject]@{
+            Id = $id; Name = $p.Name; Title = $p.Name; Publisher = $p.Publisher; Version = $p.Version
+            SizeBytes = [int64]$p.EstimatedSizeBytes; SizeKnown = [bool]($p.EstimatedSizeBytes -gt 0)
+            Source = $(if ($p.Hive -eq 'HKLM') { 'Desktop app - everyone' } else { 'Desktop app - this account' })
+            Kind = 'Desktop'; Key = $p.Key; Hive = $p.Hive; Command = $p.Uninstall
+            CanUninstall = [bool]$p.Uninstall; Protected = $false
+            Description = $(if ($p.EstimatedSizeBytes -gt 0) { "Windows reports $(Format-QpBytes $p.EstimatedSizeBytes)." } else { 'Windows does not report its installed size.' })
+            Recommended = $false
+        }
+    })
+    $store = @()
+    try {
+        $store = @(Get-AppxPackage -ErrorAction Stop | Where-Object { -not $_.IsFramework -and -not $_.IsResourcePackage } | ForEach-Object {
+            $protected = [bool]($_.Name -match $script:ProtectedAppPattern)
+            [pscustomobject]@{
+                Id = ('store-app:' + $_.PackageFullName); Name = $_.Name; Title = $(if ($_.PackageFamilyName) { ($_.PackageFamilyName -split '_')[0] } else { $_.Name })
+                Publisher = [string]$_.Publisher; Version = [string]$_.Version; SizeBytes = [int64]0; SizeKnown = $false
+                Source = 'Microsoft Store app'; Kind = 'Store'; Key = $_.PackageFullName; Hive = 'HKCU'; Command = ''
+                CanUninstall = -not $protected; Protected = $protected
+                Description = $(if ($protected) { 'Part of Windows or an app runtime. Quietpane will not remove it.' } else { 'Microsoft Store app. Windows does not report its installed size here.' })
+                Recommended = $false
+            }
+        })
+    } catch { Write-QpLog "Store apps could not be inventoried: $($_.Exception.Message)" 'WARN' }
+    @($desktop + $store | Sort-Object @{ Expression = { [int64]$_.SizeBytes }; Descending = $true }, Title)
+}
+
+function Invoke-QpUninstallApplication {
+    param([string[]]$Ids, [switch]$Preview)
+    $all = @(Get-QpInstalledApplications)
+    $targets = @($all | Where-Object { $Ids -contains $_.Id })
+    if ($targets.Count -ne @($Ids | Where-Object { $_ } | Sort-Object -Unique).Count) { Write-QpLog 'An application changed or disappeared. Scan again before applying.' 'WARN'; return }
+    $top = Enter-QpBatch
+    try {
+        $allowed = @($targets | Where-Object { -not $_.Protected -and $_.CanUninstall })
+        $ops = @(foreach ($app in $allowed) {
+            if ($app.Kind -eq 'Store') { New-QpOperation -Kind AppxUser -Target $app.Name -Item $app.Key }
+            else { New-QpOperation -Kind Uninstall -Name $app.Name -Hive $app.Hive -Command $app.Command -Item $app.Key }
+        })
+        if (-not $Preview -and -not (Invoke-QpPreflight $ops)) { if ($top) { Get-QpOutcomeSummary }; return }
+        foreach ($app in @($targets | Where-Object { $_.Kind -eq 'Store' })) {
+            if ($app.Protected -or -not $app.CanUninstall) { Write-QpLog "$($app.Title) is protected or has no verified uninstaller." 'WARN'; continue }
+            if ($Preview) { Write-QpLog "Would ask Windows to remove Store app $($app.Name)." 'PREVIEW'; continue }
+            $now = Get-AppxPackage -Name $app.Name -ErrorAction SilentlyContinue | Where-Object { $_.PackageFullName -eq $app.Key } | Select-Object -First 1
+            if (-not $now -or $now.Name -match $script:ProtectedAppPattern) { Write-QpLog 'The Store app changed or is protected, so it was left alone.' 'WARN'; continue }
+            try { Remove-AppxPackage -Package $now.PackageFullName -ErrorAction Stop; [void](New-QpOutcome 'Changed' $app.Title) } catch { Write-QpLog $_.Exception.Message 'WARN'; [void](New-QpOutcome 'Failed' $app.Title $_.Exception.Message) }
+        }
+        $desktop = @(foreach ($app in @($targets | Where-Object { $_.Kind -eq 'Desktop' -and -not $_.Protected -and $_.CanUninstall })) {
+            [pscustomobject]@{ Name = $app.Name; Hive = $app.Hive; Key = $app.Key; Uninstall = $app.Command }
+        })
+        $null = Invoke-QpRegisteredUninstall -Targets $desktop -Preview:$Preview -SkipPreflight
+        $script:InstalledPrograms = $null
+        if ($top -and -not $Preview) { Get-QpOutcomeSummary }
+    } finally { Exit-QpBatch }
 }
 
 function Get-QpVendorStatus {
@@ -6524,6 +6953,41 @@ function Split-QpUninstallCommand {
     [pscustomobject]@{ Program = $exe; Arguments = $argText.Trim() }
 }
 
+function Invoke-QpRegisteredUninstall {
+    <# The single verified runner for registered desktop uninstallers. Callers choose programs by
+       registry key; this reads the command again immediately before executing it. #>
+    param([object[]]$Targets, [switch]$Preview, [switch]$SkipPreflight)
+    $Targets = @($Targets | Where-Object { $_ -and $_.Key -and $_.Uninstall })
+    if (-not $Targets.Count) { return $true }
+    $ops = @(foreach ($t in $Targets) { New-QpOperation -Kind Uninstall -Name $t.Name -Hive $t.Hive -Command $t.Uninstall -Item $t.Key })
+    if (-not $Preview -and -not $SkipPreflight -and -not (Invoke-QpPreflight $ops)) { return $false }
+    foreach ($t in $Targets) {
+        $script:InstalledPrograms = $null
+        $now = @(Get-QpInstalledPrograms | Where-Object { $_.Key -eq $t.Key -and $_.Hive -eq $t.Hive })[0]
+        if (-not $now -or $now.Uninstall -cne $t.Uninstall) {
+            Write-QpLog "$($t.Name) changed since Quietpane looked, so it was left alone. Look again and try once more." 'WARN'
+            [void](New-QpOutcome 'Refused' "uninstalling $($t.Name)" 'its uninstaller changed since it was checked')
+            continue
+        }
+        if ($Preview) { Write-QpLog "Would run the registered uninstaller for $($t.Name)." 'PREVIEW'; continue }
+        if (Assert-QpOperation (New-QpOperation -Kind Uninstall -Name $t.Name -Hive $t.Hive -Command $now.Uninstall)) { continue }
+        Write-QpLog "Removing $($t.Name) using its own uninstaller (this cannot be undone)" 'STEP'
+        try {
+            $run = Split-QpUninstallCommand $now.Uninstall
+            $p = if ($run.Arguments) { Start-Process -FilePath $run.Program -ArgumentList $run.Arguments -PassThru -Wait -ErrorAction Stop } else { Start-Process -FilePath $run.Program -PassThru -Wait -ErrorAction Stop }
+            Write-QpLog "$($t.Name): uninstaller finished (exit code $($p.ExitCode))" 'OK'
+            $script:InstalledPrograms = $null
+            if (@(Get-QpInstalledPrograms | Where-Object { $_.Key -eq $t.Key -and $_.Hive -eq $t.Hive }).Count) {
+                [void](New-QpOutcome 'Failed' "uninstalling $($t.Name)" 'it is still listed as installed - its uninstaller may still be running, so look again in a minute')
+            } else { [void](New-QpOutcome 'Changed' "uninstalling $($t.Name)") }
+        } catch {
+            Write-QpLog "$($t.Name) could not be removed automatically: $($_.Exception.Message). You can remove it from Settings > Apps." 'WARN'
+            [void](New-QpOutcome 'Failed' "uninstalling $($t.Name)" $_.Exception.Message)
+        }
+    }
+    return $true
+}
+
 function Invoke-QpVendorUninstall {
     <#
         Runs the program's own uninstaller. The window always asks first, one program at a time.
@@ -6535,32 +6999,7 @@ function Invoke-QpVendorUninstall {
     if ($targets.Count -eq 0) { Write-QpLog 'Nothing to remove.' 'WARN'; return }
     $top = Enter-QpBatch
     try {
-        $ops = @(foreach ($t in $targets) { New-QpOperation -Kind Uninstall -Name $t.Name -Hive $t.Hive -Command $t.Uninstall -Item $t.Key })
-        if (-not (Invoke-QpPreflight $ops)) { if ($top) { Get-QpOutcomeSummary }; return }
-        foreach ($t in $targets) {
-            # Read again just before it runs: what runs must be exactly what was checked.
-            $script:InstalledPrograms = $null
-            $now = @(Get-QpInstalledPrograms | Where-Object { $_.Key -eq $t.Key -and $_.Hive -eq $t.Hive })[0]
-            if (-not $now -or $now.Uninstall -cne $t.Uninstall) {
-                Write-QpLog "$($t.Name) changed since Quietpane looked, so it was left alone. Look again and try once more." 'WARN'
-                [void](New-QpOutcome 'Refused' "uninstalling $($t.Name)" 'its uninstaller changed since it was checked')
-                continue
-            }
-            if (Assert-QpOperation (New-QpOperation -Kind Uninstall -Name $t.Name -Hive $t.Hive -Command $now.Uninstall)) { continue }
-            Write-QpLog "Removing $($t.Name) using its own uninstaller (this cannot be undone)" 'STEP'
-            try {
-                $run = Split-QpUninstallCommand $now.Uninstall
-                $p = if ($run.Arguments) { Start-Process -FilePath $run.Program -ArgumentList $run.Arguments -PassThru -Wait -ErrorAction Stop } else { Start-Process -FilePath $run.Program -PassThru -Wait -ErrorAction Stop }
-                Write-QpLog "$($t.Name): uninstaller finished (exit code $($p.ExitCode))" 'OK'
-                $script:InstalledPrograms = $null
-                if (@(Get-QpInstalledPrograms | Where-Object { $_.Key -eq $t.Key -and $_.Hive -eq $t.Hive }).Count) {
-                    [void](New-QpOutcome 'Failed' "uninstalling $($t.Name)" 'it is still listed as installed - its uninstaller may still be running, so look again in a minute')
-                } else { [void](New-QpOutcome 'Changed' "uninstalling $($t.Name)") }
-            } catch {
-                Write-QpLog "$($t.Name) could not be removed automatically: $($_.Exception.Message). You can remove it from Settings > Apps." 'WARN'
-                [void](New-QpOutcome 'Failed' "uninstalling $($t.Name)" $_.Exception.Message)
-            }
-        }
+        if (-not (Invoke-QpRegisteredUninstall -Targets $targets)) { if ($top) { Get-QpOutcomeSummary }; return }
         $script:InstalledPrograms = $null
         Write-QpLog 'Removed programs can be installed again from the maker''s website.' 'INFO'
         if ($top) { Get-QpOutcomeSummary }
@@ -6579,6 +7018,7 @@ $script:StateParts = @(
     @{ Key = 'Privacy'; What = 'the privacy settings'; Body = { param($v) Get-QpPrivacyStatus } },
     @{ Key = 'Vendors'; What = 'the brand extras'; Body = { param($v) @(Get-QpVendorStatus) } },
     @{ Key = 'Apps'; What = 'the installed apps'; Body = { param($v) @(Get-QpBloatApps) } },
+    @{ Key = 'InstalledApps'; What = 'the full installed app inventory'; Body = { param($v) @(Get-QpInstalledApplications) } },
     # Read once, then cost it: what signing in costs is about these very startup items.
     @{ Key = 'SignIn'; What = 'what signing in costs'; Body = {
             param($v)
@@ -6589,7 +7029,9 @@ $script:StateParts = @(
     },
     @{ Key = 'Devices'; What = 'camera, microphone and location use'; Body = { param($v) @(Get-QpDeviceUse) } },
     @{ Key = 'Addons'; What = 'your browser add-ons'; Body = { param($v) @(Get-QpBrowserExtensions) } },
-    @{ Key = 'Cleanup'; What = 'what can be cleaned up'; Body = { param($v) @(Get-QpCleanupTargets) } },
+    # Recursive cache sizes and Docker's detailed volume table can take several seconds. The window
+    # loads both only when Free up space is opened, so ordinary startup stays quick and deterministic.
+    @{ Key = 'Cleanup'; What = 'what can be cleaned up'; Body = { param($v) @(Get-QpHibernationFinding) } },
     @{ Key = 'Restore'; What = 'the restore points'; Body = { param($v) @(Get-QpRestorePoints) } }
 )
 
@@ -6644,7 +7086,7 @@ function Get-QpStateParallel {
         apps; scheduled tasks), so nothing is read twice. Read-only, like Get-QpState. Log lines come
         back group by group, problems in the same order as always.
     #>
-    $groups = @(@('Startup', 'Apps', 'SignIn'), @('Privacy', 'Vendors'), @('Cleanup'), @('Devices', 'Addons', 'Restore'))
+    $groups = @(@('Startup', 'Apps', 'InstalledApps', 'SignIn'), @('Privacy', 'Vendors'), @('Cleanup'), @('Devices', 'Addons', 'Restore'))
     $modulePath = Join-Path $PSScriptRoot 'Quietpane.psm1'
     $sid = (Get-QpActor).RequesterSid
     # The same stores as the caller (a test run points them elsewhere). The machine store is checked again in
@@ -6707,6 +7149,10 @@ function Get-QpOptionPolicies {
         foreach ($j in @($v.Junk)) { $map["junk|$($j.Key)"] = Get-QpItemPolicy @(New-QpOperation -Kind Uninstall -Name $j.Name -Hive $j.Hive -Command $j.Uninstall) }
     }
     foreach ($a in @($State.Apps | Where-Object { $_ })) { $map["apps|$($a.Name)"] = Get-QpItemPolicy @(Get-QpAppOperations -Names $a.Name) }
+    foreach ($a in @($State.InstalledApps | Where-Object { $_ })) {
+        if ($a.Kind -eq 'Desktop' -and $a.Command) { $map["apps|$($a.Id)"] = Get-QpItemPolicy @(New-QpOperation -Kind Uninstall -Name $a.Name -Hive $a.Hive -Command $a.Command) }
+        elseif ($a.Kind -eq 'Store' -and -not $a.Protected) { $map["apps|$($a.Id)"] = Get-QpItemPolicy @(New-QpOperation -Kind AppxUser -Target $a.Name) }
+    }
     $map['deprovision'] = Get-QpItemPolicy @(New-QpOperation -Kind AppxProvisioned -Target 'new user accounts')
     foreach ($s in @($State.Startup | Where-Object { $_ })) { $map["startup|$($s.Id)"] = Get-QpItemPolicy @(Get-QpStartupOperations $s) }
     foreach ($d in @($State.Devices | Where-Object { $_ })) {
@@ -6714,6 +7160,18 @@ function Get-QpOptionPolicies {
     }
     foreach ($e in @($State.Addons | Where-Object { $_ })) { $map["extensions|$($e.Id)"] = Get-QpItemPolicy @(Get-QpExtensionOperations -Id $e.Id -Extensions @($e)) }
     foreach ($c in (Get-QpCatalog cleanup).Items) { $map["cleanup|$($c.Id)"] = Get-QpItemPolicy @(Get-QpCleanupOperations $c) }
+    foreach ($c in @($State.Cleanup | Where-Object { $_ })) {
+        $op = switch ($c.ActionType) {
+            'FileCleanup' { New-QpOperation -Kind Cleanup -Target $c.Identity -Item $c.Id }
+            'DockerContainer' { New-QpOperation -Kind Docker -Target ('container:' + $c.Identity) -Item $c.Id }
+            'DockerImage' { New-QpOperation -Kind Docker -Target ('image:' + $c.Identity) -Item $c.Id }
+            'DockerVolume' { New-QpOperation -Kind Docker -Target ('volume:' + $c.Identity) -Item $c.Id }
+            'DockerBuildCache' { New-QpOperation -Kind Docker -Target 'build-cache:all' -Item $c.Id }
+            'Hibernation' { New-QpOperation -Kind Hibernation -Target 'hibernation' -Item $c.Id }
+            default { $null }
+        }
+        if ($op) { $map["cleanup|$($c.Id)"] = Get-QpItemPolicy @($op) }
+    }
     return $map
 }
 
@@ -6730,8 +7188,9 @@ function Get-QpRecommendedPlanCore {
     # Brand and hardware items: only the recommended switch-offs. Uninstalling anything is never automatic.
     $vendors = Get-QpVendorStatus
     $vendorItems = @(foreach ($v in $vendors) { $v.Items | Where-Object { $_.Recommended -and $_.Status -ne 'Applied' } })
-    $apps = @(Get-QpBloatApps | Where-Object { $_.Recommended })
-    $clean = @(Get-QpCleanupTargets | Where-Object { $_.Recommended -and $_.SizeBytes -gt 0 })
+    # Application removal and Docker storage always require review in 2.3; one-click never selects them.
+    $apps = @()
+    $clean = @(Get-QpStorageFindings -SkipDocker | Where-Object { $_.ActionType -eq 'FileCleanup' -and $_.DefaultSelected -and $_.EligibleBytes -gt 0 })
     [pscustomobject]@{
         PrivacyIds    = @($privacy | ForEach-Object { $_.Id })
         PrivacyTitles = @($privacy | ForEach-Object { $_.Title })
@@ -6741,7 +7200,7 @@ function Get-QpRecommendedPlanCore {
         AppNames      = @($apps | ForEach-Object { $_.Name })
         AppTitles     = @($apps | ForEach-Object { $_.Title })
         CleanupIds    = @($clean | ForEach-Object { $_.Id })
-        CleanupBytes  = [int64](($clean | Measure-Object -Property SizeBytes -Sum).Sum)
+        CleanupBytes  = [int64](($clean | Measure-Object -Property EligibleBytes -Sum).Sum)
         IsEmpty       = (-not $privacy -and -not $vendorItems -and -not $apps -and -not $clean)
     }
 }
@@ -6763,8 +7222,7 @@ function Invoke-QpRecommended {
         $ops = @()
         foreach ($i in @((Get-QpCatalog privacy).Items | Where-Object { $plan.PrivacyIds -contains $_.Id })) { $ops += @(Get-QpActionOperations $i.Actions -Item $i.Id) }
         foreach ($v in (Get-QpCatalog vendors).Vendors) { foreach ($i in @($v.Items | Where-Object { $plan.VendorIds -contains $_.Id })) { $ops += @(Get-QpActionOperations @($i.Actions | Where-Object { -not ($_.Name -and (Test-QpNeverTouch $_.Name)) }) -Item $i.Id) } }
-        $ops += @(Get-QpAppOperations -Names $plan.AppNames -Deprovision)
-        foreach ($c in @((Get-QpCatalog cleanup).Items | Where-Object { $plan.CleanupIds -contains $_.Id })) { $ops += @(Get-QpCleanupOperations $c) }
+        foreach ($c in @(Get-QpStorageFindings -SkipDocker | Where-Object { $plan.CleanupIds -contains $_.Id })) { $ops += @(New-QpOperation -Kind Cleanup -Target $c.Identity -Item $c.Id) }
         if (-not (Invoke-QpPreflight $ops)) {
             $s = Get-QpOutcomeSummary
             return [pscustomobject]@{ Nothing = $false; Refused = $true; Settings = 0; AppsRemoved = 0; BrandsQuieted = @(); BytesFreed = [int64]0; MemoryFreed = [int64]0; RestorePoint = $null; Changed = 0; Failed = 0; RefusedCount = $s.Refused; Text = $s.Text }
@@ -6776,9 +7234,8 @@ function Invoke-QpRecommended {
         try {
             if ($plan.PrivacyIds.Count) { $null = Invoke-QpPrivacy -Ids $plan.PrivacyIds }
             if ($plan.VendorIds.Count)  { $null = Invoke-QpVendor -Ids $plan.VendorIds }
-            if ($plan.AppNames.Count)   { $null = Invoke-QpRemoveApps -Names $plan.AppNames -Deprovision }
             if ($plan.CleanupIds.Count) {
-                $r = @(Invoke-QpCleanup -Ids $plan.CleanupIds) | Where-Object { $_ -and $_.PSObject.Properties['BytesFreed'] } | Select-Object -Last 1
+                $r = @(Invoke-QpStorageCleanup -FindingIds $plan.CleanupIds) | Where-Object { $_ -and $_.PSObject.Properties['BytesFreed'] } | Select-Object -Last 1
                 if ($r) { $freed = $r.BytesFreed }
             }
         } catch {
@@ -8482,13 +8939,14 @@ Export-ModuleMember -Function Get-QpInfo, Set-QpLogSink, Write-QpLog, Test-QpAdm
     Get-QpBatteryHealth, Get-QpDriveHealth, Get-QpWindowsVersion, Get-QpQuietSnapshot, Update-QpQuietNote, Invoke-QpPutBack,
     Get-QpRestorePoints, Invoke-QpUndo,
     Get-QpPrivacyStatus, Invoke-QpPrivacy,
-    Get-QpBloatApps, Invoke-QpRemoveApps,
+    Get-QpBloatApps, Invoke-QpRemoveApps, Get-QpInstalledPrograms, Get-QpInstalledApplications, Invoke-QpUninstallApplication,
     Get-QpStartupItems, Invoke-QpStartup, Set-QpStartupApproved, Get-QpStartupAdvice,
     Get-QpSignInTime, Get-QpBootRecord, Get-QpSignInCost, Format-QpSignInCost,
     Get-QpDeviceUse, Invoke-QpDeviceAccess, Format-QpWhen,
     Get-QpBrowserExtensions, Get-QpChromiumExtensions, Get-QpFirefoxAddons, Get-QpExtensionReach, Format-QpExtensionUse,
     Get-QpExtensionBlocks, Get-QpExtensionSlot, Invoke-QpExtension, ConvertFrom-QpChromeTime,
-    Get-QpCleanupTargets, Invoke-QpCleanup, Get-QpRecycleBinLimit, Move-QpToRecycleBin,
+    Get-QpCleanupTargets, Invoke-QpCleanup, Get-QpStorageFindings, Get-QpFileStorageFindings, Get-QpDockerStorageFindings, Get-QpHibernationFinding, Invoke-QpStorageCleanup,
+    Get-QpProtectedPaths, Set-QpProtectedPaths, Test-QpProjectPath, Get-QpRecycleBinLimit, Move-QpToRecycleBin,
     Get-QpSpaceUse, Get-QpSpaceAdvice, Invoke-QpSpaceRecycle, Get-QpInstallPlaces,
     Get-QpOldFiles, Get-QpEasyWins, Invoke-QpEasyWin,
     Get-QpShortcutPaths, Test-QpShortcuts, New-QpShortcuts, Remove-QpShortcuts, Initialize-QpShortcut, Get-QpOwnShortcuts,

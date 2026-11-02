@@ -1,6 +1,6 @@
 # Space clean-up targets for the "Clean up space" tab.
-# Everything is moved to the Recycle Bin - this tool never permanently deletes files.
-# Empty the Recycle Bin yourself once you are happy.
+# Everything is moved to the Recycle Bin when it fits. An individually selected item that cannot fit
+# is only deleted after Quietpane shows its exact path and size and the person confirms twice.
 #
 # Paths         environment variables and * wildcards allowed
 # MinAgeHours   only items older than this are touched (protects files in use by running installers)
@@ -52,6 +52,11 @@
             Id = 'browser.edge'; Title = 'Edge cache'; Recommended = $false; RequiresClosed = 'msedge'
             Description = 'Cached web files. Logins, history and favourites are NOT touched. Close Edge first.'
             Paths = @('%LOCALAPPDATA%\Microsoft\Edge\User Data\*\Cache', '%LOCALAPPDATA%\Microsoft\Edge\User Data\*\Code Cache', '%LOCALAPPDATA%\Microsoft\Edge\User Data\*\GPUCache')
+        }
+        @{
+            Id = 'automation.cache'; Title = 'Automation and developer caches'; Recommended = $false; MinAgeHours = 24
+            Description = 'Known cache folders are listed separately. Project folders and protected paths are never selected.'
+            Paths = @('%USERPROFILE%\.cache', '%USERPROFILE%\.agent-browser')
         }
         @{
             Id = 'wu.download'; Title = 'Windows Update download cache'; Recommended = $false; MinAgeHours = 72
