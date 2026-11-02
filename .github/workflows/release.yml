@@ -124,16 +124,16 @@ jobs:
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
-          $view = gh release view $env:RELEASE_TAG --json isDraft 2>$null
+          $view = gh release view $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --json isDraft 2>$null
           if ($LASTEXITCODE -eq 0) {
               $release = $view | ConvertFrom-Json
               if (-not $release.isDraft) {
                   throw "Release $env:RELEASE_TAG is already public; this workflow only writes draft releases"
               }
           } else {
-              gh release create $env:RELEASE_TAG --verify-tag --draft --title "Quietpane $env:RELEASE_VERSION" --notes "Draft created by the verified release workflow. Add the human release notes, review the attached checksum and provenance, then publish."
+              gh release create $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --verify-tag --draft --title "Quietpane $env:RELEASE_VERSION" --notes "Draft created by the verified release workflow. Add the human release notes, review the attached checksum and provenance, then publish."
               if ($LASTEXITCODE -ne 0) { throw 'Could not create draft release' }
           }
 
-          gh release upload $env:RELEASE_TAG 'dist\Quietpane.zip' 'dist\Quietpane.zip.sha256' 'dist\PROVENANCE.txt' --clobber
+          gh release upload $env:RELEASE_TAG 'dist\Quietpane.zip' 'dist\Quietpane.zip.sha256' 'dist\PROVENANCE.txt' --repo $env:GITHUB_REPOSITORY --clobber
           if ($LASTEXITCODE -ne 0) { throw 'Could not upload release assets' }
