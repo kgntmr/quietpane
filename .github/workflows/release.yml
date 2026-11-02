@@ -124,8 +124,13 @@ jobs:
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
+          # A missing release is the expected first-run state. PowerShell 5.1 otherwise promotes
+          # gh's stderr to a terminating NativeCommandError before we can inspect LASTEXITCODE.
+          $ErrorActionPreference = 'SilentlyContinue'
           $view = gh release view $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --json isDraft 2>$null
-          if ($LASTEXITCODE -eq 0) {
+          $viewExitCode = $LASTEXITCODE
+          $ErrorActionPreference = 'Stop'
+          if ($viewExitCode -eq 0) {
               $release = $view | ConvertFrom-Json
               if (-not $release.isDraft) {
                   throw "Release $env:RELEASE_TAG is already public; this workflow only writes draft releases"
