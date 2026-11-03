@@ -2689,7 +2689,11 @@ function Update-FromState($state) {
     Set-Glance 'cleanup' 'leftovers' 'Visible / eligible now' ('{0} / {1}' -f (Format-QpBytes $visibleBytes), (Format-QpBytes $eligibleBytes)) -Tip 'The first number includes young and protected items. Only explicitly selected eligible items can be changed.'
     foreach ($category in $script:CleanupGroupOrder) {
         $group = $script:CleanupGroups[$category]
-        $all = @($findings | Where-Object { $_.Category -eq $category } | Sort-Object @{ Expression = { [int64]$_.TotalBytes }; Descending = $true }, Title)
+        # Empty, readable file-cache children reclaim no space and only create misleading zero-byte
+        # choices. Keep unavailable/advisory/system rows visible because they explain a real state.
+        $all = @($findings | Where-Object {
+            $_.Category -eq $category -and ($_.TotalBytes -gt 0 -or $_.Availability -ne 'Available' -or $_.ActionType -ne 'FileCleanup')
+        } | Sort-Object @{ Expression = { [int64]$_.TotalBytes }; Descending = $true }, Title)
         $shown = @($all | Select-Object -First 20)
         $shown += @($all | Where-Object { $_.TotalBytes -ge 100MB -and $shown.Id -notcontains $_.Id })
         $shown = @($shown | Sort-Object @{ Expression = { [int64]$_.TotalBytes }; Descending = $true }, Title -Unique)

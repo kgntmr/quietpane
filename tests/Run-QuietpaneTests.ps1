@@ -3245,6 +3245,31 @@ Test-Case 'old temporary files stay visible and become eligible' {
     $f = @(Get-QpStorageFindings -Catalog $cat | Where-Object Title -eq 'old.tmp')[0]
     $f.TotalBytes -gt 0 -and $f.EligibleBytes -eq $f.TotalBytes -and $f.DefaultSelected
 }
+Test-Case 'empty cache folders reclaim nothing and are never selected' {
+    $emptyRoot = Join-Path $storageRoot 'empty-root'; [void][IO.Directory]::CreateDirectory($emptyRoot)
+    $empty = Join-Path $emptyRoot 'empty-cache'; [void][IO.Directory]::CreateDirectory($empty)
+    $cat = @([pscustomobject]@{ Id = 'automation.empty'; Title = 'Empty'; Description = 'Test'; Recommended = $true; MinAgeHours = 0; Paths = @($emptyRoot) })
+    $f = @(Get-QpStorageFindings -Catalog $cat | Where-Object Identity -eq $empty)[0]
+    $f.TotalBytes -eq 0 -and $f.EligibleBytes -eq 0 -and -not $f.DefaultSelected
+}
+Test-Case 'ordinary users can resolve a safe Recycle Bin limit without Win32 Volume access' {
+    & $mod {
+        param($path)
+        try {
+            Set-Item Function:script:Get-ItemProperty { param($Path, $ErrorAction) $null }
+            Set-Item Function:script:Get-CimInstance { throw 'ordinary account cannot read Win32_Volume' }
+            $script:BinLimits = @{}
+            $root = [IO.Path]::GetPathRoot([IO.Path]::GetFullPath($path))
+            $total = (New-Object IO.DriveInfo $root).TotalSize
+            $actual = Get-QpRecycleBinLimit $path
+            $actual -eq [int64]([double]$total * 0.05) -and $actual -gt 0
+        } finally {
+            Remove-Item Function:script:Get-ItemProperty -ErrorAction SilentlyContinue
+            Remove-Item Function:script:Get-CimInstance -ErrorAction SilentlyContinue
+            $script:BinLimits = @{}
+        }
+    } $storageRoot
+}
 Test-Case 'project markers and user protected folders make descendants ineligible' {
     $project = Join-Path $storageRoot 'project'; [void][IO.Directory]::CreateDirectory($project)
     [IO.File]::WriteAllText((Join-Path $project 'package.json'), '{}'); [IO.File]::WriteAllText((Join-Path $project 'cache.bin'), 'x')

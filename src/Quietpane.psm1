@@ -281,14 +281,28 @@ function Get-QpRecycleBinLimit {
         $limit = [int64]0
         $policy = Get-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer' -ErrorAction SilentlyContinue
         if (-not ($policy -and [int]$policy.NoRecycleFiles -eq 1)) {
-            $vol = Get-CimInstance Win32_Volume -Filter "DriveLetter='$drive'" -ErrorAction Stop | Select-Object -First 1
+            if ($drive -notmatch '^[A-Za-z]:$') { $script:BinLimits[$drive] = $limit; return $limit }
+            # Win32_Volume is commonly hidden from an ordinary account. mountvol is a read-only Windows
+            # command and returns the same volume GUID without elevation, so the per-drive Recycle Bin
+            # policy can still be honoured instead of treating every file as a permanent deletion.
+            $volumeId = ''
+            try {
+                $mountvol = Join-Path $env:SystemRoot 'System32\mountvol.exe'
+                $volumeName = if (Test-Path -LiteralPath $mountvol) { (& $mountvol ($drive + '\') /L 2>$null | Out-String) } else { '' }
+                if ($volumeName -match '\{[0-9a-fA-F-]+\}') { $volumeId = $matches[0] }
+            } catch { }
             $p = $null
-            if ($vol -and "$($vol.DeviceID)" -match '\{[0-9a-fA-F-]+\}') {
-                $p = Get-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\BitBucket\Volume\$($matches[0])" -ErrorAction SilentlyContinue
+            if ($volumeId) {
+                $p = Get-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\BitBucket\Volume\$volumeId" -ErrorAction SilentlyContinue
             }
             if ($p -and [int]$p.NukeOnDelete -eq 1) { $limit = 0 }
-            elseif ($p -and $p.MaxCapacity) { $limit = [int64]$p.MaxCapacity * 1MB }
-            elseif ($vol) { $limit = [int64]([double]$vol.Capacity * 0.05) }   # not set: assume a cautious 5% of the drive
+            elseif ($p -and $p.PSObject.Properties['MaxCapacity']) { $limit = [int64]$p.MaxCapacity * 1MB }
+            else {
+                # No explicit policy: Windows uses a capacity based on the drive. Five percent is the
+                # same cautious assumption as before, but DriveInfo works without administrator rights.
+                $vol = New-Object IO.DriveInfo ($drive + '\')
+                if ($vol.IsReady) { $limit = [int64]([double]$vol.TotalSize * 0.05) }
+            }
         }
         $script:BinLimits[$drive] = $limit
         return $limit
@@ -5010,7 +5024,9 @@ function Get-QpFileStorageFindings {
                 $eligible = -not $cutoff -or $child.LastWriteTime -lt $cutoff
                 $bin = Get-QpRecycleBinLimit $child.FullName
                 $oversized = [bool]($size -gt 0 -and ($bin -le 0 -or $size -gt $bin))
-                $default = [bool]$item.Recommended -and $eligible -and -not $protected.Protected -and -not $oversized
+                # Empty directories reclaim nothing and must never make the Apply button claim that
+                # work is selected. Keep them in discovery for auditability, but leave them unticked.
+                $default = $size -gt 0 -and [bool]$item.Recommended -and $eligible -and -not $protected.Protected -and -not $oversized
                 $title = if ($child.Name) { $child.Name } else { $item.Title }
                 $desc = $item.Description
                 if (-not $eligible -and $cutoff) { $desc += " It is newer than $($item.MinAgeHours) hours, so it is shown but left unticked." }
