@@ -44,7 +44,6 @@ $script:LegacyDataRoot = Join-Path ([Environment]::GetFolderPath('CommonApplicat
 $script:HostsPath   = Join-Path $env:WINDIR 'System32\drivers\etc\hosts'
 $script:ComputerMaker = $null      # filled in once, when brand software is looked for
 $script:GpuNames = $null
-$script:InstalledPrograms = $null
 
 # Apps that are never removed, even if someone adds them to the catalog.
 $script:ProtectedAppPattern = '^(Microsoft\.WindowsStore|Microsoft\.StorePurchaseApp|Microsoft\.DesktopAppInstaller|Microsoft\.SecHealthUI|Microsoft\.Windows\.Photos|Microsoft\.WindowsCamera|Microsoft\.WindowsCalculator|Microsoft\.WindowsNotepad|Microsoft\.Paint|Microsoft\.ScreenSketch|Microsoft\.WindowsTerminal|Microsoft\.Winget\.Source|Microsoft\.VCLibs.*|Microsoft\.NET\..*|Microsoft\.UI\.Xaml.*|Microsoft\.WindowsAppRuntime.*|MicrosoftCorporationII\.WinAppRuntime.*|Microsoft\.Services\.Store.*|Microsoft\..*Extension[s]?|Microsoft\.LanguageExperiencePack.*|NVIDIACorp\..*|RealtekSemiconductorCorp\..*|AppUp\.Intel.*|Microsoft\.MicrosoftEdge\.Stable|Microsoft\.MicrosoftEdgeDevToolsClient)$'
@@ -6796,7 +6795,11 @@ function Test-QpVendorPresent {
 
 function Get-QpInstalledPrograms {
     # Ordinary installed programs (not Store apps), from the places Windows lists them.
-    if ($script:InstalledPrograms) { return $script:InstalledPrograms }
+    # Share this slow registry read only inside one state scan. A later scan must ask Windows again,
+    # so an app installed or removed while Quietpane is already running cannot remain in the Apps tab.
+    if ($script:StateCache -and $script:StateCache.ContainsKey('InstalledPrograms')) {
+        return @($script:StateCache.InstalledPrograms)
+    }
     # Read straight from the registry: a few hundred keys through Get-ItemProperty is the slow part otherwise.
     # (commas, not new lines: arrays on separate lines would run together into one list)
     # Where each one is registered is kept (HKLM for everyone, HKCU for you alone): it says whose it is.
@@ -6805,7 +6808,7 @@ function Get-QpInstalledPrograms {
         @([Microsoft.Win32.Registry]::LocalMachine, 'SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall', 'HKLM'),
         @([Microsoft.Win32.Registry]::CurrentUser, 'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall', 'HKCU')
     )
-    $script:InstalledPrograms = @(
+    $programs = @(
         foreach ($s in $sources) {
             $root = $null
             try {
@@ -6836,7 +6839,8 @@ function Get-QpInstalledPrograms {
             } catch { } finally { if ($root) { $root.Close() } }
         }
     )
-    return $script:InstalledPrograms
+    if ($script:StateCache) { $script:StateCache.InstalledPrograms = @($programs) }
+    return $programs
 }
 
 function Get-QpInstalledApplications {
@@ -6895,7 +6899,6 @@ function Invoke-QpUninstallApplication {
             [pscustomobject]@{ Name = $app.Name; Hive = $app.Hive; Key = $app.Key; Uninstall = $app.Command }
         })
         $null = Invoke-QpRegisteredUninstall -Targets $desktop -Preview:$Preview -SkipPreflight
-        $script:InstalledPrograms = $null
         if ($top -and -not $Preview) { Get-QpOutcomeSummary }
     } finally { Exit-QpBatch }
 }
@@ -6997,7 +7000,6 @@ function Invoke-QpRegisteredUninstall {
     $ops = @(foreach ($t in $Targets) { New-QpOperation -Kind Uninstall -Name $t.Name -Hive $t.Hive -Command $t.Uninstall -Item $t.Key })
     if (-not $Preview -and -not $SkipPreflight -and -not (Invoke-QpPreflight $ops)) { return $false }
     foreach ($t in $Targets) {
-        $script:InstalledPrograms = $null
         $now = @(Get-QpInstalledPrograms | Where-Object { $_.Key -eq $t.Key -and $_.Hive -eq $t.Hive })[0]
         if (-not $now -or $now.Uninstall -cne $t.Uninstall) {
             Write-QpLog "$($t.Name) changed since Quietpane looked, so it was left alone. Look again and try once more." 'WARN'
@@ -7011,7 +7013,6 @@ function Invoke-QpRegisteredUninstall {
             $run = Split-QpUninstallCommand $now.Uninstall
             $p = if ($run.Arguments) { Start-Process -FilePath $run.Program -ArgumentList $run.Arguments -PassThru -Wait -ErrorAction Stop } else { Start-Process -FilePath $run.Program -PassThru -Wait -ErrorAction Stop }
             Write-QpLog "$($t.Name): uninstaller finished (exit code $($p.ExitCode))" 'OK'
-            $script:InstalledPrograms = $null
             if (@(Get-QpInstalledPrograms | Where-Object { $_.Key -eq $t.Key -and $_.Hive -eq $t.Hive }).Count) {
                 [void](New-QpOutcome 'Failed' "uninstalling $($t.Name)" 'it is still listed as installed - its uninstaller may still be running, so look again in a minute')
             } else { [void](New-QpOutcome 'Changed' "uninstalling $($t.Name)") }
@@ -7035,7 +7036,6 @@ function Invoke-QpVendorUninstall {
     $top = Enter-QpBatch
     try {
         if (-not (Invoke-QpRegisteredUninstall -Targets $targets)) { if ($top) { Get-QpOutcomeSummary }; return }
-        $script:InstalledPrograms = $null
         Write-QpLog 'Removed programs can be installed again from the maker''s website.' 'INFO'
         if ($top) { Get-QpOutcomeSummary }
     } finally { Exit-QpBatch }

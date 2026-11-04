@@ -1407,12 +1407,27 @@ Test-Case 'registry values are read exactly as stored, with their type, however 
     } finally { Remove-Item -Path $k -Recurse -Force -ErrorAction SilentlyContinue }
 }
 Test-Case 'the installed-programs list is the same as reading it the slow way' {
-    $new = @(& (Get-Module Quietpane) { $script:InstalledPrograms = $null; Get-QpInstalledPrograms } | ForEach-Object { '{0}|{1}|{2}|{3}' -f $_.Name, $_.Uninstall, $_.Quiet, $_.Key }) | Sort-Object
+    $new = @(Get-QpInstalledPrograms | ForEach-Object { '{0}|{1}|{2}|{3}' -f $_.Name, $_.Uninstall, $_.Quiet, $_.Key }) | Sort-Object
     $old = @(foreach ($k in 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*', 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*', 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*') {
         Get-ItemProperty -Path $k -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -and -not $_.SystemComponent } |
             ForEach-Object { '{0}|{1}|{2}|{3}' -f $_.DisplayName, $(if ($_.QuietUninstallString) { $_.QuietUninstallString } else { $_.UninstallString }), [bool]$_.QuietUninstallString, $_.PSChildName }
     }) | Sort-Object
     $new.Count -gt 0 -and (($new -join "`n") -eq ($old -join "`n"))
+}
+Test-Case 'installed apps are cached for one PC read and refreshed on the next' {
+    $result = & (Get-Module Quietpane) {
+        Start-QpStateCache
+        try {
+            $script:StateCache.InstalledPrograms = @([pscustomobject]@{ Name = 'Quietpane stale app sentinel' })
+            $during = @(Get-QpInstalledPrograms)
+        } finally { Stop-QpStateCache }
+        $after = @(Get-QpInstalledPrograms)
+        [pscustomobject]@{
+            During = @($during | ForEach-Object { $_.Name })
+            After = @($after | ForEach-Object { $_.Name })
+        }
+    }
+    $result.During -contains 'Quietpane stale app sentinel' -and $result.After -notcontains 'Quietpane stale app sentinel'
 }
 
 Section 'Undo tells the truth'
