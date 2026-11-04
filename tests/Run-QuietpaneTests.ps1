@@ -3278,6 +3278,23 @@ Test-Case 'project markers and user protected folders make descendants ineligibl
     $b = Test-QpProjectPath (Join-Path $chosen 'cache.bin') @($chosen)
     $a.Protected -and $a.Reason -match 'project' -and $b.Protected -and $b.Reason -match 'protected folder'
 }
+Test-Case 'protected folders persist as exact canonical paths' {
+    $chosen = Join-Path $storageRoot 'saved-project'
+    [void][IO.Directory]::CreateDirectory($chosen)
+    $before = @(Get-QpProtectedPaths)
+    try {
+        $saved = Set-QpProtectedPaths -Paths @($chosen)
+        $read = @(Get-QpProtectedPaths)
+        $saved -and $read.Count -eq 1 -and $read[0] -eq [IO.Path]::GetFullPath($chosen).TrimEnd('\')
+    } finally { [void](Set-QpProtectedPaths -Paths $before) }
+}
+Test-Case 'protected folders have a visible Settings list and Free up space summary' {
+    $win = Get-Content (Join-Path $root 'Quietpane.ps1') -Raw
+    $win -match '\$script:ProtectedFolderList' -and
+        $win -match '\$script:ProtectedFolderStatus' -and
+        $win -match '\$script:ProtectedCleanupSection' -and
+        $win -match 'Protected - excluded from cleanup'
+}
 Test-Case 'storage finding ids are stable and each finding carries the common interface' {
     $cat = @([pscustomobject]@{ Id = 'temp.test'; Title = 'Test temp'; Description = 'Test'; Recommended = $false; MinAgeHours = 0; Paths = @($storageRoot) })
     $a = @(Get-QpStorageFindings -Catalog $cat); $b = @(Get-QpStorageFindings -Catalog $cat)

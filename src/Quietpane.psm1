@@ -4939,7 +4939,10 @@ function Get-QpProtectedPaths {
     $text = Read-QpTextFile -Path $Path -MaxBytes 256KB
     if (-not $text) { return @() }
     try {
-        $data = @(ConvertFrom-QpStrictJson -Text $text -MaxBytes 256KB)
+        # The strict reader deliberately returns a JSON array as one value so PowerShell cannot flatten
+        # it while validating. Assign it directly here; wrapping the call in @() adds a second array
+        # layer and makes the saved Path objects disappear from the loop below.
+        $data = ConvertFrom-QpStrictJson -Text $text -MaxBytes 256KB
         @($data | ForEach-Object {
             $value = if ($_ -is [string]) { [string]$_ } elseif ($_['Path']) { [string]$_['Path'] } else { '' }
             Get-QpCanonicalPath $value
