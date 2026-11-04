@@ -4288,9 +4288,14 @@ function Set-LogVisible([bool]$Visible) {
 $script:ReadState = { Get-QpStateParallel }
 $script:DockerStorageLoaded = $false
 $script:DockerStorageLoading = $false
+$script:CleanupLastRefresh = [datetime]::MinValue
+$script:CleanupRestoreTicks = $false
+$script:CleanupSelectedIds = @()
 
-function Load-DockerStorage {
-    if ($SelfTest -or $script:DockerStorageLoaded -or $script:DockerStorageLoading -or -not $script:LastState -or (Test-Busy)) { return }
+function Load-DockerStorage([switch]$Force) {
+    if ($SelfTest -or ($script:DockerStorageLoaded -and -not $Force) -or $script:DockerStorageLoading -or -not $script:LastState -or (Test-Busy)) { return }
+    $script:CleanupRestoreTicks = $script:DockerStorageLoaded
+    $script:CleanupSelectedIds = if ($script:CleanupRestoreTicks) { @($script:Options['cleanup'] | Where-Object { $_.CheckBox.IsChecked } | ForEach-Object { $_.Id }) } else { @() }
     $script:DockerStorageLoading = $true
     Start-Work -StatusText 'Measuring temporary files, caches and Docker storage...' -Work { @(Get-QpStorageFindings -RefreshDocker) } -OnDone {
         param($storage)
@@ -4299,8 +4304,26 @@ function Load-DockerStorage {
         $script:LastState.Cleanup = @($storage | Where-Object { $_ })
         $script:DockerStorageLoaded = $true
         Update-FromState $script:LastState
+        if ($script:CleanupRestoreTicks) {
+            foreach ($option in @($script:Options['cleanup'])) { $option.CheckBox.IsChecked = ($script:CleanupSelectedIds -contains $option.Id) }
+            Update-TickCount
+        }
+        $script:CleanupRestoreTicks = $false
+        $script:CleanupSelectedIds = @()
+        $script:CleanupLastRefresh = Get-Date
     }
 }
+
+# Keep the visible inventory honest without continuously rescanning the PC. Missing or changed visible
+# items refresh within two seconds; a full pass every minute catches nested cache and Docker changes.
+$script:CleanupRefreshTimer = New-Object System.Windows.Threading.DispatcherTimer
+$script:CleanupRefreshTimer.Interval = [TimeSpan]::FromSeconds(2)
+$script:CleanupRefreshTimer.Add_Tick({
+    if ([string]$ui.Tabs.SelectedItem.Tag -ne 'cleanup' -or -not $script:DockerStorageLoaded -or $script:DockerStorageLoading -or (Test-Busy)) { return }
+    $age = (Get-Date) - $script:CleanupLastRefresh
+    if ($age.TotalSeconds -ge 60 -or (Test-QpStorageSnapshotChanged @($script:StorageFindingsById.Values))) { Load-DockerStorage -Force }
+})
+if (-not $SelfTest) { $script:CleanupRefreshTimer.Start() }
 
 function Update-State {
     $script:DockerStorageLoaded = $false
@@ -5192,7 +5215,7 @@ $ui.Tabs.Add_SelectionChanged({
     param($s, $e)
     if ($e.OriginalSource -eq $ui.Tabs) {
         Update-Buttons; Set-TimerQuick
-        if ([string]$ui.Tabs.SelectedItem.Tag -eq 'cleanup') { Load-DockerStorage }
+        if ([string]$ui.Tabs.SelectedItem.Tag -eq 'cleanup') { Load-DockerStorage -Force }
     }
 })
 # F5 reads the PC again, as in most Windows apps. (If something is already running, the status line says so.)
@@ -5204,6 +5227,7 @@ $window.Add_Closing({
         if ([System.Windows.MessageBox]::Show('Something is still running. Close anyway?', 'Quietpane', 'YesNo', 'Warning') -ne 'Yes') { $e.Cancel = $true; return }
     }
     $timer.Stop()
+    $script:CleanupRefreshTimer.Stop()
     Stop-LiveSampler
 })
 

@@ -5184,6 +5184,22 @@ function Get-QpStorageFindings {
     $result
 }
 
+function Test-QpStorageSnapshotChanged {
+    <# A quick check for visible file findings. It never walks a directory tree; a full refresh does that. #>
+    param([object[]]$Findings)
+    foreach ($finding in @($Findings | Where-Object { $_ -and $_.ActionType -eq 'FileCleanup' -and $_.Availability -eq 'Available' })) {
+        foreach ($path in @($finding.Paths | Where-Object { $_ })) {
+            if (-not [IO.File]::Exists($path) -and -not [IO.Directory]::Exists($path)) { return $true }
+            try {
+                $item = Get-Item -LiteralPath $path -Force -ErrorAction Stop
+                if ($finding.LastWriteTime -and $finding.LastWriteTime -ne [datetime]::MinValue -and $item.LastWriteTime -ne $finding.LastWriteTime) { return $true }
+                if (-not $item.PSIsContainer -and $finding.TotalBytes -ne [int64]$item.Length) { return $true }
+            } catch { return $true }
+        }
+    }
+    return $false
+}
+
 function Get-QpCleanupOperations {
     <#
         Where one clean-up item would move things from, described. Worked out from the catalog's own
@@ -8964,7 +8980,7 @@ Export-ModuleMember -Function Get-QpInfo, Set-QpLogSink, Write-QpLog, Test-QpAdm
     Get-QpDeviceUse, Invoke-QpDeviceAccess, Format-QpWhen,
     Get-QpBrowserExtensions, Get-QpChromiumExtensions, Get-QpFirefoxAddons, Get-QpExtensionReach, Format-QpExtensionUse,
     Get-QpExtensionBlocks, Get-QpExtensionSlot, Invoke-QpExtension, ConvertFrom-QpChromeTime,
-    Get-QpCleanupTargets, Invoke-QpCleanup, Get-QpStorageFindings, Get-QpFileStorageFindings, Get-QpDockerStorageFindings, Get-QpHibernationFinding, Invoke-QpStorageCleanup,
+    Get-QpCleanupTargets, Invoke-QpCleanup, Get-QpStorageFindings, Get-QpFileStorageFindings, Get-QpDockerStorageFindings, Get-QpHibernationFinding, Test-QpStorageSnapshotChanged, Invoke-QpStorageCleanup,
     Get-QpProtectedPaths, Set-QpProtectedPaths, Test-QpProjectPath, Get-QpRecycleBinLimit, Move-QpToRecycleBin,
     Get-QpSpaceUse, Get-QpSpaceAdvice, Invoke-QpSpaceRecycle, Get-QpInstallPlaces,
     Get-QpOldFiles, Get-QpEasyWins, Invoke-QpEasyWin,

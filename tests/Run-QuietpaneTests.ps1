@@ -3295,6 +3295,15 @@ Test-Case 'protected folders have a visible Settings list and Free up space summ
         $win -match '\$script:ProtectedCleanupSection' -and
         $win -match 'Protected - excluded from cleanup'
 }
+Test-Case 'the visible storage snapshot notices a deleted file' {
+    $file = Join-Path $storageRoot 'visible-now.tmp'
+    [IO.File]::WriteAllText($file, 'visible')
+    $item = Get-Item -LiteralPath $file
+    $finding = [pscustomobject]@{ ActionType = 'FileCleanup'; Availability = 'Available'; Paths = @($file); LastWriteTime = $item.LastWriteTime; TotalBytes = [int64]$item.Length }
+    $before = Test-QpStorageSnapshotChanged @($finding)
+    [IO.File]::Delete($file)
+    -not $before -and (Test-QpStorageSnapshotChanged @($finding))
+}
 Test-Case 'storage finding ids are stable and each finding carries the common interface' {
     $cat = @([pscustomobject]@{ Id = 'temp.test'; Title = 'Test temp'; Description = 'Test'; Recommended = $false; MinAgeHours = 0; Paths = @($storageRoot) })
     $a = @(Get-QpStorageFindings -Catalog $cat); $b = @(Get-QpStorageFindings -Catalog $cat)
