@@ -43,6 +43,9 @@ Before publishing:
 
 Publishing is deliberately a human action. The workflow creates and updates drafts; it does not make a release public.
 
-## Current limitation
+## Release workflow history
 
-As of 3 October 2026, GitHub Actions jobs are failing before any workflow steps start. The release workflow is therefore implemented but cannot be demonstrated end to end until Actions can run again. The public v2.1.0 ZIP predates this workflow and was built locally; `TRUST.md` records that explicitly.
+The v2.3.0 workflow validated the tag, passed the Windows checks and produced the deterministic build, but
+PowerShell 5.1 treated the expected `gh release view` error for an absent draft as terminating output. That
+case is now handled explicitly. v2.3.1 is the first release intended to complete the verified draft path end
+to end. The older v2.1.0 ZIP predates this workflow and was built locally; `TRUST.md` records that explicitly.

@@ -244,7 +244,7 @@ Quietpane applied to the [SignPath Foundation](https://signpath.org) program in 
 
 **If signing starts later:** only files published on this repository's [Releases](https://github.com/kgntmr/quietpane/releases) page will be treated as official signed releases. The signing provider and release-provenance path will be documented here before signed releases are published.
 
-**How releases are built, stated plainly:** the current public v2.1.0 ZIP was built on a maintainer's PC and uploaded by hand, so it is not an Actions artifact. For future releases, the repository now contains a release workflow that checks an exact version tag with the same Windows test/build workflow, then attaches that Actions-built deterministic ZIP, its SHA256 file and a provenance record to a **draft** GitHub Release. Publishing the draft remains a human decision; a local ZIP is not part of that path. As of 3 October 2026, Actions jobs are failing before any workflow steps start, so this new path has not yet produced a public release. For v2.1.0, treat the SHA256 on the release page and the readable source as the things to check.
+**How releases are built, stated plainly:** the v2.3.1 download is built from its exact version tag by GitHub Actions after the Windows checks pass. The workflow attaches the deterministic ZIP, its SHA256 file and a provenance record to a draft GitHub Release. Publishing the reviewed draft remains a human decision; a locally built ZIP is never uploaded as the public release asset. Older v2.1.0 predates this workflow and was built locally.
 
 | Role | Members |
 |---|---|
