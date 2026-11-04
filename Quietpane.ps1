@@ -1588,7 +1588,7 @@ $script:AppsList = New-Object System.Windows.Controls.StackPanel
 
 # 5. Clean-up
 [void]$cleanupPanel.Children.Add((New-GlanceBox 'cleanup'))
-$script:ProtectedCleanupSection = New-Section 'Protected folders'
+$script:ProtectedCleanupSection = New-Section 'Protected items'
 $script:ProtectedCleanupSection.Expander.IsExpanded = $true
 $script:ProtectedCleanupList = New-Object System.Windows.Controls.StackPanel
 [void]$script:ProtectedCleanupSection.Content.Children.Add($script:ProtectedCleanupList)
@@ -1719,12 +1719,13 @@ $protectedPanel.MinWidth = 500
 $script:ProtectedFolderStatus = New-Text '' 12.5 'SemiBold' '#117A68' '0,0,0,5'
 $script:ProtectedFolderList = New-Object System.Windows.Controls.ListBox
 $script:ProtectedFolderList.MinWidth = 500
-$script:ProtectedFolderList.MaxHeight = 92
+$script:ProtectedFolderList.MaxHeight = 130
 $script:ProtectedFolderList.Margin = Get-Thick '0,0,0,7'
 [System.Windows.Automation.AutomationProperties]::SetName($script:ProtectedFolderList, 'Folders protected from cleanup')
 $protectedButtons = New-Object System.Windows.Controls.StackPanel
 $protectedButtons.Orientation = 'Horizontal'
-$btnProtectAdd = New-Button 'Add folder'
+$btnProtectFiles = New-Button 'Add files'
+$btnProtectAdd = New-Button 'Add folder' '8,0,0,0'
 $btnProtectRemove = New-Button 'Remove selected' '8,0,0,0'
 function Update-ProtectedFolderList {
     $paths = @(Get-QpProtectedPaths)
@@ -1733,23 +1734,38 @@ function Update-ProtectedFolderList {
     if ($paths.Count) {
         $script:ProtectedFolderList.SelectedIndex = 0
         $script:ProtectedFolderList.Visibility = 'Visible'
-        $script:ProtectedFolderStatus.Text = if ($paths.Count -eq 1) { '1 folder protected' } else { "$($paths.Count) folders protected" }
+        $script:ProtectedFolderStatus.Text = if ($paths.Count -eq 1) { '1 item protected' } else { "$($paths.Count) items protected" }
         $btnProtectRemove.IsEnabled = $true
     } else {
         $script:ProtectedFolderList.Visibility = 'Collapsed'
-        $script:ProtectedFolderStatus.Text = 'No folders added'
+        $script:ProtectedFolderStatus.Text = 'No protected items'
         $btnProtectRemove.IsEnabled = $false
     }
 }
+function Add-ProtectedItems([string[]]$NewPaths) {
+    $before = @(Get-QpProtectedPaths)
+    $combined = @($before + @($NewPaths | Where-Object { $_ }) | Sort-Object -Unique)
+    if (-not (Set-QpProtectedPaths -Paths $combined)) { throw 'The protected list could not be saved.' }
+    Update-ProtectedFolderList
+    $added = $combined.Count - $before.Count
+    $ui.Status.Text = if ($added -eq 1) { '1 protected item added.' } else { "$added protected items added." }
+    Update-StateAfterChange
+}
+$btnProtectFiles.Add_Click({
+    try {
+        $pick = New-Object Microsoft.Win32.OpenFileDialog
+        $pick.Title = 'Choose files Quietpane must never clean'
+        $pick.Multiselect = $true
+        $pick.CheckFileExists = $true
+        if ($pick.ShowDialog($window)) { Add-ProtectedItems @($pick.FileNames) }
+    } catch { [void][System.Windows.MessageBox]::Show("Those files could not be protected:`n`n$($_.Exception.Message)", 'Quietpane') }
+})
 $btnProtectAdd.Add_Click({
     try {
         Add-Type -AssemblyName System.Windows.Forms
         $pick = New-Object System.Windows.Forms.FolderBrowserDialog
         $pick.Description = 'Choose a folder Quietpane must never clean'
-        if ($pick.ShowDialog() -eq 'OK') {
-            $paths = @((Get-QpProtectedPaths) + $pick.SelectedPath | Sort-Object -Unique)
-            if (Set-QpProtectedPaths -Paths $paths) { Update-ProtectedFolderList; $ui.Status.Text = "Protected: $($pick.SelectedPath)"; Update-StateAfterChange }
-        }
+        if ($pick.ShowDialog() -eq 'OK') { Add-ProtectedItems @($pick.SelectedPath) }
         $pick.Dispose()
     } catch { [void][System.Windows.MessageBox]::Show("That folder could not be protected:`n`n$($_.Exception.Message)", 'Quietpane') }
 })
@@ -1759,13 +1775,14 @@ $btnProtectRemove.Add_Click({
     $paths = @(Get-QpProtectedPaths | Where-Object { $_ -ne $selected })
     if (Set-QpProtectedPaths -Paths $paths) { Update-ProtectedFolderList; $ui.Status.Text = "Protection removed: $selected"; Update-StateAfterChange }
 })
+[void]$protectedButtons.Children.Add($btnProtectFiles)
 [void]$protectedButtons.Children.Add($btnProtectAdd)
 [void]$protectedButtons.Children.Add($btnProtectRemove)
 [void]$protectedPanel.Children.Add($script:ProtectedFolderStatus)
 [void]$protectedPanel.Children.Add($script:ProtectedFolderList)
 [void]$protectedPanel.Children.Add($protectedButtons)
 Update-ProtectedFolderList
-$protectedRow = New-SettingRow 'Protected folders' 'Excluded from cleanup. Projects are protected automatically.' $protectedPanel
+$protectedRow = New-SettingRow 'Protected files and folders' 'Excluded from cleanup. Projects are protected automatically.' $protectedPanel
 [void]$aboutPanel.Children.Add($protectedRow.Border)
 
 # Starting when you sign in, and checking once as it does. Both take effect the moment they are flipped.
@@ -2692,7 +2709,7 @@ function Update-FromState($state) {
     }
     $protectedPaths = @(Get-QpProtectedPaths)
     $script:ProtectedCleanupList.Children.Clear()
-    $script:ProtectedCleanupSection.Expander.Header = New-Text ('Protected folders   ({0})' -f $protectedPaths.Count) 14.5 'SemiBold' '#117A68' '0' 'Fraunces, Georgia'
+    $script:ProtectedCleanupSection.Expander.Header = New-Text ('Protected items   ({0})' -f $protectedPaths.Count) 14.5 'SemiBold' '#117A68' '0' 'Fraunces, Georgia'
     if ($protectedPaths.Count) {
         foreach ($path in $protectedPaths) {
             $line = New-Text ('Protected   ' + $path) 12.5 'SemiBold' '#117A68' '0,5,0,5'

@@ -3278,17 +3278,21 @@ Test-Case 'project markers and user protected folders make descendants ineligibl
     $b = Test-QpProjectPath (Join-Path $chosen 'cache.bin') @($chosen)
     $a.Protected -and $a.Reason -match 'project' -and $b.Protected -and $b.Reason -match 'protected folder'
 }
-Test-Case 'protected folders persist as exact canonical paths' {
-    $chosen = Join-Path $storageRoot 'saved-project'
-    [void][IO.Directory]::CreateDirectory($chosen)
+Test-Case 'multiple protected files and folders persist as exact canonical paths' {
+    $chosen = Join-Path $storageRoot 'saved-project'; [void][IO.Directory]::CreateDirectory($chosen)
+    $file = Join-Path $storageRoot 'saved-file.txt'; [IO.File]::WriteAllText($file, 'keep')
     $before = @(Get-QpProtectedPaths)
     try {
-        $saved = Set-QpProtectedPaths -Paths @($chosen)
+        $saved = Set-QpProtectedPaths -Paths @($chosen, $file)
         $read = @(Get-QpProtectedPaths)
-        $saved -and $read.Count -eq 1 -and $read[0] -eq [IO.Path]::GetFullPath($chosen).TrimEnd('\')
+        $expected = @(
+            [IO.Path]::GetFullPath($chosen).TrimEnd('\')
+            [IO.Path]::GetFullPath($file).TrimEnd('\')
+        ) | Sort-Object
+        $saved -and $read.Count -eq 2 -and ($read -join '|') -eq ($expected -join '|')
     } finally { [void](Set-QpProtectedPaths -Paths $before) }
 }
-Test-Case 'protected folders have a visible Settings list and Free up space summary' {
+Test-Case 'protected items have a visible Settings list and Free up space summary' {
     $win = Get-Content (Join-Path $root 'Quietpane.ps1') -Raw
     $win -match '\$script:ProtectedFolderList' -and
         $win -match '\$script:ProtectedFolderStatus' -and
