@@ -1407,12 +1407,27 @@ Test-Case 'registry values are read exactly as stored, with their type, however 
     } finally { Remove-Item -Path $k -Recurse -Force -ErrorAction SilentlyContinue }
 }
 Test-Case 'the installed-programs list is the same as reading it the slow way' {
-    $new = @(& (Get-Module Quietpane) { $script:InstalledPrograms = $null; Get-QpInstalledPrograms } | ForEach-Object { '{0}|{1}|{2}|{3}' -f $_.Name, $_.Uninstall, $_.Quiet, $_.Key }) | Sort-Object
+    $new = @(Get-QpInstalledPrograms | ForEach-Object { '{0}|{1}|{2}|{3}' -f $_.Name, $_.Uninstall, $_.Quiet, $_.Key }) | Sort-Object
     $old = @(foreach ($k in 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*', 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*', 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*') {
         Get-ItemProperty -Path $k -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -and -not $_.SystemComponent } |
             ForEach-Object { '{0}|{1}|{2}|{3}' -f $_.DisplayName, $(if ($_.QuietUninstallString) { $_.QuietUninstallString } else { $_.UninstallString }), [bool]$_.QuietUninstallString, $_.PSChildName }
     }) | Sort-Object
     $new.Count -gt 0 -and (($new -join "`n") -eq ($old -join "`n"))
+}
+Test-Case 'installed apps are cached for one PC read and refreshed on the next' {
+    $result = & (Get-Module Quietpane) {
+        Start-QpStateCache
+        try {
+            $script:StateCache.InstalledPrograms = @([pscustomobject]@{ Name = 'Quietpane stale app sentinel' })
+            $during = @(Get-QpInstalledPrograms)
+        } finally { Stop-QpStateCache }
+        $after = @(Get-QpInstalledPrograms)
+        [pscustomobject]@{
+            During = @($during | ForEach-Object { $_.Name })
+            After = @($after | ForEach-Object { $_.Name })
+        }
+    }
+    $result.During -contains 'Quietpane stale app sentinel' -and $result.After -notcontains 'Quietpane stale app sentinel'
 }
 
 Section 'Undo tells the truth'
@@ -3245,6 +3260,31 @@ Test-Case 'old temporary files stay visible and become eligible' {
     $f = @(Get-QpStorageFindings -Catalog $cat | Where-Object Title -eq 'old.tmp')[0]
     $f.TotalBytes -gt 0 -and $f.EligibleBytes -eq $f.TotalBytes -and $f.DefaultSelected
 }
+Test-Case 'empty cache folders reclaim nothing and are never selected' {
+    $emptyRoot = Join-Path $storageRoot 'empty-root'; [void][IO.Directory]::CreateDirectory($emptyRoot)
+    $empty = Join-Path $emptyRoot 'empty-cache'; [void][IO.Directory]::CreateDirectory($empty)
+    $cat = @([pscustomobject]@{ Id = 'automation.empty'; Title = 'Empty'; Description = 'Test'; Recommended = $true; MinAgeHours = 0; Paths = @($emptyRoot) })
+    $f = @(Get-QpStorageFindings -Catalog $cat | Where-Object Identity -eq $empty)[0]
+    $f.TotalBytes -eq 0 -and $f.EligibleBytes -eq 0 -and -not $f.DefaultSelected
+}
+Test-Case 'ordinary users can resolve a safe Recycle Bin limit without Win32 Volume access' {
+    & $mod {
+        param($path)
+        try {
+            Set-Item Function:script:Get-ItemProperty { param($Path, $ErrorAction) $null }
+            Set-Item Function:script:Get-CimInstance { throw 'ordinary account cannot read Win32_Volume' }
+            $script:BinLimits = @{}
+            $root = [IO.Path]::GetPathRoot([IO.Path]::GetFullPath($path))
+            $total = (New-Object IO.DriveInfo $root).TotalSize
+            $actual = Get-QpRecycleBinLimit $path
+            $actual -eq [int64]([double]$total * 0.05) -and $actual -gt 0
+        } finally {
+            Remove-Item Function:script:Get-ItemProperty -ErrorAction SilentlyContinue
+            Remove-Item Function:script:Get-CimInstance -ErrorAction SilentlyContinue
+            $script:BinLimits = @{}
+        }
+    } $storageRoot
+}
 Test-Case 'project markers and user protected folders make descendants ineligible' {
     $project = Join-Path $storageRoot 'project'; [void][IO.Directory]::CreateDirectory($project)
     [IO.File]::WriteAllText((Join-Path $project 'package.json'), '{}'); [IO.File]::WriteAllText((Join-Path $project 'cache.bin'), 'x')
@@ -3252,6 +3292,36 @@ Test-Case 'project markers and user protected folders make descendants ineligibl
     $a = Test-QpProjectPath (Join-Path $project 'cache.bin')
     $b = Test-QpProjectPath (Join-Path $chosen 'cache.bin') @($chosen)
     $a.Protected -and $a.Reason -match 'project' -and $b.Protected -and $b.Reason -match 'protected folder'
+}
+Test-Case 'multiple protected files and folders persist as exact canonical paths' {
+    $chosen = Join-Path $storageRoot 'saved-project'; [void][IO.Directory]::CreateDirectory($chosen)
+    $file = Join-Path $storageRoot 'saved-file.txt'; [IO.File]::WriteAllText($file, 'keep')
+    $before = @(Get-QpProtectedPaths)
+    try {
+        $saved = Set-QpProtectedPaths -Paths @($chosen, $file)
+        $read = @(Get-QpProtectedPaths)
+        $expected = @(
+            [IO.Path]::GetFullPath($chosen).TrimEnd('\')
+            [IO.Path]::GetFullPath($file).TrimEnd('\')
+        ) | Sort-Object
+        $saved -and $read.Count -eq 2 -and ($read -join '|') -eq ($expected -join '|')
+    } finally { [void](Set-QpProtectedPaths -Paths $before) }
+}
+Test-Case 'protected items have a visible Settings list and Free up space summary' {
+    $win = Get-Content (Join-Path $root 'Quietpane.ps1') -Raw
+    $win -match '\$script:ProtectedFolderList' -and
+        $win -match '\$script:ProtectedFolderStatus' -and
+        $win -match '\$script:ProtectedCleanupSection' -and
+        $win -match 'Protected - excluded from cleanup'
+}
+Test-Case 'the visible storage snapshot notices a deleted file' {
+    $file = Join-Path $storageRoot 'visible-now.tmp'
+    [IO.File]::WriteAllText($file, 'visible')
+    $item = Get-Item -LiteralPath $file
+    $finding = [pscustomobject]@{ ActionType = 'FileCleanup'; Availability = 'Available'; Paths = @($file); LastWriteTime = $item.LastWriteTime; TotalBytes = [int64]$item.Length }
+    $before = Test-QpStorageSnapshotChanged @($finding)
+    [IO.File]::Delete($file)
+    -not $before -and (Test-QpStorageSnapshotChanged @($finding))
 }
 Test-Case 'storage finding ids are stable and each finding carries the common interface' {
     $cat = @([pscustomobject]@{ Id = 'temp.test'; Title = 'Test temp'; Description = 'Test'; Recommended = $false; MinAgeHours = 0; Paths = @($storageRoot) })

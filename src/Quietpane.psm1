@@ -23,8 +23,8 @@
       * No network requests, no telemetry, no data collection. Everything stays on this PC.
 #>
 
-$script:AppVersion  = '2.3.0'
-$script:AppReleased = '2026-11-02'   # the day this version was published; bumped with the version
+$script:AppVersion  = '2.3.1'
+$script:AppReleased = '2026-11-04'   # the day this version was published; bumped with the version
 $script:Brand       = @{ Name = 'KomodoWorks'; Url = 'https://www.komodoworks.com'; Email = 'info@komodoworks.com'; Repo = 'https://github.com/kgntmr/quietpane' }
 $script:AssetsRoot  = Join-Path (Split-Path $PSScriptRoot -Parent) 'assets'
 $script:LogSink     = $null
@@ -44,7 +44,6 @@ $script:LegacyDataRoot = Join-Path ([Environment]::GetFolderPath('CommonApplicat
 $script:HostsPath   = Join-Path $env:WINDIR 'System32\drivers\etc\hosts'
 $script:ComputerMaker = $null      # filled in once, when brand software is looked for
 $script:GpuNames = $null
-$script:InstalledPrograms = $null
 
 # Apps that are never removed, even if someone adds them to the catalog.
 $script:ProtectedAppPattern = '^(Microsoft\.WindowsStore|Microsoft\.StorePurchaseApp|Microsoft\.DesktopAppInstaller|Microsoft\.SecHealthUI|Microsoft\.Windows\.Photos|Microsoft\.WindowsCamera|Microsoft\.WindowsCalculator|Microsoft\.WindowsNotepad|Microsoft\.Paint|Microsoft\.ScreenSketch|Microsoft\.WindowsTerminal|Microsoft\.Winget\.Source|Microsoft\.VCLibs.*|Microsoft\.NET\..*|Microsoft\.UI\.Xaml.*|Microsoft\.WindowsAppRuntime.*|MicrosoftCorporationII\.WinAppRuntime.*|Microsoft\.Services\.Store.*|Microsoft\..*Extension[s]?|Microsoft\.LanguageExperiencePack.*|NVIDIACorp\..*|RealtekSemiconductorCorp\..*|AppUp\.Intel.*|Microsoft\.MicrosoftEdge\.Stable|Microsoft\.MicrosoftEdgeDevToolsClient)$'
@@ -281,14 +280,28 @@ function Get-QpRecycleBinLimit {
         $limit = [int64]0
         $policy = Get-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer' -ErrorAction SilentlyContinue
         if (-not ($policy -and [int]$policy.NoRecycleFiles -eq 1)) {
-            $vol = Get-CimInstance Win32_Volume -Filter "DriveLetter='$drive'" -ErrorAction Stop | Select-Object -First 1
+            if ($drive -notmatch '^[A-Za-z]:$') { $script:BinLimits[$drive] = $limit; return $limit }
+            # Win32_Volume is commonly hidden from an ordinary account. mountvol is a read-only Windows
+            # command and returns the same volume GUID without elevation, so the per-drive Recycle Bin
+            # policy can still be honoured instead of treating every file as a permanent deletion.
+            $volumeId = ''
+            try {
+                $mountvol = Join-Path $env:SystemRoot 'System32\mountvol.exe'
+                $volumeName = if (Test-Path -LiteralPath $mountvol) { (& $mountvol ($drive + '\') /L 2>$null | Out-String) } else { '' }
+                if ($volumeName -match '\{[0-9a-fA-F-]+\}') { $volumeId = $matches[0] }
+            } catch { }
             $p = $null
-            if ($vol -and "$($vol.DeviceID)" -match '\{[0-9a-fA-F-]+\}') {
-                $p = Get-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\BitBucket\Volume\$($matches[0])" -ErrorAction SilentlyContinue
+            if ($volumeId) {
+                $p = Get-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\BitBucket\Volume\$volumeId" -ErrorAction SilentlyContinue
             }
             if ($p -and [int]$p.NukeOnDelete -eq 1) { $limit = 0 }
-            elseif ($p -and $p.MaxCapacity) { $limit = [int64]$p.MaxCapacity * 1MB }
-            elseif ($vol) { $limit = [int64]([double]$vol.Capacity * 0.05) }   # not set: assume a cautious 5% of the drive
+            elseif ($p -and $p.PSObject.Properties['MaxCapacity']) { $limit = [int64]$p.MaxCapacity * 1MB }
+            else {
+                # No explicit policy: Windows uses a capacity based on the drive. Five percent is the
+                # same cautious assumption as before, but DriveInfo works without administrator rights.
+                $vol = New-Object IO.DriveInfo ($drive + '\')
+                if ($vol.IsReady) { $limit = [int64]([double]$vol.TotalSize * 0.05) }
+            }
         }
         $script:BinLimits[$drive] = $limit
         return $limit
@@ -4925,7 +4938,10 @@ function Get-QpProtectedPaths {
     $text = Read-QpTextFile -Path $Path -MaxBytes 256KB
     if (-not $text) { return @() }
     try {
-        $data = @(ConvertFrom-QpStrictJson -Text $text -MaxBytes 256KB)
+        # The strict reader deliberately returns a JSON array as one value so PowerShell cannot flatten
+        # it while validating. Assign it directly here; wrapping the call in @() adds a second array
+        # layer and makes the saved Path objects disappear from the loop below.
+        $data = ConvertFrom-QpStrictJson -Text $text -MaxBytes 256KB
         @($data | ForEach-Object {
             $value = if ($_ -is [string]) { [string]$_ } elseif ($_['Path']) { [string]$_['Path'] } else { '' }
             Get-QpCanonicalPath $value
@@ -5010,7 +5026,9 @@ function Get-QpFileStorageFindings {
                 $eligible = -not $cutoff -or $child.LastWriteTime -lt $cutoff
                 $bin = Get-QpRecycleBinLimit $child.FullName
                 $oversized = [bool]($size -gt 0 -and ($bin -le 0 -or $size -gt $bin))
-                $default = [bool]$item.Recommended -and $eligible -and -not $protected.Protected -and -not $oversized
+                # Empty directories reclaim nothing and must never make the Apply button claim that
+                # work is selected. Keep them in discovery for auditability, but leave them unticked.
+                $default = $size -gt 0 -and [bool]$item.Recommended -and $eligible -and -not $protected.Protected -and -not $oversized
                 $title = if ($child.Name) { $child.Name } else { $item.Title }
                 $desc = $item.Description
                 if (-not $eligible -and $cutoff) { $desc += " It is newer than $($item.MinAgeHours) hours, so it is shown but left unticked." }
@@ -5163,6 +5181,22 @@ function Get-QpStorageFindings {
     })
     $script:StorageFindingSnapshot = @($result)
     $result
+}
+
+function Test-QpStorageSnapshotChanged {
+    <# A quick check for visible file findings. It never walks a directory tree; a full refresh does that. #>
+    param([object[]]$Findings)
+    foreach ($finding in @($Findings | Where-Object { $_ -and $_.ActionType -eq 'FileCleanup' -and $_.Availability -eq 'Available' })) {
+        foreach ($path in @($finding.Paths | Where-Object { $_ })) {
+            if (-not [IO.File]::Exists($path) -and -not [IO.Directory]::Exists($path)) { return $true }
+            try {
+                $item = Get-Item -LiteralPath $path -Force -ErrorAction Stop
+                if ($finding.LastWriteTime -and $finding.LastWriteTime -ne [datetime]::MinValue -and $item.LastWriteTime -ne $finding.LastWriteTime) { return $true }
+                if (-not $item.PSIsContainer -and $finding.TotalBytes -ne [int64]$item.Length) { return $true }
+            } catch { return $true }
+        }
+    }
+    return $false
 }
 
 function Get-QpCleanupOperations {
@@ -6761,7 +6795,11 @@ function Test-QpVendorPresent {
 
 function Get-QpInstalledPrograms {
     # Ordinary installed programs (not Store apps), from the places Windows lists them.
-    if ($script:InstalledPrograms) { return $script:InstalledPrograms }
+    # Share this slow registry read only inside one state scan. A later scan must ask Windows again,
+    # so an app installed or removed while Quietpane is already running cannot remain in the Apps tab.
+    if ($script:StateCache -and $script:StateCache.ContainsKey('InstalledPrograms')) {
+        return @($script:StateCache.InstalledPrograms)
+    }
     # Read straight from the registry: a few hundred keys through Get-ItemProperty is the slow part otherwise.
     # (commas, not new lines: arrays on separate lines would run together into one list)
     # Where each one is registered is kept (HKLM for everyone, HKCU for you alone): it says whose it is.
@@ -6770,7 +6808,7 @@ function Get-QpInstalledPrograms {
         @([Microsoft.Win32.Registry]::LocalMachine, 'SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall', 'HKLM'),
         @([Microsoft.Win32.Registry]::CurrentUser, 'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall', 'HKCU')
     )
-    $script:InstalledPrograms = @(
+    $programs = @(
         foreach ($s in $sources) {
             $root = $null
             try {
@@ -6801,7 +6839,8 @@ function Get-QpInstalledPrograms {
             } catch { } finally { if ($root) { $root.Close() } }
         }
     )
-    return $script:InstalledPrograms
+    if ($script:StateCache) { $script:StateCache.InstalledPrograms = @($programs) }
+    return $programs
 }
 
 function Get-QpInstalledApplications {
@@ -6860,7 +6899,6 @@ function Invoke-QpUninstallApplication {
             [pscustomobject]@{ Name = $app.Name; Hive = $app.Hive; Key = $app.Key; Uninstall = $app.Command }
         })
         $null = Invoke-QpRegisteredUninstall -Targets $desktop -Preview:$Preview -SkipPreflight
-        $script:InstalledPrograms = $null
         if ($top -and -not $Preview) { Get-QpOutcomeSummary }
     } finally { Exit-QpBatch }
 }
@@ -6962,7 +7000,6 @@ function Invoke-QpRegisteredUninstall {
     $ops = @(foreach ($t in $Targets) { New-QpOperation -Kind Uninstall -Name $t.Name -Hive $t.Hive -Command $t.Uninstall -Item $t.Key })
     if (-not $Preview -and -not $SkipPreflight -and -not (Invoke-QpPreflight $ops)) { return $false }
     foreach ($t in $Targets) {
-        $script:InstalledPrograms = $null
         $now = @(Get-QpInstalledPrograms | Where-Object { $_.Key -eq $t.Key -and $_.Hive -eq $t.Hive })[0]
         if (-not $now -or $now.Uninstall -cne $t.Uninstall) {
             Write-QpLog "$($t.Name) changed since Quietpane looked, so it was left alone. Look again and try once more." 'WARN'
@@ -6976,7 +7013,6 @@ function Invoke-QpRegisteredUninstall {
             $run = Split-QpUninstallCommand $now.Uninstall
             $p = if ($run.Arguments) { Start-Process -FilePath $run.Program -ArgumentList $run.Arguments -PassThru -Wait -ErrorAction Stop } else { Start-Process -FilePath $run.Program -PassThru -Wait -ErrorAction Stop }
             Write-QpLog "$($t.Name): uninstaller finished (exit code $($p.ExitCode))" 'OK'
-            $script:InstalledPrograms = $null
             if (@(Get-QpInstalledPrograms | Where-Object { $_.Key -eq $t.Key -and $_.Hive -eq $t.Hive }).Count) {
                 [void](New-QpOutcome 'Failed' "uninstalling $($t.Name)" 'it is still listed as installed - its uninstaller may still be running, so look again in a minute')
             } else { [void](New-QpOutcome 'Changed' "uninstalling $($t.Name)") }
@@ -7000,7 +7036,6 @@ function Invoke-QpVendorUninstall {
     $top = Enter-QpBatch
     try {
         if (-not (Invoke-QpRegisteredUninstall -Targets $targets)) { if ($top) { Get-QpOutcomeSummary }; return }
-        $script:InstalledPrograms = $null
         Write-QpLog 'Removed programs can be installed again from the maker''s website.' 'INFO'
         if ($top) { Get-QpOutcomeSummary }
     } finally { Exit-QpBatch }
@@ -8945,7 +8980,7 @@ Export-ModuleMember -Function Get-QpInfo, Set-QpLogSink, Write-QpLog, Test-QpAdm
     Get-QpDeviceUse, Invoke-QpDeviceAccess, Format-QpWhen,
     Get-QpBrowserExtensions, Get-QpChromiumExtensions, Get-QpFirefoxAddons, Get-QpExtensionReach, Format-QpExtensionUse,
     Get-QpExtensionBlocks, Get-QpExtensionSlot, Invoke-QpExtension, ConvertFrom-QpChromeTime,
-    Get-QpCleanupTargets, Invoke-QpCleanup, Get-QpStorageFindings, Get-QpFileStorageFindings, Get-QpDockerStorageFindings, Get-QpHibernationFinding, Invoke-QpStorageCleanup,
+    Get-QpCleanupTargets, Invoke-QpCleanup, Get-QpStorageFindings, Get-QpFileStorageFindings, Get-QpDockerStorageFindings, Get-QpHibernationFinding, Test-QpStorageSnapshotChanged, Invoke-QpStorageCleanup,
     Get-QpProtectedPaths, Set-QpProtectedPaths, Test-QpProjectPath, Get-QpRecycleBinLimit, Move-QpToRecycleBin,
     Get-QpSpaceUse, Get-QpSpaceAdvice, Invoke-QpSpaceRecycle, Get-QpInstallPlaces,
     Get-QpOldFiles, Get-QpEasyWins, Invoke-QpEasyWin,

@@ -1104,7 +1104,7 @@ function Add-Option {
         One tick box. -Short is the few words shown under it; the full -Description then waits one hover
         away. Without -Short, the description is shown as it is.
     #>
-    param($Panel, [string]$Key, [string]$Id, [string]$Title, [string]$Description, [bool]$Recommended, [string]$Short = '')
+    param($Panel, [string]$Key, [string]$Id, [string]$Title, [string]$Description, [bool]$Recommended, [string]$Short = '', [switch]$Compact)
     $cb = New-Object System.Windows.Controls.CheckBox
     $cb.Tag = $Id
     $cb.VerticalContentAlignment = 'Center'
@@ -1122,12 +1122,13 @@ function Add-Option {
     [void]$rowStack.Children.Add($cb)
     $row.Child = $rowStack
     [void]$Panel.Children.Add($row)
-    $shown = if ($Short) { $Short } else { $Description }
+    $shown = if ($Short) { $Short } elseif ($Compact) { '' } else { $Description }
     if ($shown) {
         $desc = New-Text $shown 12.5 'Normal' '#66706F' '22,2,0,0'
         [void]$rowStack.Children.Add($desc)
         if ($Short -and $Description -and $Description -ne $Short) { Set-MoreInfo $cb $Description; Set-MoreInfo $desc $Description }
     }
+    if ($Compact -and $Description) { Set-MoreInfo $cb $Description }
     [void]$script:Options[$Key].Add([pscustomobject]@{ Id = $Id; CheckBox = $cb; Recommended = $Recommended; Label = $label; Title = $Title; Status = 'Unknown'; NeedsAdmin = $false })
 }
 
@@ -1135,7 +1136,7 @@ function Add-Option {
 # 0. Home - the one-click screen for everyone
 $homePanel = New-TabPage 'Home' 'home' ''
 [void]$homePanel.Children.Add((New-Text 'Make this PC yours again.' 28 'SemiBold' '#0F1B1C' '0,4,0,6' 'Fraunces, Georgia'))
-[void]$homePanel.Children.Add((New-Text 'One click switches off tracking and ads, clears out unwanted apps and frees up space. Settings can be undone; cleared files go to the Recycle Bin, and removed Store apps can be reinstalled.' 14.5 'Normal' '#4B5B5C' '0,0,0,18'))
+[void]$homePanel.Children.Add((New-Text 'Review this PC, then Preview or Apply. Reversible changes can be undone.' 14.5 'Normal' '#4B5B5C' '0,0,0,18'))
 
 function New-Card([string]$Title) {
     $b = New-Object System.Windows.Controls.Border
@@ -1291,12 +1292,12 @@ foreach ($x in @($homeTop) + @($script:UpdatePanel, $cards, $script:BackPanel, $
 
 # Every tab's header is made now, so the strip is complete the moment the window appears.
 $healthPanel = New-TabPage 'Health' 'health' ''
-$scanPanel = New-TabPage 'Safety scan' 'scan' ('Asks Microsoft Defender what it has found, and looks for the tricks adware uses. Looking changes nothing.')
-$privacyPanel = New-TabPage 'Privacy' 'privacy' ('What your PC shares, and the tracking and ads you can switch off. Security and Windows Update are never touched.')
+$scanPanel = New-TabPage 'Safety scan' 'scan' ('Check with Microsoft Defender. Nothing changes until you act.')
+$privacyPanel = New-TabPage 'Privacy' 'privacy' ('Review privacy settings and app access.')
 $vendorPanel = New-TabPage 'Telemetry' 'vendors' ('')
-$appsPanel = New-TabPage 'Apps' 'apps' ('What starts when you sign in, and every app Windows lists as installed. Nothing is labelled bloat or selected for you.')
-$cleanupPanel = New-TabPage 'Free up space' 'cleanup' ('See all reclaimable storage before deciding. Young files, project data and sensitive actions stay unticked.')
-$undoPanel = New-TabPage 'Undo' 'undo' ('Changes that can be undone are saved as restore points. Pick one to put it back.')
+$appsPanel = New-TabPage 'Apps' 'apps' ('Review startup items and installed apps.')
+$cleanupPanel = New-TabPage 'Free up space' 'cleanup' ('Choose what to remove. Protected and recent items stay unticked.')
+$undoPanel = New-TabPage 'Undo' 'undo' ('Restore an earlier change.')
 $aboutPanel = New-TabPage 'Settings' 'about' ''
 
 # On an ordinary start the window appears as soon as Home is ready, and the other tabs are filled in behind
@@ -1548,7 +1549,7 @@ foreach ($g in @((Get-QpCatalog privacy).Items | ForEach-Object { $_.Group } | S
 }
 
 # 3. Telemetry - the brand and hardware software that came with this PC
-$vendorIntroText = New-Text 'Background extras from the companies that made your PC, and what they report. Quietpane targets known helpers rather than drivers, and each item says what it affects.' 13.5 'Normal' '#4B5B5C' '0,0,0,12'
+$vendorIntroText = New-Text 'Optional background tools from hardware and PC makers.' 13.5 'Normal' '#4B5B5C' '0,0,0,12'
 Set-MoreInfo $vendorIntroText 'The laptop maker, the graphics chip, the processor: most PCs arrive with helpers from each, and many quietly report home. Only what is actually on this PC is listed.'
 [void]$vendorPanel.Children.Add($vendorIntroText)
 [void]$vendorPanel.Children.Add((New-GlanceBox 'vendors'))
@@ -1570,7 +1571,7 @@ $script:StartupList = New-Object System.Windows.Controls.StackPanel
 
 $script:RemoveSection = New-Section 'Installed apps'
 $script:RemoveSection.Expander.IsExpanded = $true
-$appsNote = New-Text 'A neutral inventory from Windows. Sizes are reported by the installer; unknown sizes are not guessed. Protected Windows components cannot be selected.' 12.5 'Normal' '#4B5B5C' '0,2,0,6'
+$appsNote = New-Text 'Apps reported by Windows. Nothing is preselected.' 12.5 'Normal' '#4B5B5C' '0,2,0,6'
 Set-MoreInfo $appsNote 'Quietpane runs only the registered uninstaller. It never deletes an application folder as a substitute for uninstalling it.'
 [void]$script:RemoveSection.Content.Children.Add($appsNote)
 $script:DeprovisionCb = New-Object System.Windows.Controls.CheckBox
@@ -1587,6 +1588,11 @@ $script:AppsList = New-Object System.Windows.Controls.StackPanel
 
 # 5. Clean-up
 [void]$cleanupPanel.Children.Add((New-GlanceBox 'cleanup'))
+$script:ProtectedCleanupSection = New-Section 'Protected items'
+$script:ProtectedCleanupSection.Expander.IsExpanded = $true
+$script:ProtectedCleanupList = New-Object System.Windows.Controls.StackPanel
+[void]$script:ProtectedCleanupSection.Content.Children.Add($script:ProtectedCleanupList)
+[void]$cleanupPanel.Children.Add($script:ProtectedCleanupSection.Expander)
 $script:CleanupGroups = @{}
 $script:CleanupGroupOrder = @('Temporary files and crash dumps', 'Application and automation caches', 'Docker storage', 'Windows system storage')
 foreach ($groupName in $script:CleanupGroupOrder) {
@@ -1695,7 +1701,7 @@ function New-ChoiceRow([string]$Group, [string]$Label, [object[]]$Choices, [stri
 $appear = New-ChoiceRow 'Appearance' 'Appearance' @(@('System', 'Match Windows'), @('Light', 'Light'), @('Dark', 'Dark')) $script:AppearanceChoice {
     param($s) if ($s.Tag -ne $script:AppearanceChoice) { Set-AppearanceChoice $s.Tag } }
 $script:AppearButtons = $appear.Buttons
-$appearRow = New-SettingRow 'Appearance' 'Match Windows follows your Windows colour setting.' $appear.Panel
+$appearRow = New-SettingRow 'Appearance' '' $appear.Panel
 Set-MoreInfo $appearRow.Label 'Match Windows follows Settings > Personalisation > Colours, and changes with it while Quietpane is open. Light or Dark stays put whatever Windows does.'
 [void]$aboutPanel.Children.Add($appearRow.Border)
 
@@ -1703,47 +1709,80 @@ Set-MoreInfo $appearRow.Label 'Match Windows follows Settings > Personalisation 
 $deg = [char]0x00B0
 $temp = New-ChoiceRow 'Temperature' 'Temperatures' @(@('C', "${deg}C"), @('F', "${deg}F")) (Get-QpTempUnit) { param($s) Set-TemperatureChoice $s.Tag }
 $script:TempButtons = $temp.Buttons
-$tempRow = New-SettingRow 'Temperatures' 'On the Health tab and in session reports.' $temp.Panel
+$tempRow = New-SettingRow 'Temperatures' '' $temp.Panel
 [void]$aboutPanel.Children.Add($tempRow.Border)
 
-# Folders a person never wants a storage action to touch. Project markers are protected automatically;
-# this list covers source archives, workspaces or any other folder the person chooses.
+# Folders a person never wants a storage action to touch. Keep the saved paths visible rather than
+# hiding them in a drop-down, so success is obvious and a folder can be removed deliberately.
 $protectedPanel = New-Object System.Windows.Controls.StackPanel
-$protectedPanel.Orientation = 'Horizontal'
-$script:ProtectedFolderChoice = New-Object System.Windows.Controls.ComboBox
-$script:ProtectedFolderChoice.MinWidth = 300
-$script:ProtectedFolderChoice.Margin = Get-Thick '0,0,8,0'
-[System.Windows.Automation.AutomationProperties]::SetName($script:ProtectedFolderChoice, 'Folders protected from storage cleanup')
-function Update-ProtectedFolderChoice {
-    $script:ProtectedFolderChoice.Items.Clear()
-    foreach ($p in @(Get-QpProtectedPaths)) { [void]$script:ProtectedFolderChoice.Items.Add($p) }
-    if ($script:ProtectedFolderChoice.Items.Count) { $script:ProtectedFolderChoice.SelectedIndex = 0 }
-}
-Update-ProtectedFolderChoice
-$btnProtectAdd = New-Button 'Add folder'
+$protectedPanel.MinWidth = 500
+$script:ProtectedFolderStatus = New-Text '' 12.5 'SemiBold' '#117A68' '0,0,0,5'
+$script:ProtectedFolderList = New-Object System.Windows.Controls.ListBox
+$script:ProtectedFolderList.MinWidth = 500
+$script:ProtectedFolderList.MaxHeight = 130
+$script:ProtectedFolderList.Margin = Get-Thick '0,0,0,7'
+[System.Windows.Automation.AutomationProperties]::SetName($script:ProtectedFolderList, 'Folders protected from cleanup')
+$protectedButtons = New-Object System.Windows.Controls.StackPanel
+$protectedButtons.Orientation = 'Horizontal'
+$btnProtectFiles = New-Button 'Add files'
+$btnProtectAdd = New-Button 'Add folder' '8,0,0,0'
 $btnProtectRemove = New-Button 'Remove selected' '8,0,0,0'
+function Update-ProtectedFolderList {
+    $paths = @(Get-QpProtectedPaths)
+    $script:ProtectedFolderList.Items.Clear()
+    foreach ($p in $paths) { [void]$script:ProtectedFolderList.Items.Add($p) }
+    if ($paths.Count) {
+        $script:ProtectedFolderList.SelectedIndex = 0
+        $script:ProtectedFolderList.Visibility = 'Visible'
+        $script:ProtectedFolderStatus.Text = if ($paths.Count -eq 1) { '1 item protected' } else { "$($paths.Count) items protected" }
+        $btnProtectRemove.IsEnabled = $true
+    } else {
+        $script:ProtectedFolderList.Visibility = 'Collapsed'
+        $script:ProtectedFolderStatus.Text = 'No protected items'
+        $btnProtectRemove.IsEnabled = $false
+    }
+}
+function Add-ProtectedItems([string[]]$NewPaths) {
+    $before = @(Get-QpProtectedPaths)
+    $combined = @($before + @($NewPaths | Where-Object { $_ }) | Sort-Object -Unique)
+    if (-not (Set-QpProtectedPaths -Paths $combined)) { throw 'The protected list could not be saved.' }
+    Update-ProtectedFolderList
+    $added = $combined.Count - $before.Count
+    $ui.Status.Text = if ($added -eq 1) { '1 protected item added.' } else { "$added protected items added." }
+    Update-StateAfterChange
+}
+$btnProtectFiles.Add_Click({
+    try {
+        $pick = New-Object Microsoft.Win32.OpenFileDialog
+        $pick.Title = 'Choose files Quietpane must never clean'
+        $pick.Multiselect = $true
+        $pick.CheckFileExists = $true
+        if ($pick.ShowDialog($window)) { Add-ProtectedItems @($pick.FileNames) }
+    } catch { [void][System.Windows.MessageBox]::Show("Those files could not be protected:`n`n$($_.Exception.Message)", 'Quietpane') }
+})
 $btnProtectAdd.Add_Click({
     try {
         Add-Type -AssemblyName System.Windows.Forms
         $pick = New-Object System.Windows.Forms.FolderBrowserDialog
         $pick.Description = 'Choose a folder Quietpane must never clean'
-        if ($pick.ShowDialog() -eq 'OK') {
-            $paths = @((Get-QpProtectedPaths) + $pick.SelectedPath | Sort-Object -Unique)
-            if (Set-QpProtectedPaths -Paths $paths) { Update-ProtectedFolderChoice; $ui.Status.Text = 'Protected folders updated. Refreshing storage findings...'; Update-StateAfterChange }
-        }
+        if ($pick.ShowDialog() -eq 'OK') { Add-ProtectedItems @($pick.SelectedPath) }
         $pick.Dispose()
     } catch { [void][System.Windows.MessageBox]::Show("That folder could not be protected:`n`n$($_.Exception.Message)", 'Quietpane') }
 })
 $btnProtectRemove.Add_Click({
-    $selected = [string]$script:ProtectedFolderChoice.SelectedItem
+    $selected = [string]$script:ProtectedFolderList.SelectedItem
     if (-not $selected) { return }
     $paths = @(Get-QpProtectedPaths | Where-Object { $_ -ne $selected })
-    if (Set-QpProtectedPaths -Paths $paths) { Update-ProtectedFolderChoice; $ui.Status.Text = 'Protected folder removed. Refreshing storage findings...'; Update-StateAfterChange }
+    if (Set-QpProtectedPaths -Paths $paths) { Update-ProtectedFolderList; $ui.Status.Text = "Protection removed: $selected"; Update-StateAfterChange }
 })
-[void]$protectedPanel.Children.Add($script:ProtectedFolderChoice)
-[void]$protectedPanel.Children.Add($btnProtectAdd)
-[void]$protectedPanel.Children.Add($btnProtectRemove)
-$protectedRow = New-SettingRow 'Protected folders' 'Quietpane also detects common project markers automatically. Protection is checked again immediately before every cleanup.' $protectedPanel
+[void]$protectedButtons.Children.Add($btnProtectFiles)
+[void]$protectedButtons.Children.Add($btnProtectAdd)
+[void]$protectedButtons.Children.Add($btnProtectRemove)
+[void]$protectedPanel.Children.Add($script:ProtectedFolderStatus)
+[void]$protectedPanel.Children.Add($script:ProtectedFolderList)
+[void]$protectedPanel.Children.Add($protectedButtons)
+Update-ProtectedFolderList
+$protectedRow = New-SettingRow 'Protected files and folders' 'Excluded from cleanup. Projects are protected automatically.' $protectedPanel
 [void]$aboutPanel.Children.Add($protectedRow.Border)
 
 # Starting when you sign in, and checking once as it does. Both take effect the moment they are flipped.
@@ -1768,21 +1807,21 @@ function New-ShieldedControl($Control) {
     [void]$sp.Children.Add($Control)
     return $sp
 }
-$signInRow = New-SettingRow 'Start Quietpane when I sign in' 'It waits on the taskbar and does nothing until you click it.' (New-ShieldedControl $script:SignInBox)
+$signInRow = New-SettingRow 'Start at sign-in' '' (New-ShieldedControl $script:SignInBox)
 [void]$aboutPanel.Children.Add($signInRow.Border)
 # Only makes sense with the one above, so it sits under it, indented, and waits until that is on.
 $script:WatchBox = New-Switch 'Also tell me if Windows switches things back on'
 $script:WatchBox.IsEnabled = $false
 $script:WatchBox.ToolTip = 'Switch on "Start Quietpane when I sign in" first.'
 [System.Windows.Controls.ToolTipService]::SetShowOnDisabled($script:WatchBox, $true)
-$watchRow = New-SettingRow 'Also tell me if Windows switches things back on' 'Checks once as you sign in, and badges the taskbar icon if anything came back.' (New-ShieldedControl $script:WatchBox)
+$watchRow = New-SettingRow 'Tell me if settings come back' '' (New-ShieldedControl $script:WatchBox)
 $watchRow.Border.Margin = Get-Thick '24,0,0,0'
 Set-MoreInfo $watchRow.Note 'About a second of work, just after you sign in. If nothing came back, you won''t notice it at all.'
 [void]$aboutPanel.Children.Add($watchRow.Border)
 
 # The way to reach Quietpane without hunting for the folder again.
 $btnShortcut = New-Button 'Add to Start menu and desktop' '0'
-$shortcutRow = New-SettingRow 'Start menu and desktop' 'Both use Quietpane''s own copy, so you can move the folder you unzipped.' $btnShortcut
+$shortcutRow = New-SettingRow 'Start menu and desktop' '' $btnShortcut
 Set-MoreInfo $shortcutRow.Note 'The copy lives in Program Files. To keep Quietpane on the taskbar, right-click it in the Start menu and choose "Pin to taskbar".'
 Set-MoreInfo $btnShortcut 'To keep Quietpane on the taskbar afterwards, right-click it in the Start menu and choose "Pin to taskbar".'
 [void]$aboutPanel.Children.Add($shortcutRow.Border)
@@ -1812,9 +1851,10 @@ $btnUpdateLater.Add_Click({
     $script:UpdatePanel.Visibility = 'Collapsed'
 })
 
-# Our promise, as a short list: what, and how. Point at a line for the whole of it.
+# Keep the longer safety explanation available without making it compete with the settings.
+$promiseSection = New-Section 'Privacy and safety'
 $promise = New-DetailsBox 'Our promise'
-$promise.Border.Margin = Get-Thick '0,18,0,12'
+$promise.Border.Margin = Get-Thick '0,2,0,4'
 foreach ($p in @(
         @('Collects', 'nothing - no accounts, tracking or ads', 'No accounts, analytics, telemetry, crash reports, ads, cookies or tracking of any kind.'),
         @('Connects to', 'nothing - links open only when you click them', 'The app makes no network requests at all.'),
@@ -1824,7 +1864,8 @@ foreach ($p in @(
         @('Licence', 'free and open source (MIT)', 'MIT License. Not affiliated with Microsoft, NVIDIA, Intel, AMD, Google or any PC maker.'))) {
     [void](Add-DetailRow $promise $p[0] $p[1] -Tip $p[2])
 }
-[void]$aboutPanel.Children.Add($promise.Border)
+[void]$promiseSection.Content.Children.Add($promise.Border)
+[void]$aboutPanel.Children.Add($promiseSection.Expander)
 
 $aboutButtons = New-Object System.Windows.Controls.WrapPanel
 $aboutButtons.Margin = Get-Thick '0,4,0,8'
@@ -2666,6 +2707,18 @@ function Update-FromState($state) {
             Set-OptionStatus $last 'NotApplicable'
         }
     }
+    $protectedPaths = @(Get-QpProtectedPaths)
+    $script:ProtectedCleanupList.Children.Clear()
+    $script:ProtectedCleanupSection.Expander.Header = New-Text ('Protected items   ({0})' -f $protectedPaths.Count) 14.5 'SemiBold' '#117A68' '0' 'Fraunces, Georgia'
+    if ($protectedPaths.Count) {
+        foreach ($path in $protectedPaths) {
+            $line = New-Text ('Protected   ' + $path) 12.5 'SemiBold' '#117A68' '0,5,0,5'
+            Set-MoreInfo $line 'This folder and everything inside it are excluded from cleanup.'
+            [void]$script:ProtectedCleanupList.Children.Add($line)
+        }
+    } else {
+        [void]$script:ProtectedCleanupList.Children.Add((New-Text 'None added. Project folders are still detected automatically.' 12 'Normal' '#66706F' '0,4,0,4'))
+    }
     foreach ($g in $script:CleanupGroups.Values) { $g.List.Children.Clear() }
     $script:Options['cleanup'].Clear()
     $script:StorageFindingsById = @{}
@@ -2689,9 +2742,17 @@ function Update-FromState($state) {
     Set-Glance 'cleanup' 'leftovers' 'Visible / eligible now' ('{0} / {1}' -f (Format-QpBytes $visibleBytes), (Format-QpBytes $eligibleBytes)) -Tip 'The first number includes young and protected items. Only explicitly selected eligible items can be changed.'
     foreach ($category in $script:CleanupGroupOrder) {
         $group = $script:CleanupGroups[$category]
-        $all = @($findings | Where-Object { $_.Category -eq $category } | Sort-Object @{ Expression = { [int64]$_.TotalBytes }; Descending = $true }, Title)
-        $shown = @($all | Select-Object -First 20)
+        # Empty, readable file-cache children reclaim no space and only create misleading zero-byte
+        # choices. Keep unavailable/advisory/system rows visible because they explain a real state.
+        $all = @($findings | Where-Object {
+            $_.Category -eq $category -and ($_.TotalBytes -gt 0 -or $_.Availability -ne 'Available' -or $_.ActionType -ne 'FileCleanup')
+        } | Sort-Object @{ Expression = { [int64]$_.TotalBytes }; Descending = $true }, Title)
+        # Keep the first view useful: tiny file-cache fragments remain in the totals, while Docker,
+        # protected, unavailable and advisory rows stay visible because their state matters.
+        $essential = @($all | Where-Object { $_.TotalBytes -ge 1MB -or $_.Protected -or $_.Availability -ne 'Available' -or $_.ActionType -ne 'FileCleanup' })
+        $shown = @($essential | Select-Object -First 20)
         $shown += @($all | Where-Object { $_.TotalBytes -ge 100MB -and $shown.Id -notcontains $_.Id })
+        $shown += @($all | Where-Object { $_.Protected -and $shown.Id -notcontains $_.Id })
         $shown = @($shown | Sort-Object @{ Expression = { [int64]$_.TotalBytes }; Descending = $true }, Title -Unique)
         $counted = @($all | Where-Object { $_.ActionType -ne 'Advisory' })
         $visibleLabel = if ($category -eq 'Docker storage') { 'logical' } else { 'visible' }
@@ -2705,15 +2766,25 @@ function Update-FromState($state) {
             if ($c.ActionType -eq 'DockerVolume') { $note += ' Named volumes are never selected automatically.' }
             if ($c.NeedsPermanentDelete) { $note += ' This item is too large for the Recycle Bin; permanent deletion needs two confirmations.' }
             $sizeText = if ($c.TotalBytes -gt 0) { Format-QpBytes $c.TotalBytes } else { 'size unknown or none' }
-            Add-Option -Panel $group.List -Key 'cleanup' -Id $c.Id -Title ('{0}   ({1})' -f $c.Title, $sizeText) -Description $note -Recommended ([bool]$c.DefaultSelected)
+            $short = if ($c.Protected) { 'Protected - excluded from cleanup' }
+                elseif ($c.Availability -eq 'InUse') { 'In use' }
+                elseif ($c.Availability -eq 'NeedsAdmin') { 'Needs administrator rights' }
+                elseif ($c.Availability -ne 'Available') { 'Unavailable' }
+                elseif ($c.NeedsPermanentDelete) { 'Permanent deletion requires confirmation' }
+                elseif ($c.EligibleBytes -le 0) { 'Not eligible yet' }
+                elseif ($c.ActionType -eq 'DockerVolume') { 'Review before removing' }
+                else { '' }
+            $displayTitle = if ($c.Protected) { '{0} - Protected' -f $c.Title } else { [string]$c.Title }
+            Add-Option -Panel $group.List -Key 'cleanup' -Id $c.Id -Title ('{0}   ({1})' -f $displayTitle, $sizeText) -Short $short -Description $note -Recommended ([bool]$c.DefaultSelected) -Compact
             $last = $script:Options['cleanup'][$script:Options['cleanup'].Count - 1]
             if ($c.Protected -or $c.Availability -notin 'Available', 'NeedsAdmin') {
                 $last.CheckBox.IsEnabled = $false
                 Set-OptionStatus $last 'NotApplicable'
             }
+            if ($c.Protected) { $last.Label.Foreground = Get-Brush '#117A68' }
         }
         $hidden = $all.Count - $shown.Count
-        if ($hidden -gt 0) { [void]$group.List.Children.Add((New-Text ("$hidden smaller items are grouped out of the first view. The category totals above still include them.") 12 'Normal' '#66706F' '0,8,0,0')) }
+        if ($hidden -gt 0) { [void]$group.List.Children.Add((New-Text ("$hidden more items") 12 'Normal' '#66706F' '0,8,0,0')) }
     }
     Show-Part 'the restore points' { Update-UndoList @($state.Restore) }
     Show-Part 'the quarantine' { Update-QuarantineList }
@@ -4234,9 +4305,14 @@ function Set-LogVisible([bool]$Visible) {
 $script:ReadState = { Get-QpStateParallel }
 $script:DockerStorageLoaded = $false
 $script:DockerStorageLoading = $false
+$script:CleanupLastRefresh = [datetime]::MinValue
+$script:CleanupRestoreTicks = $false
+$script:CleanupSelectedIds = @()
 
-function Load-DockerStorage {
-    if ($SelfTest -or $script:DockerStorageLoaded -or $script:DockerStorageLoading -or -not $script:LastState -or (Test-Busy)) { return }
+function Load-DockerStorage([switch]$Force) {
+    if ($SelfTest -or ($script:DockerStorageLoaded -and -not $Force) -or $script:DockerStorageLoading -or -not $script:LastState -or (Test-Busy)) { return }
+    $script:CleanupRestoreTicks = $script:DockerStorageLoaded
+    $script:CleanupSelectedIds = if ($script:CleanupRestoreTicks) { @($script:Options['cleanup'] | Where-Object { $_.CheckBox.IsChecked } | ForEach-Object { $_.Id }) } else { @() }
     $script:DockerStorageLoading = $true
     Start-Work -StatusText 'Measuring temporary files, caches and Docker storage...' -Work { @(Get-QpStorageFindings -RefreshDocker) } -OnDone {
         param($storage)
@@ -4245,8 +4321,26 @@ function Load-DockerStorage {
         $script:LastState.Cleanup = @($storage | Where-Object { $_ })
         $script:DockerStorageLoaded = $true
         Update-FromState $script:LastState
+        if ($script:CleanupRestoreTicks) {
+            foreach ($option in @($script:Options['cleanup'])) { $option.CheckBox.IsChecked = ($script:CleanupSelectedIds -contains $option.Id) }
+            Update-TickCount
+        }
+        $script:CleanupRestoreTicks = $false
+        $script:CleanupSelectedIds = @()
+        $script:CleanupLastRefresh = Get-Date
     }
 }
+
+# Keep the visible inventory honest without continuously rescanning the PC. Missing or changed visible
+# items refresh within two seconds; a full pass every minute catches nested cache and Docker changes.
+$script:CleanupRefreshTimer = New-Object System.Windows.Threading.DispatcherTimer
+$script:CleanupRefreshTimer.Interval = [TimeSpan]::FromSeconds(2)
+$script:CleanupRefreshTimer.Add_Tick({
+    if ([string]$ui.Tabs.SelectedItem.Tag -ne 'cleanup' -or -not $script:DockerStorageLoaded -or $script:DockerStorageLoading -or (Test-Busy)) { return }
+    $age = (Get-Date) - $script:CleanupLastRefresh
+    if ($age.TotalSeconds -ge 60 -or (Test-QpStorageSnapshotChanged @($script:StorageFindingsById.Values))) { Load-DockerStorage -Force }
+})
+if (-not $SelfTest) { $script:CleanupRefreshTimer.Start() }
 
 function Update-State {
     $script:DockerStorageLoaded = $false
@@ -5138,7 +5232,7 @@ $ui.Tabs.Add_SelectionChanged({
     param($s, $e)
     if ($e.OriginalSource -eq $ui.Tabs) {
         Update-Buttons; Set-TimerQuick
-        if ([string]$ui.Tabs.SelectedItem.Tag -eq 'cleanup') { Load-DockerStorage }
+        if ([string]$ui.Tabs.SelectedItem.Tag -eq 'cleanup') { Load-DockerStorage -Force }
     }
 })
 # F5 reads the PC again, as in most Windows apps. (If something is already running, the status line says so.)
@@ -5150,6 +5244,7 @@ $window.Add_Closing({
         if ([System.Windows.MessageBox]::Show('Something is still running. Close anyway?', 'Quietpane', 'YesNo', 'Warning') -ne 'Yes') { $e.Cancel = $true; return }
     }
     $timer.Stop()
+    $script:CleanupRefreshTimer.Stop()
     Stop-LiveSampler
 })
 
